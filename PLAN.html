@@ -95,6 +95,8 @@
   section.lv3 .num{color:#4FC3CB}
   section.lv4{background:var(--lv4)}
   section.lv4 .num{color:var(--ok)}
+  section#l5{background:var(--ok-soft)}
+  section#l5 .num{color:var(--ok)}
 
   .sched{display:grid;grid-template-columns:86px minmax(0,1fr);border:1.5px solid var(--line);border-radius:10px;overflow:hidden;margin:16px 0}
   .sched>div{padding:11px 14px;background:var(--paper);border-top:1px solid var(--line)}
@@ -127,6 +129,7 @@
     <a href="#l2">2 · The real parts</a>
     <a href="#l3">3 · Architecture</a>
     <a href="#l4">4 · Run‑sheet</a>
+    <a href="#l5">5 · Overnight report</a>
   </nav>
 </header>
 </div>
@@ -503,6 +506,58 @@ GET  /docs                                                  → OpenAPI, so any 
     <li><strong>Closed / non‑interoperable formats</strong> → tags export as SDRF‑compatible TSV.</li>
     <li><strong>No endpoints for agentic control</strong> → OpenAPI at <code>/docs</code>, optional MCP server.</li>
     <li><strong>Automate drudgery</strong> → the model reads the 20 papers so Charlotte doesn't.</li>
+  </ul>
+</div></section>
+
+<!-- ============================================================ LEVEL 5 -->
+<section class="level lv2" id="l5"><div class="wrap">
+  <div class="lvhead"><div class="num">5</div><div><h2>Overnight: what exists now</h2><p class="lvsub">Built Fri 23:00 → Sat 02:00. Read this first in the morning.</p></div></div>
+
+  <h3>Start it (two commands)</h3>
+<pre><code>cd ~/Coding/Personal/pridemap
+./dev.sh            # API on :8000/docs, web on :3000</code></pre>
+  <p>Repo: <code>github.com/FlynnLachendro/pridemap</code> (private; flip to public Sunday before 10:00). Every file below is committed and pushed. A clean clone + <code>uv run load_demo.py</code> + <code>./dev.sh</code> was tested and works without the crawl.</p>
+
+  <h3>Done</h3>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Piece</th><th>State</th></tr></thead>
+    <tbody>
+      <tr><td>Crawl</td><td>All 422 pages. 41,545 projects in <code>data/pride.db</code> (820 MB, gitignored). Raw MS files never touched.</td></tr>
+      <tr><td>Papers</td><td>Europe PMC Methods sections for the slice: 176 of 296 open access (59%).</td></tr>
+      <tr><td>Tags</td><td>296 datasets tagged (stratified: phospho, DIA, plasma, TMT, SILAC, AP‑MS, PTMs, liver, top downloads). 3,848 evidence rows. Bundled in <code>data/demo/</code>.</td></tr>
+      <tr><td>API</td><td>FastAPI: <code>/search</code>, <code>/ask</code> (with filter relaxation), <code>/map</code>, <code>/dataset/{acc}</code>, <code>/dataset/{acc}/correct</code>, <code>/export.sdrf.tsv</code>, <code>/stats</code>, <code>/docs</code>. All smoke‑tested.</td></tr>
+      <tr><td>Web</td><td>Next.js 16: Ask (chips, fits/watch with evidence expanders), Map (squarified treemap, drill, click‑to‑search), Dataset card (confidence bars, sources, quotes, "wrong?" correction dialog, tested end to end), About. Lint clean, prod build passes.</td></tr>
+      <tr><td>Eval</td><td><code>gold/gold_50.csv</code> ready for Charlotte and Juri (50 rows, blank columns, model values alongside). <code>uv run eval_tags.py</code> prints per‑tag agreement.</td></tr>
+      <tr><td>Docs</td><td>README (run in 3 commands, honesty section), SPEC.md, this PLAN.html, MIT LICENSE.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The one thing I couldn't do: a working API key</h3>
+  <p>The <code>ANTHROPIC_API_KEY</code> in your <code>~/.zshrc</code> returns 401. I didn't read keys from other projects' <code>.env</code> files. So tonight's 296 tags were produced by Claude Sonnet 5 running as Claude Code subagents with the exact prompt and schema in <code>tag.py</code>, then imported with <code>tag_import.py</code>. The README says this plainly. Claude Max covers Claude Code, not the API, so to use <code>tag.py</code> and the Claude path of <code>/ask</code>:</p>
+<pre><code>echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/Coding/Personal/pridemap/.env   # gitignored
+uv run tag.py --accessions data/slice.txt --force --limit 5             # ~$0.03, proves the pipeline
+uv run tag.py --limit 2000                                               # ~$12 on Sonnet 5, ~1 h</code></pre>
+  <p>Without a key everything still works: <code>/ask</code> falls back to a rule‑based parser and says so in the UI.</p>
+
+  <h3>Saturday, adjusted</h3>
+  <div class="sched">
+    <div class="tm">09:00</div><div><b>Walk Levels 1–2 with the team, 20 min.</b> Agree the vocab (<code>VOCAB</code> in <code>tag.py</code>). Agree Charlotte's real demo question.</div>
+    <div class="tm">09:20</div><div><b>Charlotte + Juri: gold set.</b> Open <code>gold/gold_50.csv</code> in Sheets, fill the blank columns, ignore the <code>_model</code> columns until done. <code>gold/README.md</code> has the allowed values.</div>
+    <div class="tm">09:20</div><div><b>Ahmed: map + stories.</b> Pick the treemap preset order; write 3 questions with the answer he'd expect.</div>
+    <div class="tm">09:20</div><div><b>You: API key in <code>.env</code>, then tag 2,000 more</b> while you work. Demo gets richer by lunch.</div>
+    <div class="tm">11:00</div><div><b><code>uv run eval_tags.py</code>.</b> Fix prompt on the worst tag, re‑tag the 50 with <code>--force --accessions gold/accs.txt</code>, repeat once.</div>
+    <div class="tm">12:30</div><div><b>Team tests Ask with real questions.</b> Every "that's wrong" → "wrong?" button so it's recorded.</div>
+    <div class="tm">14:00</div><div><b>Polish + deploy.</b> <code>vercel</code> in <code>web/</code> with <code>NEXT_PUBLIC_API_URL</code> pointing at a tunnel to your laptop (<code>cloudflared tunnel --url localhost:8000</code>), or keep it all local for the demo.</div>
+    <div class="tm">15:15</div><div><b>Dry run the 3‑minute pitch</b> (Level 4 script). Record a backup.</div>
+  </div>
+
+  <h3>Known gaps, honest</h3>
+  <ul>
+    <li>Only 296 of 41,545 datasets tagged. The UI says so on every page. More = run <code>tag.py</code>.</li>
+    <li>The Claude path of <code>/ask</code> is written but untested (no key). The rule parser handled every example question.</li>
+    <li>Multi‑condition datasets (SILAC + TMT, global + phospho) get one value per tag; the agents picked the distinguishing one and quoted the other in evidence.</li>
+    <li>No Vercel deploy yet (you didn't tick it). Local demo is fine; a tunnel takes 2 minutes if wanted.</li>
+    <li><code>created_at</code> on corrections is UTC.</li>
   </ul>
 </div></section>
 
