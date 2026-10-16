@@ -1,0 +1,15 @@
+data/raw/
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+crawl.log
+*.log
+.env
+.env.*
+__pycache__/
+.venv/
+node_modules/
+.next/
+web/.env*
+eval/*.json

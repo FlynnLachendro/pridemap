@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRIDE Map</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root{
+    --bg:#F4F7F8; --paper:#FFFFFF; --ink:#13202A; --ink-2:#4B5B68; --line:#D5DEE3;
+    --teal:#0E7C86; --teal-soft:#D9EEF0; --peak:#D9731A; --peak-soft:#FBE8D6;
+    --mono-bg:#EAF0F2; --warn:#B23A3A; --warn-soft:#F7DEDE; --ok:#2E7D4F; --ok-soft:#DCEFE3;
+    --lv1:#F4F7F8; --lv2:#EEF4F5; --lv3:#0F1A20; --lv3-paper:#17242C; --lv3-ink:#E7EDF1; --lv3-ink2:#A6B4BF; --lv3-line:#2A3842;
+    --lv4:#FBF4EC;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0E151B; --paper:#151E26; --ink:#E7EDF1; --ink-2:#A6B4BF; --line:#2A3842;
+      --teal:#4FC3CB; --teal-soft:#123A3F; --peak:#F0A05A; --peak-soft:#3F2A16;
+      --mono-bg:#1C2730; --warn:#F08080; --warn-soft:#3A1E1E; --ok:#7CCB9A; --ok-soft:#163125;
+      --lv1:#0E151B; --lv2:#101B22; --lv3:#050A0E; --lv3-paper:#0F1A20; --lv4:#1A1410;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0E151B; --paper:#151E26; --ink:#E7EDF1; --ink-2:#A6B4BF; --line:#2A3842;
+    --teal:#4FC3CB; --teal-soft:#123A3F; --peak:#F0A05A; --peak-soft:#3F2A16;
+    --mono-bg:#1C2730; --warn:#F08080; --warn-soft:#3A1E1E; --ok:#7CCB9A; --ok-soft:#163125;
+    --lv1:#0E151B; --lv2:#101B22; --lv3:#050A0E; --lv3-paper:#0F1A20; --lv4:#1A1410;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:"Atkinson Hyperlegible",system-ui,sans-serif;font-size:17px;line-height:1.55;margin:0}
+  .wrap{max-width:76ch;margin:0 auto;padding:0 20px}
+  header.top{padding:40px 0 8px}
+  h1,h2,h3,h4{font-family:"Bricolage Grotesque","Atkinson Hyperlegible",sans-serif;text-wrap:balance;line-height:1.1;margin:0}
+  h1{font-size:46px;font-weight:800;letter-spacing:-.02em}
+  h2{font-size:34px;font-weight:800;letter-spacing:-.01em}
+  h3{font-size:19px;font-weight:700;margin-top:28px}
+  h4{font-size:15px;font-weight:700;margin-top:18px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.08em}
+  p{margin:14px 0}
+  .eyebrow{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--teal);font-weight:700}
+  .sub{color:var(--ink-2);font-size:19px;margin-top:10px}
+  code,.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.88em;background:var(--mono-bg);padding:1px 6px;border-radius:4px}
+  pre{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:13px;line-height:1.5;background:var(--mono-bg);border:1.5px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;margin:14px 0}
+  pre code{background:none;padding:0;font-size:inherit}
+  .levels{display:flex;gap:8px;flex-wrap:wrap;margin:28px 0 24px}
+  .levels a{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border:1.5px solid var(--line);border-radius:999px;color:var(--ink-2);text-decoration:none;font-size:14px;font-weight:700}
+  .levels a:hover,.levels a:focus-visible{border-color:var(--teal);color:var(--teal);outline:none}
+  .fig{background:var(--paper);border:1.5px solid var(--line);border-radius:10px;padding:18px;margin:24px 0;overflow-x:auto}
+  .fig svg{display:block;width:100%;height:auto;min-width:560px}
+  .cap{font-size:14px;color:var(--ink-2);margin:10px 0 0}
+  .defs{display:grid;grid-template-columns:1fr;border:1.5px solid var(--line);border-radius:10px;overflow:hidden;margin:20px 0}
+  .def{display:grid;grid-template-columns:200px minmax(0,1fr);gap:20px;padding:14px 16px;background:var(--paper);border-top:1px solid var(--line);align-items:start}
+  .def>*{min-width:0}
+  .def:first-child{border-top:0}
+  .def b{font-family:"Bricolage Grotesque",sans-serif;font-size:17px}
+  .def small{display:block;color:var(--ink-2);font-size:12.5px;margin-top:4px;font-family:"JetBrains Mono",ui-monospace,monospace;font-weight:400;line-height:1.35}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}
+  .three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin:20px 0}
+  .box{background:var(--paper);border:1.5px solid var(--line);border-radius:10px;padding:16px 18px}
+  .box h3{margin-top:0}
+  .box.bad{border-color:var(--warn)}
+  .box.good{border-color:var(--teal)}
+  .tag{display:inline-block;padding:2px 9px;border-radius:999px;font-size:13px;font-weight:700;background:var(--teal-soft);color:var(--teal);margin:2px 2px 2px 0}
+  .tag.peak{background:var(--peak-soft);color:var(--peak)}
+  .tag.warn{background:var(--warn-soft);color:var(--warn)}
+  .tag.ok{background:var(--ok-soft);color:var(--ok)}
+  ul,ol{padding-left:22px}
+  li{margin:6px 0}
+  .fact{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0}
+  .fact div{background:var(--paper);border:1.5px solid var(--line);border-radius:10px;padding:12px 14px}
+  .fact .n{font-family:"Bricolage Grotesque",sans-serif;font-size:30px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--teal)}
+  .fact .l{font-size:13px;color:var(--ink-2)}
+  table{width:100%;border-collapse:collapse;font-size:14.5px;margin:14px 0}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:"Bricolage Grotesque",sans-serif;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2)}
+  td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+  td:first-child,th:first-child{min-width:150px;white-space:nowrap}
+  td:first-child{font-weight:700}
+  .tblwrap{overflow-x:auto;background:var(--paper);border:1.5px solid var(--line);border-radius:10px;padding:4px 10px}
+  .bars{display:grid;gap:8px;margin:14px 0}
+  .bar{display:grid;grid-template-columns:200px minmax(0,1fr) 56px;gap:10px;align-items:center;font-size:14px}
+  .bar .t{height:14px;background:var(--line);border-radius:7px;overflow:hidden}
+  .bar .t i{display:block;height:100%;background:var(--warn);border-radius:7px}
+  .bar .n{font-variant-numeric:tabular-nums;text-align:right;font-weight:700;color:var(--warn)}
+
+  /* level bands */
+  section.level{padding:56px 0 64px;border-top:3px solid var(--line)}
+  section.level .lvhead{display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:end;margin-bottom:8px}
+  section.level .num{font-family:"Bricolage Grotesque",sans-serif;font-size:92px;font-weight:800;line-height:.8;letter-spacing:-.04em;color:var(--teal);opacity:.9}
+  section.level .lvsub{color:var(--ink-2);font-size:17px;margin:6px 0 0}
+  section.lv1{background:var(--lv1)}
+  section.lv2{background:var(--lv2)}
+  section.lv2 .num{color:var(--peak)}
+  section.lv3{background:var(--lv3);--bg:var(--lv3);--paper:var(--lv3-paper);--ink:var(--lv3-ink);--ink-2:var(--lv3-ink2);--line:var(--lv3-line);--mono-bg:#0B1318;--teal:#4FC3CB;--teal-soft:#123A3F;--peak:#F0A05A;--peak-soft:#3F2A16;--warn:#F08080;--warn-soft:#3A1E1E;--ok:#7CCB9A;--ok-soft:#163125;color:var(--ink)}
+  section.lv3 .num{color:#4FC3CB}
+  section.lv4{background:var(--lv4)}
+  section.lv4 .num{color:var(--ok)}
+
+  .sched{display:grid;grid-template-columns:86px minmax(0,1fr);border:1.5px solid var(--line);border-radius:10px;overflow:hidden;margin:16px 0}
+  .sched>div{padding:11px 14px;background:var(--paper);border-top:1px solid var(--line)}
+  .sched>div:nth-child(-n+2){border-top:0}
+  .sched .tm{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:600;color:var(--ink-2);background:var(--mono-bg)}
+  .sched b{font-family:"Bricolage Grotesque",sans-serif}
+  .who{font-size:12.5px;color:var(--ink-2);margin-left:6px}
+  .who.f{color:var(--teal);font-weight:700}
+  .who.c{color:var(--peak);font-weight:700}
+  .flow{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin:20px 0;align-items:stretch}
+  .flow>div{background:var(--paper);border:1.5px solid var(--line);padding:12px;font-size:13.5px;position:relative;min-width:0}
+  .flow>div:first-child{border-radius:10px 0 0 10px}
+  .flow>div:last-child{border-radius:0 10px 10px 0}
+  .flow>div+div{border-left:0}
+  .flow b{display:block;font-family:"Bricolage Grotesque",sans-serif;font-size:15px;margin-bottom:4px;color:var(--teal)}
+  .flow small{display:block;color:var(--ink-2);font-size:12px;margin-top:6px}
+  .tree{font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.6}
+  @media (max-width:720px){.two,.three,.fact{grid-template-columns:1fr}.def{grid-template-columns:1fr;gap:4px}h1{font-size:36px}.flow{grid-template-columns:1fr 1fr}.flow>div{border-radius:0!important;border-left:1.5px solid var(--line)!important}.bar{grid-template-columns:120px 1fr 48px}section.level .num{font-size:64px}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">Reinvent the Wheel · AI for Science hack · Sat 17 Oct 2026</div>
+  <h1>PRIDE Map</h1>
+  <p class="sub">A better way to find the right mass‑spec dataset. Built with Charlotte Ellison, Juri Westendorf and Ahmed Dawoud (Southampton bioinformatics).</p>
+  <nav class="levels" aria-label="Plan levels">
+    <a href="#l1">1 · What it is</a>
+    <a href="#l2">2 · The real parts</a>
+    <a href="#l3">3 · Architecture</a>
+    <a href="#l4">4 · Run‑sheet</a>
+  </nav>
+</header>
+</div>
+
+<!-- ============================================================ LEVEL 1 -->
+<section class="level lv1" id="l1"><div class="wrap">
+  <div class="lvhead"><div class="num">1</div><div><h2>What this actually is</h2><p class="lvsub">From zero. The real terms the team will use tomorrow, with the obvious bits spelled out.</p></div></div>
+
+  <h3>Start here: proteins, and why anyone cares which ones are present</h3>
+  <p>Every cell in your body is full of <strong>proteins</strong>. They are the molecules that do the actual work: digesting food, carrying oxygen, sending signals, building structure, copying DNA. Your DNA is the list of instructions for making about 20,000 different proteins, but <strong>a given cell only makes some of them, in some amounts, at some times</strong>. A liver cell and a brain cell have the same DNA but make very different sets of proteins. That is what makes them different.</p>
+  <p>So if you want to know what a tissue is doing, or what has gone wrong in a disease, a very direct question is: <strong>which proteins are in it right now, and how much of each?</strong> Most diseases involve proteins behaving differently (too much, too little, modified, missing), and most drugs work by sticking to a protein. The field that measures proteins this way is called <strong>proteomics</strong>. (Genomics measures the DNA instructions. Proteomics measures what was actually built from them.)</p>
+
+  <h3>What "a protein of interest" means</h3>
+  <p>A researcher usually isn't studying all 20,000 proteins. They have a hypothesis about <strong>one</strong>. Something like: <em>"I think protein MFF controls how liver cells respond to insulin, and I think it gets switched on by phosphorylation."</em> That protein is their <strong>protein of interest</strong>. Their questions are concrete: Is MFF actually present in liver? How much? Is it phosphorylated? Does that change in diabetic animals?</p>
+  <p>Answering that with their own experiment means animals, lab time, instrument time, and months. So before doing that, a sensible researcher asks: <strong>has anyone already measured the proteins in mouse liver and published the data?</strong> If so, they can download it and look for MFF in it. The field calls this <strong>reanalysis</strong> or <strong>data reuse</strong>. That's what Charlotte does, and that's why she searches PRIDE.</p>
+
+  <h3>How you measure which proteins are in a sample</h3>
+  <p>The standard method is <strong>mass spectrometry‑based proteomics</strong>. Every dataset in PRIDE came from some version of these steps:</p>
+  <div class="defs">
+    <div class="def"><b>0 · Get a sample<small>organism · tissue · cell line</small></b><div>A piece of tissue (a mouse liver, a human tumour biopsy), a body fluid (blood plasma, urine), or cells grown in a dish (a <strong>cell line</strong> such as HeLa). The sample is from one <strong>organism</strong> (human, mouse, yeast…) and one <strong>tissue</strong> or cell type.</div></div>
+    <div class="def"><b>1 · Extract the proteins<small>PRIDE field: sampleProcessingProtocol</small></b><div>The proteins are inside the cells. You break the cells open (grind the tissue, add a detergent buffer so the cell membranes dissolve), then separate the proteins from everything else that spills out (DNA, fats, sugars). You end up with a tube of mixed proteins and nothing much else. That's "extraction".</div></div>
+    <div class="def"><b>2 · Cut the proteins into peptides<small>enzyme · trypsin</small></b><div>Whole proteins are too big and too varied to measure directly. So you add an <strong>enzyme</strong> that cuts every protein at predictable points into short chains called <strong>peptides</strong> (roughly 7 to 25 building blocks long). The enzyme is almost always <strong>trypsin</strong>, which cuts after two specific building blocks (lysine and arginine, written K and R). Because the cut points are predictable, each peptide can later be traced back to the protein it came from.</div></div>
+    <div class="def"><b>2b · Optional: enrich or fractionate<small>enrichment · fractionation</small></b><div>Sometimes you only care about one kind of peptide, e.g. ones carrying a phosphate group (<strong>phosphorylation</strong>, the most common "on/off switch" on proteins). Then you <strong>enrich</strong>: pull those peptides out and throw the rest away. Or, to see deeper, you <strong>fractionate</strong>: split the mixture into several smaller tubes and measure each separately, so rare peptides aren't drowned out by common ones.</div></div>
+    <div class="def"><b>3 · Run the mass spectrometer<small>LC‑MS/MS · instrument · DDA / DIA</small></b><div>The peptide mixture is pushed through a thin column (<strong>liquid chromatography, LC</strong>) that lets different peptides out at different times, so they don't all arrive at once. Each one flies into the <strong>mass spectrometer</strong> (brands/models: Q Exactive, Orbitrap Fusion Lumos, timsTOF…), which weighs it very precisely, then smashes it and weighs the pieces. That weight‑plus‑fragment‑weights pattern is a <strong>spectrum</strong>; it's a fingerprint of that peptide. One run produces tens of thousands of spectra and a 1 to 2 GB <code>.raw</code> file. The instrument has two main modes: <strong>DDA</strong> (it picks the strongest signals to smash, so weak/rare peptides get skipped) and <strong>DIA</strong> (it smashes everything in windows, so rare peptides are more likely to be seen).</div></div>
+    <div class="def"><b>4 · Search the spectra<small>PRIDE field: dataProcessingProtocol · MaxQuant, Proteome Discoverer, FragPipe, DIA‑NN</small></b><div>Software takes every known protein of that organism (from a reference database such as UniProt), works out what peptides trypsin would cut it into and what their fingerprints would look like, and matches those predictions against the measured spectra. Every match says "this peptide was present, so this protein was present". The output is the thing everyone wants: <strong>a list of identified proteins, usually with how much of each</strong>. Often several thousand proteins per sample.</div></div>
+    <div class="def"><b>5 · Deposit everything in PRIDE<small>dataset · PXD accession</small></b><div>Journals require the lab to upload the raw instrument files, the result tables, and a written description of the sample and the method to a public archive. <strong>PRIDE</strong>, run by EBI near Cambridge, is the biggest. Each upload is one <strong>dataset</strong> (PRIDE also calls it a "project") with an ID like <code>PXD001357</code>. There are 42,108 of them, with 500+ added every month.</div></div>
+  </div>
+
+  <h3>So what is "in" a PRIDE dataset</h3>
+  <ul>
+    <li><strong>The raw files</strong> from the instrument. Huge. We never download these.</li>
+    <li><strong>The result files</strong>: the protein list the lab got.</li>
+    <li><strong>Metadata</strong>: a title, a paragraph describing the study, a paragraph describing the sample prep (<code>sampleProcessingProtocol</code>), a paragraph describing the software search (<code>dataProcessingProtocol</code>), plus a few structured fields: organism, tissue, instrument, sometimes disease and quantification method, and usually a link to the published paper.</li>
+  </ul>
+  <p>The metadata is small (about 6 KB per dataset) and is all we need. The paper's Methods section, which is often free to read on Europe PMC, adds the details the lab didn't bother to type into PRIDE.</p>
+
+  <h3>Why the method decides what you can see</h3>
+  <p>Here is the part that makes dataset choice hard. Two datasets can both be "mouse liver" and one can be useless for Charlotte's question, because the steps above decide which proteins are even detectable:</p>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Term</th><th>What it means</th><th>Why it matters for picking a dataset</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Enrichment</strong></td><td>Pulling out one class of peptide before the run. <em>Phosphoproteomics</em> = enriched for phosphorylated peptides. <em>AP‑MS / IP</em> = pulled down one protein and its partners.</td><td>A phospho‑enriched dataset is excellent for phosphorylation sites and nearly blind to everything else.</td></tr>
+      <tr><td><strong>DDA vs DIA</strong></td><td><em>Data‑dependent acquisition</em>: the instrument picks the most abundant peptides to fragment. <em>Data‑independent</em>: it fragments everything in windows.</td><td>DDA misses low‑abundance proteins. DIA sees more of them. If your protein is rare, DIA is your friend.</td></tr>
+      <tr><td><strong>Label‑free vs TMT / SILAC</strong></td><td>How quantities are measured. Label‑free compares runs directly. TMT tags samples with chemical labels and multiplexes them. SILAC labels via growth medium.</td><td>Changes how you re‑analyse and what "amount" means. TMT ratios are relative, not absolute.</td></tr>
+      <tr><td><strong>Enzyme</strong></td><td>What cut the proteins into peptides. Trypsin cuts after K and R. Lys‑C, chymotrypsin, Glu‑C cut elsewhere.</td><td>A protein with few K/R residues gives trypsin almost nothing to find.</td></tr>
+      <tr><td><strong>Fractionation</strong></td><td>Splitting the sample into several runs (high‑pH reversed phase, SCX, gel bands).</td><td>Fractionated = deeper = more likely to catch a rare protein.</td></tr>
+      <tr><td><strong>Instrument</strong></td><td>Q Exactive, Orbitrap Fusion Lumos, timsTOF…</td><td>Newer and more sensitive instruments find more. A 2010 LTQ dataset is a different tier from a 2024 Astral.</td></tr>
+      <tr><td><strong>Sample type</strong></td><td>Tissue, cell line, primary cells, plasma/serum, urine…</td><td>Plasma is dominated by a few huge proteins (albumin). The same protein is 100× harder to see there than in tissue.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Most of that information is <strong>in the free‑text protocol paragraph or in the paper's Methods section</strong>, not in a field you can filter on. PRIDE's search box can't ask "only phospho‑enriched DIA datasets". That is the whole problem.</p>
+
+  <h3>The picture</h3>
+  <div class="fig">
+    <svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Researcher asks a question, PRIDE archive of datasets, PRIDE Map tags every dataset with standard labels so the right ones come back">
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--ink-2)"/></marker></defs>
+      <g transform="translate(20,40)">
+        <circle cx="40" cy="30" r="18" fill="var(--teal-soft)" stroke="var(--teal)" stroke-width="2"/>
+        <path d="M12 95 Q40 55 68 95 Z" fill="var(--teal-soft)" stroke="var(--teal)" stroke-width="2"/>
+        <text x="40" y="118" text-anchor="middle" font-size="13" font-weight="700" fill="var(--ink)">Charlotte</text>
+        <rect x="-5" y="135" width="150" height="58" rx="8" fill="var(--paper)" stroke="var(--line)" stroke-width="1.5"/>
+        <text x="70" y="158" text-anchor="middle" font-size="12.5" fill="var(--ink)">"Phospho‑MFF in</text>
+        <text x="70" y="176" text-anchor="middle" font-size="12.5" fill="var(--ink)">mouse liver?"</text>
+      </g>
+      <line x1="175" y1="100" x2="235" y2="100" stroke="var(--ink-2)" stroke-width="2" marker-end="url(#arr)"/>
+      <g transform="translate(245,20)">
+        <rect x="0" y="0" width="270" height="200" rx="10" fill="var(--paper)" stroke="var(--line)" stroke-width="1.5"/>
+        <text x="135" y="24" text-anchor="middle" font-size="14" font-weight="800" fill="var(--ink)" font-family="Bricolage Grotesque, sans-serif">PRIDE · 42,108 datasets</text>
+        <g fill="var(--line)">
+          <rect x="18" y="40" width="26" height="26" rx="3"/><rect x="50" y="40" width="26" height="26" rx="3"/><rect x="82" y="40" width="26" height="26" rx="3" fill="var(--peak)"/><rect x="114" y="40" width="26" height="26" rx="3"/><rect x="146" y="40" width="26" height="26" rx="3"/><rect x="178" y="40" width="26" height="26" rx="3"/><rect x="210" y="40" width="26" height="26" rx="3" fill="var(--peak)"/>
+          <rect x="18" y="72" width="26" height="26" rx="3"/><rect x="50" y="72" width="26" height="26" rx="3" fill="var(--peak)"/><rect x="82" y="72" width="26" height="26" rx="3"/><rect x="114" y="72" width="26" height="26" rx="3"/><rect x="146" y="72" width="26" height="26" rx="3"/><rect x="178" y="72" width="26" height="26" rx="3"/><rect x="210" y="72" width="26" height="26" rx="3"/>
+          <rect x="18" y="104" width="26" height="26" rx="3"/><rect x="50" y="104" width="26" height="26" rx="3"/><rect x="82" y="104" width="26" height="26" rx="3"/><rect x="114" y="104" width="26" height="26" rx="3"/><rect x="146" y="104" width="26" height="26" rx="3" fill="var(--peak)"/><rect x="178" y="104" width="26" height="26" rx="3"/><rect x="210" y="104" width="26" height="26" rx="3"/>
+          <rect x="18" y="136" width="26" height="26" rx="3"/><rect x="50" y="136" width="26" height="26" rx="3"/><rect x="82" y="136" width="26" height="26" rx="3"/><rect x="114" y="136" width="26" height="26" rx="3"/><rect x="146" y="136" width="26" height="26" rx="3"/><rect x="178" y="136" width="26" height="26" rx="3"/><rect x="210" y="136" width="26" height="26" rx="3"/>
+        </g>
+        <text x="135" y="186" text-anchor="middle" font-size="12" fill="var(--ink-2)">each: raw files + results + free‑text protocol</text>
+      </g>
+      <g transform="translate(540,30)">
+        <rect x="0" y="0" width="200" height="80" rx="8" fill="var(--paper)" stroke="var(--warn)" stroke-width="1.5"/>
+        <text x="12" y="22" font-size="13" font-weight="800" fill="var(--warn)">TODAY: keyword search</text>
+        <text x="12" y="44" font-size="12" fill="var(--ink)">on free text. Misses fits,</text>
+        <text x="12" y="62" font-size="12" fill="var(--ink)">returns non‑fits, no reason why.</text>
+        <rect x="0" y="100" width="200" height="110" rx="8" fill="var(--paper)" stroke="var(--teal)" stroke-width="2"/>
+        <text x="12" y="122" font-size="13" font-weight="800" fill="var(--teal)">PRIDE MAP</text>
+        <text x="12" y="144" font-size="12" fill="var(--ink)">1. LLM reads protocol + paper</text>
+        <text x="12" y="162" font-size="12" fill="var(--ink)">2. emits standard tags per dataset</text>
+        <text x="12" y="180" font-size="12" fill="var(--ink)">3. map + filters over those tags</text>
+        <text x="12" y="198" font-size="12" fill="var(--ink)">4. ranks by fit, shows evidence</text>
+      </g>
+      <line x1="520" y1="70" x2="535" y2="70" stroke="var(--ink-2)" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="520" y1="155" x2="535" y2="155" stroke="var(--ink-2)" stroke-width="2" marker-end="url(#arr)"/>
+      <g transform="translate(20,250)">
+        <text x="0" y="14" font-size="12" font-weight="700" fill="var(--ink-2)" letter-spacing=".1em">THE TAGS (same vocabulary on every dataset)</text>
+        <g font-size="12" font-weight="700">
+          <rect x="0" y="26" width="76" height="26" rx="13" fill="var(--teal-soft)"/><text x="38" y="43" text-anchor="middle" fill="var(--teal)">organism</text>
+          <rect x="84" y="26" width="64" height="26" rx="13" fill="var(--teal-soft)"/><text x="116" y="43" text-anchor="middle" fill="var(--teal)">tissue</text>
+          <rect x="156" y="26" width="72" height="26" rx="13" fill="var(--teal-soft)"/><text x="192" y="43" text-anchor="middle" fill="var(--teal)">disease</text>
+          <rect x="236" y="26" width="92" height="26" rx="13" fill="var(--peak-soft)"/><text x="282" y="43" text-anchor="middle" fill="var(--peak)">enrichment</text>
+          <rect x="336" y="26" width="90" height="26" rx="13" fill="var(--peak-soft)"/><text x="381" y="43" text-anchor="middle" fill="var(--peak)">DDA / DIA</text>
+          <rect x="434" y="26" width="80" height="26" rx="13" fill="var(--peak-soft)"/><text x="474" y="43" text-anchor="middle" fill="var(--peak)">labelling</text>
+          <rect x="522" y="26" width="76" height="26" rx="13" fill="var(--peak-soft)"/><text x="560" y="43" text-anchor="middle" fill="var(--peak)">enzyme</text>
+          <rect x="606" y="26" width="100" height="26" rx="13" fill="var(--peak-soft)"/><text x="656" y="43" text-anchor="middle" fill="var(--peak)">instrument</text>
+        </g>
+      </g>
+    </svg>
+    <p class="cap">Orange datasets = the ones that can actually answer the question. Orange tags = the method details that decide fit. Today they live in prose, so PRIDE can't filter on them.</p>
+  </div>
+
+  <h3>The two problems Charlotte wrote down</h3>
+  <div class="two">
+    <div class="box bad"><h3>Finding</h3><p>PRIDE's search is keyword matching over free text plus a few dropdown filters (organism, instrument). It misses datasets that fit and returns ones that don't. There is no filter for enrichment, acquisition mode, enzyme or labelling, because those aren't fields.</p></div>
+    <div class="box bad"><h3>Choosing</h3><p>Even with a shortlist of 20, you can't tell which one's sample prep and instrument settings give you a realistic chance of detecting your protein without opening each paper and reading the Methods section. Charlotte did exactly that, by hand.</p></div>
+  </div>
+
+  <h3>What we build (one sentence)</h3>
+  <p><strong>A language model reads each dataset's protocol text and its paper's Methods section, emits a standard set of tags (organism, tissue, enrichment, DDA/DIA, labelling, enzyme, instrument…), and a map + search over those tags lets you ask "which datasets could actually detect protein X in tissue Y?" and see the evidence.</strong></p>
+
+  <h3>Why the download isn't a problem</h3>
+  <div class="fact">
+    <div><div class="n">42,108</div><div class="l">datasets in PRIDE right now</div></div>
+    <div><div class="n">~250 MB</div><div class="l">to grab every dataset's metadata and protocol text. Running on your Mac now.</div></div>
+    <div><div class="n">0 GB</div><div class="l">of raw mass‑spec files we need. We never touch the <code>.raw</code> files.</div></div>
+  </div>
+
+  <h3>One real dataset, so it's concrete</h3>
+  <div class="box">
+    <p><code>PXD001357</code> · "Direct evidence of milk consumption from ancient human dental calculus"</p>
+    <p>PRIDE fields say: <span class="tag">Homo sapiens</span><span class="tag">dental calculus</span><span class="tag">LC‑MS/MS</span><span class="tag">Q Exactive</span>. The protocol text and the paper's Methods (free on Europe PMC) add: <span class="tag peak">FASP prep, modified for degraded samples</span><span class="tag peak">trypsin</span><span class="tag peak">DDA</span><span class="tag peak">label‑free</span><span class="tag peak">no enrichment</span>. The orange ones decide whether it's useful to you, and today you'd have to read the PDF to find out.</p>
+  </div>
+</div></section>
+
+<!-- ============================================================ LEVEL 2 -->
+<section class="level lv2" id="l2"><div class="wrap">
+  <div class="lvhead"><div class="num">2</div><div><h2>The real parts</h2><p class="lvsub">What PRIDE actually gives us, where it's broken, and the exact stickers we'll print. Numbers below are from the first 7,000 datasets already on your Mac.</p></div></div>
+
+  <h3>What one PRIDE record looks like</h3>
+  <p>One GET to <code>/pride/ws/archive/v3/projects?page=N&amp;pageSize=100</code> returns 100 of these. No auth, no rate‑limit drama (3 s per page).</p>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Field</th><th>What it is</th><th>Shape</th><th>Filled</th></tr></thead>
+    <tbody>
+      <tr><td><code>accession</code></td><td>The ID, e.g. PXD001357</td><td>string</td><td class="num">100%</td></tr>
+      <tr><td><code>title</code>, <code>projectDescription</code></td><td>Free text, avg 1,000 chars</td><td>string</td><td class="num">100%</td></tr>
+      <tr><td><code>sampleProcessingProtocol</code></td><td>How the sample was prepped. Avg 1,900 chars. <strong>Gold mine, but prose.</strong></td><td>string</td><td class="num">100%</td></tr>
+      <tr><td><code>dataProcessingProtocol</code></td><td>Search engine, database, FDR. Avg 1,100 chars.</td><td>string</td><td class="num">100%</td></tr>
+      <tr><td><code>organisms</code></td><td>Controlled vocab (NEWT taxonomy)</td><td>CvParam[]</td><td class="num">100%</td></tr>
+      <tr><td><code>organismParts</code></td><td>Tissue / cell type (BTO ontology)</td><td>CvParam[]</td><td class="num">77%</td></tr>
+      <tr><td><code>diseases</code></td><td>Disease ontology term</td><td>CvParam[]</td><td class="num">34%</td></tr>
+      <tr><td><code>instruments</code></td><td>Mass spec model (PSI‑MS ontology)</td><td>CvParam[]</td><td class="num">100%</td></tr>
+      <tr><td><code>experimentTypes</code></td><td>"Shotgun", "Bottom‑up", "DDA", "DIA", "AP‑MS"… inconsistent granularity</td><td>CvParam[]</td><td class="num">100%</td></tr>
+      <tr><td><code>quantificationMethods</code></td><td>TMT / label‑free / SILAC / spectral counting</td><td>CvParam[]</td><td class="num">54%</td></tr>
+      <tr><td><code>softwares</code></td><td>MaxQuant, Mascot, Proteome Discoverer…</td><td>CvParam[]</td><td class="num">83%</td></tr>
+      <tr><td><code>identifiedPTMStrings</code></td><td>Modifications searched for (UNIMOD / PSI‑MOD)</td><td>CvParam[]</td><td class="num">most</td></tr>
+      <tr><td><code>references[].pubmedID</code></td><td>Link to the paper</td><td>int</td><td class="num">79%</td></tr>
+      <tr><td><code>keywords</code>, <code>projectTags</code></td><td>Submitter free text; "Biological", "Technical", "Covid‑19"</td><td>string[]</td><td class="num">100%</td></tr>
+      <tr><td><code>submissionDate</code>, <code>publicationDate</code></td><td>Dates</td><td>yyyy‑mm‑dd</td><td class="num">100%</td></tr>
+      <tr><td><code>totalFileDownloads</code>, <code>organicCount</code></td><td>Popularity (PRIDE already strips bot hits)</td><td>int</td><td class="num">100%</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Where it's broken (the gap we fill)</h3>
+  <div class="box">
+    <h4>Structured field is empty</h4>
+    <div class="bars">
+      <div class="bar"><span>Disease</span><div class="t"><i style="width:66%"></i></div><span class="n">66%</span></div>
+      <div class="bar"><span>Quantification method</span><div class="t"><i style="width:46%"></i></div><span class="n">46%</span></div>
+      <div class="bar"><span>Tissue / cell type</span><div class="t"><i style="width:23%"></i></div><span class="n">23%</span></div>
+      <div class="bar"><span>Paper link</span><div class="t"><i style="width:21%"></i></div><span class="n">21%</span></div>
+      <div class="bar"><span>Software</span><div class="t"><i style="width:17%"></i></div><span class="n">17%</span></div>
+    </div>
+    <h4>Field doesn't exist at all</h4>
+    <p>Enzyme, labelling, acquisition mode (DDA vs DIA), enrichment (phospho, ubiquitin, glyco), fractionation, cell line, sample amount, number of proteins identified. All in the prose, or only in the paper.</p>
+    <h4>Keyword search lies</h4>
+    <ul>
+      <li>Searching "DIA" in text hits <strong>2,908 of 7,000</strong> datasets. With word boundaries: 134. Via the structured field: 68. ("media", "dialysis", "immediately"…)</li>
+      <li>43 datasets say "murine" in the text but the organism field doesn't say mouse. Search for mouse, miss them.</li>
+      <li>"Shotgun proteomics" (3,668) and "Bottom‑up proteomics" (1,152) are the same thing tagged two ways.</li>
+    </ul>
+  </div>
+
+  <h3>The stickers: our tag schema</h3>
+  <p>Aligned with SDRF‑Proteomics (the official sample‑metadata standard that almost nobody fills in) so a bioinformatician recognises every field. Each tag carries a <strong>value</strong>, a <strong>confidence</strong>, the <strong>evidence quote</strong>, and the <strong>source</strong> (metadata or paper). The evidence is what makes the UI trustworthy.</p>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Tag</th><th>Allowed values (closed list)</th><th>Why it decides fit</th></tr></thead>
+    <tbody>
+      <tr><td><code>organism</code></td><td>NCBI taxon name + id</td><td>Obvious</td></tr>
+      <tr><td><code>sample_type</code></td><td>tissue · cell_line · primary_cells · biofluid · organism_whole · environmental · other</td><td>Plasma vs tissue changes what's detectable by 100×</td></tr>
+      <tr><td><code>tissue</code></td><td>BTO/UBERON term, or null</td><td>Your protein has to be expressed there</td></tr>
+      <tr><td><code>cell_line</code></td><td>Cellosaurus name, or null</td><td>Same</td></tr>
+      <tr><td><code>disease</code></td><td>Term, or "disease free", or null</td><td>Use case: Charlotte wants matched controls</td></tr>
+      <tr><td><code>enrichment</code></td><td>none · phospho · ubiquitin · glyco · acetyl · AP‑MS/IP · proximity‑labelling · secretome · membrane · other</td><td><strong>The big one.</strong> A phospho‑enriched set barely sees unmodified proteins</td></tr>
+      <tr><td><code>acquisition</code></td><td>DDA · DIA · PRM/SRM · top‑down · MALDI · other</td><td>DIA = better coverage of low‑abundance; PRM = only the targets they chose</td></tr>
+      <tr><td><code>labelling</code></td><td>label‑free · TMT · iTRAQ · SILAC · dimethyl · other</td><td>Determines how you'd reanalyse / compare</td></tr>
+      <tr><td><code>enzyme</code></td><td>trypsin · trypsin/Lys‑C · Lys‑C · chymotrypsin · Glu‑C · Asp‑N · none · other</td><td>Wrong enzyme = your protein gives no detectable peptides</td></tr>
+      <tr><td><code>fractionation</code></td><td>none · high‑pH RP · SCX · SDS‑PAGE/gel · other</td><td>Fractionated = deeper, more likely to see rare proteins</td></tr>
+      <tr><td><code>instrument_family</code></td><td>Orbitrap · timsTOF · Q‑TOF · triple‑quad · FT‑ICR · ion‑trap · other</td><td>Age / sensitivity proxy</td></tr>
+      <tr><td><code>depth_proteins</code></td><td>integer or null ("identified 7,842 proteins")</td><td>Direct sensitivity signal when stated</td></tr>
+      <tr><td><code>search_engine</code></td><td>MaxQuant · Proteome Discoverer · FragPipe · DIA‑NN · Spectronaut · Mascot · other</td><td>Tells you how easy re‑analysis is</td></tr>
+      <tr><td><code>summary_one_line</code></td><td>free text, ≤140 chars</td><td>The human‑readable card</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Worked example: what the model emits for PXD001357</h3>
+<pre><code>{
+  "accession": "PXD001357",
+  "organism": {"value": "Homo sapiens", "taxon_id": 9606, "confidence": 0.99,
+               "source": "metadata", "evidence": "organisms: Homo sapiens (human)"},
+  "sample_type": {"value": "other", "confidence": 0.9, "source": "paper",
+               "evidence": "archaeological dental calculus"},
+  "enrichment": {"value": "none", "confidence": 0.85, "source": "metadata",
+               "evidence": "filter-aided sample preparation (FASP) ... tryptic peptides"},
+  "acquisition": {"value": "DDA", "confidence": 0.8, "source": "paper",
+               "evidence": "top 10 most intense ions selected for HCD fragmentation"},
+  "labelling":  {"value": "label-free", "confidence": 0.9, "source": "paper",
+               "evidence": "no isobaric or metabolic labelling described"},
+  "enzyme":     {"value": "trypsin", "confidence": 0.95, "source": "metadata",
+               "evidence": "Tryptic peptides were extracted"},
+  "instrument_family": {"value": "Orbitrap", "confidence": 0.99, "source": "metadata",
+               "evidence": "Q Exactive; LTQ Orbitrap Elite"},
+  "depth_proteins": {"value": null, "confidence": 0.5, "source": "none", "evidence": ""},
+  "summary_one_line": "Ancient human dental calculus, FASP + trypsin, label-free DDA on Q Exactive; looking for milk proteins (BLG)."
+}</code></pre>
+
+  <h3>What a user actually does</h3>
+  <div class="two">
+    <div class="box good">
+      <h3>Ask</h3>
+      <p>"I want to validate phosphorylated MFF in mouse liver. Which datasets give me the best shot?"</p>
+      <p>→ model turns that into filters: <span class="tag">organism = mouse</span><span class="tag">tissue = liver</span><span class="tag peak">enrichment = phospho</span><span class="tag peak">acquisition = DDA or DIA</span> and ranks what's left by depth, recency, downloads.</p>
+    </div>
+    <div class="box good">
+      <h3>Get back</h3>
+      <p><code>PXD049957</code> · Phosphoproteomics of active AKT in liver · <span class="tag ok">fits: phospho‑enriched, mouse liver, TiO₂, Q Exactive HF</span> <span class="tag warn">watch: TMT‑labelled, so ratios not absolute</span></p>
+      <p>Every "fits" and "watch" links to the sentence it came from. That's the trust layer PRIDE doesn't have.</p>
+    </div>
+  </div>
+
+  <h3>Ahmed's idea: split PRIDE into chunks</h3>
+  <p>Same tags, different view. Treemap: organism → sample type → enrichment → acquisition. Click a chunk to drill. The map shows at a glance that 40% of PRIDE is human, 14% mouse, and that phospho datasets in mouse liver are a few dozen boxes, not a few thousand. Finding becomes browsing.</p>
+</div></section>
+
+<!-- ============================================================ LEVEL 3 -->
+<section class="level lv3" id="l3"><div class="wrap">
+  <div class="lvhead"><div class="num">3</div><div><h2>Architecture</h2><p class="lvsub">Six boxes, one direction. Python for the data, Claude for the tagging, Next.js for the face.</p></div></div>
+
+  <div class="flow">
+    <div><b>1 · Crawl</b>PRIDE v3 REST, 100/page, 422 pages<small>crawl_pride.py · running now · ~250 MB JSON</small></div>
+    <div><b>2 · Normalise</b>Flatten CvParams, dedupe synonyms, load SQLite<small>build_db.py · projects table + FTS5</small></div>
+    <div><b>3 · Enrich</b>PubMed ID → Europe PMC → Methods section text<small>fetch_methods.py · only open‑access, ~60%</small></div>
+    <div><b>4 · Tag</b>Claude reads metadata + methods → schema JSON<small>tag.py · Batches API · structured output</small></div>
+    <div><b>5 · Serve</b>FastAPI: /search, /ask, /map, /dataset/{id}<small>api/ · uvicorn · SQLite read‑only</small></div>
+    <div><b>6 · Face</b>Next.js: Ask · Map · Dataset card<small>web/ · Vercel · Tailwind + shadcn</small></div>
+  </div>
+
+  <h3>Stack and why</h3>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Layer</th><th>Pick</th><th>Why (hackathon reasons)</th></tr></thead>
+    <tbody>
+      <tr><td>Scripts</td><td>Python + <code>uv</code>, PEP 723 inline deps</td><td>One file per step, no venv, <code>uv run x.py</code>. Judges can run it.</td></tr>
+      <tr><td>Store</td><td>SQLite + FTS5, one file <code>pride.db</code></td><td>42k rows is nothing. Ships in the repo (~150 MB) or via a release asset. No Postgres to provision at 9am.</td></tr>
+      <tr><td>Tagger</td><td>Claude Sonnet 5 via Message Batches, <code>output_config.format</code> JSON schema</td><td>Batches = 50% off and no rate‑limit babysitting. Structured output = no JSON parsing failures. System prompt cached.</td></tr>
+      <tr><td>Query understanding</td><td>Claude Opus 5, effort low, same schema</td><td>One call per user question, turns prose into filters. Cheap, fast, and the UI shows the filters so the user can edit them.</td></tr>
+      <tr><td>API</td><td>FastAPI</td><td>Typed, auto‑docs at <code>/docs</code> (that <em>is</em> the "endpoints for agentic control" the brief asks for). Add an MCP server over the same functions if time.</td></tr>
+      <tr><td>UI</td><td>Next.js + Tailwind + shadcn, deployed on Vercel</td><td>Your muscle memory. Treemap via Recharts or D3.</td></tr>
+      <tr><td>Licence</td><td>MIT, public repo by Sunday 12:00</td><td>Hackathon rule.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Data model</h3>
+<pre><code>projects        accession PK, title, description, sample_protocol, data_protocol,
+                organisms_json, organism_parts_json, diseases_json, instruments_json,
+                experiment_types_json, quant_json, software_json, ptms_json,
+                keywords_json, pubmed_id, doi, submission_date, publication_date,
+                downloads, raw_json
+papers          pubmed_id PK, pmcid, is_open_access, methods_text, fetched_at
+tags            accession PK, organism, taxon_id, sample_type, tissue, cell_line, disease,
+                enrichment, acquisition, labelling, enzyme, fractionation,
+                instrument_family, depth_proteins, search_engine, summary_one_line,
+                model, tagged_at
+tag_evidence    accession, tag, value, confidence, source, evidence   (one row per tag)
+projects_fts    FTS5 over title + description + protocols</code></pre>
+
+  <h3>The tagger, precisely</h3>
+  <ul>
+    <li><strong>Input per dataset:</strong> title, description, both protocols, structured fields rendered as text, plus the Methods section if open access. ~3,500 tokens.</li>
+    <li><strong>System prompt:</strong> the schema with allowed values, five worked examples (Charlotte and Juri write these Saturday 09:30), the rule "say null and low confidence rather than guess". Cached with <code>cache_control</code>.</li>
+    <li><strong>Output:</strong> the JSON above, enforced via <code>output_config.format</code> with a strict schema. No regex, no retries for malformed JSON.</li>
+    <li><strong>Cost:</strong> Sonnet 5 batch ≈ $0.0055 per dataset → 5,000 datasets ≈ $28, all 42k ≈ $230. Haiku 4.5 halves that. Decision: tag the 5,000 most‑downloaded human + mouse datasets tonight on Sonnet 5, run the rest overnight on Haiku if the Sonnet labels look good.</li>
+    <li><strong>Eval (your Hamming background, use it):</strong> Charlotte + Juri hand‑label 50 datasets Saturday morning. Script reports per‑tag agreement. That number goes on the demo slide. If enrichment agreement &lt; 85%, fix the prompt, re‑run those 50, repeat.</li>
+    <li><strong>Note:</strong> Claude Max 20x covers Claude Code, not the API. Tagging needs an API key with credits. Budget $50.</li>
+  </ul>
+
+  <h3>The three screens</h3>
+  <div class="three">
+    <div class="box"><h3>Ask</h3><p>One text box. Below it the filter chips the model extracted (editable). Below that a ranked list: one‑line summary, green "fits" chips, amber "watch" chips, each chip expands to its evidence sentence. Link out to PRIDE and the paper.</p></div>
+    <div class="box"><h3>Map</h3><p>Treemap of all tagged datasets. Drill organism → sample type → enrichment → acquisition. Clicking a leaf drops you into Ask with those filters set. This is Ahmed's "PRIDE in chunks".</p></div>
+    <div class="box"><h3>Dataset</h3><p>The catalogue card: every tag with confidence and the quote it came from, the PRIDE fields it was derived from, download size, paper link. "Report a wrong tag" button writes to a corrections table, so the eval loop continues after the hack.</p></div>
+  </div>
+
+  <h3>Endpoints</h3>
+<pre><code>GET  /search?organism=mouse&amp;enrichment=phospho&amp;tissue=liver&amp;since=2020   → ranked list
+POST /ask   {"q": "phospho MFF in mouse liver"}            → {filters, results, explanation}
+GET  /map?by=organism,sample_type,enrichment                → nested counts for treemap
+GET  /dataset/PXD049957                                     → tags + evidence + raw PRIDE fields
+GET  /docs                                                  → OpenAPI, so any agent can drive it</code></pre>
+
+  <h3>Repo</h3>
+<pre class="tree">pridemap/
+├── crawl_pride.py        # step 1 (done tonight)
+├── build_db.py           # step 2
+├── fetch_methods.py      # step 3
+├── tag.py                # step 4 — batch submit + collect
+├── eval_tags.py          # gold set agreement report
+├── api/                  # FastAPI
+├── web/                  # Next.js
+├── data/raw/             # 422 JSON pages (gitignored)
+├── data/pride.db         # the product
+├── gold/gold_50.csv      # Charlotte + Juri's labels
+└── README.md             # how to run everything in 3 commands</pre>
+</div></section>
+
+<!-- ============================================================ LEVEL 4 -->
+<section class="level lv4" id="l4"><div class="wrap">
+  <div class="lvhead"><div class="num">4</div><div><h2>Run‑sheet</h2><p class="lvsub">Tonight, Saturday 09:00–16:00, Sunday. Owners: <span class="who f">F</span> Flynn · <span class="who c">C/J/A</span> Charlotte, Juri, Ahmed.</p></div></div>
+
+  <h3>Tonight (Fri)</h3>
+  <div class="sched">
+    <div class="tm">now</div><div><b>Crawl runs</b> <span class="who f">F</span><br>422 pages into <code>data/raw/</code>. Done by ~00:15. Nothing to do.</div>
+    <div class="tm">23:30</div><div><b>build_db.py</b> <span class="who f">F</span><br>Flatten → SQLite + FTS5. Run on whatever pages exist; idempotent, re‑run in the morning.</div>
+    <div class="tm">00:00</div><div><b>fetch_methods.py</b> <span class="who f">F</span><br>For each PubMed ID: Europe PMC search → if open access, pull <code>fullTextXML</code>, extract the Methods section. Async, 10 concurrent, polite. Start it and sleep.</div>
+    <div class="tm">00:30</div><div><b>tag.py v0</b> <span class="who f">F</span><br>Schema + system prompt + batch submit. Run on 200 datasets (not 5,000) so you can eyeball output in the morning before spending money.</div>
+    <div class="tm">01:00</div><div><b>Scaffold</b> <span class="who f">F</span><br><code>api/</code> with /search and /dataset wired to SQLite. <code>web/</code> with the Ask page skeleton. Push repo (private for now). Stop.</div>
+  </div>
+
+  <h3>Saturday</h3>
+  <div class="sched">
+    <div class="tm">09:00</div><div><b>Align (20 min, no laptops)</b> <span class="who f">F</span> <span class="who c">C/J/A</span><br>Walk Level 1 + 2 of this page. Agree the tag list and allowed values. Agree the demo question (Charlotte's real one).</div>
+    <div class="tm">09:20</div><div><b>Gold set</b> <span class="who c">C/J</span><br>Google Sheet, 50 accessions (I'll pre‑pick a spread: human/mouse, phospho/none, DDA/DIA, with/without paper). They fill the tags by hand. Target done by 11:00.</div>
+    <div class="tm">09:20</div><div><b>Map taxonomy + demo stories</b> <span class="who c">A</span><br>Ahmed decides the drill order for the treemap and writes 3 example questions + what a good answer looks like.</div>
+    <div class="tm">09:20</div><div><b>Review the 200 tags</b> <span class="who f">F</span><br>Fix prompt from what's wrong. Add the 5 worked examples from C/J. Submit the 5,000 batch by 10:00 (takes ~1 h to return).</div>
+    <div class="tm">10:00</div><div><b>/ask endpoint</b> <span class="who f">F</span><br>Opus 5 low effort: question → filters JSON (same schema) + ranking. Ranking = filter match × depth × recency × log(downloads).</div>
+    <div class="tm">11:00</div><div><b>eval_tags.py</b> <span class="who f">F</span><br>Gold vs model, per‑tag agreement. Print the table. Iterate the prompt on misses until 12:00, re‑tag only the 50.</div>
+    <div class="tm">12:00</div><div><b>Lunch + Ask page end to end</b> <span class="who f">F</span><br>Wire /ask to the UI. Chips, ranked list, evidence expanders. C/J test with real questions and shout at what's wrong.</div>
+    <div class="tm">13:30</div><div><b>Map page</b> <span class="who f">F</span><br>/map endpoint + treemap. Click leaf → Ask prefilled. Ahmed drives the UX.</div>
+    <div class="tm">14:30</div><div><b>Dataset card + deploy</b> <span class="who f">F</span><br>Card page. Vercel deploy for web, API on Fly/Railway or a laptop + tunnel. Public repo + MIT licence.</div>
+    <div class="tm">15:15</div><div><b>Demo dry run</b> <span class="who f">F</span> <span class="who c">C/J/A</span><br>3 minutes, Charlotte presents the science, you drive. Record a backup screen capture.</div>
+    <div class="tm">16:00</div><div><b>Stop.</b> If the 42k Haiku batch is worth running, submit it and let it finish overnight.</div>
+  </div>
+
+  <h3>Sunday (demo day)</h3>
+  <ol>
+    <li><strong>The problem in 30 s</strong> (Charlotte): "I needed a dataset to validate a protein. PRIDE search gave me 800 hits. I opened 20 papers. Three were usable."</li>
+    <li><strong>The old way</strong> (10 s): PRIDE search for the same question, live. Show the noise.</li>
+    <li><strong>Ask</strong> (60 s): same question in PRIDE Map. Chips appear. Ranked list. Open one "watch" chip, show the sentence from the paper.</li>
+    <li><strong>Map</strong> (30 s): zoom from all of PRIDE to the few dozen boxes that matter.</li>
+    <li><strong>Trust</strong> (30 s): the eval table. "Agrees with two bioinformaticians on N% of tags across 50 datasets."</li>
+    <li><strong>Open</strong> (20 s): repo, MIT, <code>/docs</code> so any agent can call it. "Three commands to rebuild from PRIDE."</li>
+  </ol>
+
+  <h3>Risks and the fallback for each</h3>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Risk</th><th>Fallback</th></tr></thead>
+    <tbody>
+      <tr><td>Europe PMC full text is slow or mostly paywalled</td><td>Tag from PRIDE metadata only (protocols are 3,000 chars already). Papers become a "+ paper" bonus on the card.</td></tr>
+      <tr><td>Batch API takes longer than an hour</td><td>Submit in 500‑dataset chunks from 09:30; demo on whatever has returned. 1,000 tagged datasets is plenty to demo.</td></tr>
+      <tr><td>Tag agreement is poor</td><td>Drop the weakest tag from the UI rather than ship a wrong one. Show confidence on every chip either way.</td></tr>
+      <tr><td>API hosting at 15:00</td><td>Run FastAPI on your laptop, Cloudflare tunnel, done. Judges never know.</td></tr>
+      <tr><td>Team wants to pivot scope at 09:00</td><td>This page. Level 1 + 2 are the contract; only Level 3 details move.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Judging criteria from the brief, and how we hit each</h3>
+  <ul>
+    <li><strong>Hard to use</strong> → one text box replaces a 12‑facet form.</li>
+    <li><strong>Bottleneck in day‑to‑day research</strong> → dataset selection is weeks of wasted analysis when wrong.</li>
+    <li><strong>Closed / non‑interoperable formats</strong> → tags export as SDRF‑compatible TSV.</li>
+    <li><strong>No endpoints for agentic control</strong> → OpenAPI at <code>/docs</code>, optional MCP server.</li>
+    <li><strong>Automate drudgery</strong> → the model reads the 20 papers so Charlotte doesn't.</li>
+  </ul>
+</div></section>
+
+</body>
+</html>
