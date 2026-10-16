@@ -283,8 +283,26 @@ wants_unmodified=true if they want total/unmodified protein rather than a modifi
 Also write interpretation: one sentence saying how you read the question."""
 
 
-class AskOut(Filters):
-    interpretation: str = ""
+class AskOut(BaseModel):
+    """Flat, all-required schema: structured outputs reject many defaulted/optional fields as 'too complex'."""
+    organism: Optional[str]
+    sample_type: Optional[str]
+    tissue: Optional[str]
+    cell_line: Optional[str]
+    disease: Optional[str]
+    enrichment: Optional[str]
+    acquisition: Optional[str]
+    labelling: Optional[str]
+    enzyme: Optional[str]
+    fractionation: Optional[str]
+    instrument_family: Optional[str]
+    search_engine: Optional[str]
+    since: Optional[int]
+    q: Optional[str]
+    low_abundance: bool
+    wants_absolute_quant: bool
+    wants_unmodified: bool
+    interpretation: str
 
 
 def llm_parse(q: str) -> Optional[AskOut]:
@@ -292,13 +310,18 @@ def llm_parse(q: str) -> Optional[AskOut]:
         return None
     try:
         import anthropic
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(timeout=60, max_retries=1)
         msg = client.messages.parse(
             model=os.environ.get("ASK_MODEL", "claude-sonnet-5"), max_tokens=1000,
             output_config={"effort": "low"},
             system=ASK_SYSTEM, messages=[{"role": "user", "content": q}], output_format=AskOut,
         )
-        return msg.parsed_output
+        out = msg.parsed_output
+        # drop values outside the closed vocab rather than 500 on a bad filter
+        for k, allowed in VOCAB.items():
+            if getattr(out, k) not in (None, *allowed):
+                setattr(out, k, None)
+        return out
     except Exception as e:  # fall back to rules; never 500 the demo
         print("llm_parse failed:", e, file=sys.stderr)
         return None
