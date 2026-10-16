@@ -1,5 +1,6 @@
 data/raw/
 data/*.db
+!data/demo/
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm

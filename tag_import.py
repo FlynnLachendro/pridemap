@@ -26,7 +26,7 @@ def main():
              d["disease"]["value"], d["enrichment"]["value"], d["acquisition"]["value"], d["labelling"]["value"], d["enzyme"]["value"],
              d["fractionation"]["value"], d["instrument_family"]["value"],
              int(d["depth_proteins"]["value"]) if (d["depth_proteins"]["value"] or "").isdigit() else None,
-             d["search_engine"]["value"], d["summary_one_line"], a.model, dt.datetime.utcnow().isoformat(), None, None, json.dumps(d)))
+             d["search_engine"]["value"], d["summary_one_line"], a.model, dt.datetime.now(dt.UTC).isoformat(), None, None, json.dumps(d)))
         con.execute("DELETE FROM tag_evidence WHERE accession=?", (acc,))
         for k, v in d.items():
             if isinstance(v, dict) and "value" in v:

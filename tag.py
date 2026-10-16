@@ -21,7 +21,6 @@ import sys
 import threading
 from typing import Literal, Optional
 
-import anthropic
 from pydantic import BaseModel, Field
 
 ROOT = pathlib.Path(__file__).parent
@@ -153,7 +152,7 @@ def load(con, accessions, limit, force):
     return [dict(zip(cols, r)) for r in con.execute(q, params)]
 
 
-def tag_one(client: anthropic.Anthropic, model: str, p: dict):
+def tag_one(client, model: str, p: dict):
     msg = client.messages.parse(
         model=model,
         max_tokens=4000,
@@ -191,6 +190,7 @@ def main():
         return
     if not rows:
         return
+    import anthropic
     client = anthropic.Anthropic()
     lock = threading.Lock()
     tin = tout = done = 0
@@ -217,7 +217,7 @@ def main():
                      d["labelling"]["value"], d["enzyme"]["value"], d["fractionation"]["value"],
                      d["instrument_family"]["value"],
                      int(d["depth_proteins"]["value"]) if (d["depth_proteins"]["value"] or "").isdigit() else None,
-                     d["search_engine"]["value"], d["summary_one_line"], a.model, dt.datetime.utcnow().isoformat(),
+                     d["search_engine"]["value"], d["summary_one_line"], a.model, dt.datetime.now(dt.UTC).isoformat(),
                      usage.input_tokens, usage.output_tokens, json.dumps(d)),
                 )
                 con.execute("DELETE FROM tag_evidence WHERE accession=?", (acc,))

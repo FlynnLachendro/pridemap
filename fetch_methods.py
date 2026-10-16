@@ -109,7 +109,7 @@ async def main(limit, accessions, concurrency):
             pmid, pmcid, is_oa, title, methods, err = await coro
             con.execute(
                 "INSERT OR REPLACE INTO papers VALUES (?,?,?,?,?,?,?)",
-                (pmid, pmcid, is_oa, title, methods, dt.datetime.utcnow().isoformat(), err),
+                (pmid, pmcid, is_oa, title, methods, dt.datetime.now(dt.UTC).isoformat(), err),
             )
             done += 1
             oa += 1 if methods else 0
