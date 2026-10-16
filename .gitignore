@@ -13,3 +13,6 @@ node_modules/
 .next/
 web/.env*
 eval/*.json
+data/inputs/
+data/tags_json/
+data/chunks/
