@@ -80,7 +80,8 @@ export function MapView() {
   const [path, setPath] = useState<MapNode[]>([]);
   const [hover, setHover] = useState<string | null>(null);
 
-  useEffect(() => { setPath([]); map(by).then((r) => setTree(r.tree)).catch(() => setTree(null)); }, [by]);
+  useEffect(() => { map(by).then((r) => setTree(r.tree)).catch(() => setTree(null)); }, [by]);
+  const choosePreset = (b: string) => { setBy(b); setPath([]); };
   const levels = by.split(",");
   const root = path.length ? path[path.length - 1] : tree;
   const W = 1000, H = 560;
@@ -108,7 +109,7 @@ export function MapView() {
     <div className="grid gap-3">
       <div className="flex flex-wrap gap-1.5 text-xs">
         {PRESETS.map((p) => (
-          <button key={p.by} type="button" onClick={() => setBy(p.by)} className={`rounded-full border px-2.5 py-1 ${p.by === by ? "bg-teal-soft text-teal border-teal font-bold" : "hover:bg-secondary"}`}>{p.label}</button>
+          <button key={p.by} type="button" onClick={() => choosePreset(p.by)} className={`rounded-full border px-2.5 py-1 ${p.by === by ? "bg-teal-soft text-teal border-teal font-bold" : "hover:bg-secondary"}`}>{p.label}</button>
         ))}
       </div>
       <div className="flex items-center gap-1 text-sm flex-wrap">

@@ -37,8 +37,7 @@ export function Ask({ stats }: { stats: Stats | null }) {
         } catch (e) { setErr(String(e)); }
       });
     } else if (qq) {
-      setQ(qq);
-      run(qq);
+      run(qq); // q state is already initialised from the URL
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
