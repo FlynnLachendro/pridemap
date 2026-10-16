@@ -31,7 +31,7 @@ if _env.exists():
     for _line in _env.read_text().splitlines():
         if "=" in _line and not _line.startswith("#"):
             _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+            os.environ[_k.strip()] = _v.strip().strip("'\"")  # project .env beats a stale global export
 PRICE = {  # $/MTok input, output
     "claude-sonnet-5": (2.0, 10.0),
     "claude-haiku-4-5": (1.0, 5.0),
