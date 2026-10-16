@@ -532,7 +532,7 @@ GET  /docs                                                  → OpenAPI, so any 
     </tbody>
   </table></div>
 
-  <h3>The one thing I couldn't do: a working API key</h3>
+  <h3>API key: sorted at 01:00</h3>
   <p>The <code>ANTHROPIC_API_KEY</code> in your <code>~/.zshrc</code> returns 401. I didn't read keys from other projects' <code>.env</code> files. So tonight's 296 tags were produced by Claude Sonnet 5 running as Claude Code subagents with the exact prompt and schema in <code>tag.py</code>, then imported with <code>tag_import.py</code>. The README says this plainly. Claude Max covers Claude Code, not the API, so to use <code>tag.py</code> and the Claude path of <code>/ask</code>:</p>
 <pre><code>echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/Coding/Personal/pridemap/.env   # gitignored
 uv run tag.py --accessions data/slice.txt --force --limit 5             # ~$0.03, proves the pipeline
@@ -554,7 +554,7 @@ uv run tag.py --limit 2000                                               # ~$12 
   <h3>Known gaps, honest</h3>
   <ul>
     <li>Only 296 of 41,545 datasets tagged. The UI says so on every page. More = run <code>tag.py</code>.</li>
-    <li>The Claude path of <code>/ask</code> is written but untested (no key). The rule parser handled every example question.</li>
+    <li>The Claude path of <code>/ask</code> is now tested and live (Sat 01:10): a key from your "Default" org is in <code>.env</code>, $44 credit, ~2.5 s per question. The rule parser still covers the no‑key case.</li>
     <li>Multi‑condition datasets (SILAC + TMT, global + phospho) get one value per tag; the agents picked the distinguishing one and quoted the other in evidence.</li>
     <li>No Vercel deploy yet (you didn't tick it). Local demo is fine; a tunnel takes 2 minutes if wanted.</li>
     <li><code>created_at</code> on corrections is UTC.</li>

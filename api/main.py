@@ -160,6 +160,8 @@ def search(con, f: Filters, limit=25, offset=0):
             + 0.3 * avg_conf
         )
         fits, watch = reasons(r, ev, f)
+        score -= 0.25 * sum(1 for w in watch if not w["text"].endswith("is a low-confidence tag"))  # real mismatches cost rank
+        score -= 0.05 * sum(1 for w in watch if w["text"].endswith("is a low-confidence tag"))
         results.append({
             "accession": r["accession"], "title": r["title"], "summary": r.get("summary_one_line"),
             "publication_date": r.get("publication_date"), "downloads": r.get("organic_downloads"),
@@ -211,7 +213,7 @@ def reasons(r, ev, f: Filters):
         watch.append(item("acquisition", "DDA skips low-abundance peptides; a DIA dataset would see more"))
     if f.wants_unmodified and r.get("enrichment") not in (None, "none"):
         watch.append(item("enrichment", f"{pretty(r['enrichment'])}-enriched: unmodified proteins are mostly discarded"))
-    if r.get("enrichment") == "phospho" and not f.enrichment:
+    if r.get("enrichment") == "phospho" and not f.enrichment and not f.wants_unmodified:
         watch.append(item("enrichment", "phospho-enriched: good for phosphosites, poor for total protein"))
     if r.get("sample_type") == "biofluid" and r.get("tissue") and "plasma" in (r["tissue"] or "").lower() and not f.tissue:
         watch.append(item("tissue", "plasma: dominated by albumin etc.; low-abundance proteins are hard to see"))
