@@ -10,10 +10,17 @@ Built at *Reinvent the Wheel: a tools‑for‑science hack* (Science Works / Inh
 
 ## What it does
 
-- **Ask** — "phosphorylated MFF in mouse liver, low abundance" → filters (organism, tissue, enrichment=phospho, low‑abundance intent) → ranked datasets, each with green *fits* and amber *watch* chips that expand to the sentence in the protocol or paper that justifies them. If nothing matches exactly it relaxes filters and says which.
-- **Map** — a treemap of every tagged dataset by organism → sample type → enrichment → acquisition (or other orders). Click to drill, click a leaf to search it. "PRIDE in chunks."
-- **Dataset** — a catalogue card: every tag with confidence bar, source (PRIDE metadata / paper / inferred) and quote; the raw PRIDE fields; the paper; "wrong?" on every tag writes a correction.
-- **API** — FastAPI with OpenAPI at `/docs`: `/search`, `/ask`, `/map`, `/dataset/{acc}`, `/export.sdrf.tsv` (SDRF‑Proteomics‑compatible), so agents and pipelines can use it without the UI.
+The loop a researcher actually runs, with a human tick at each step:
+
+- **Ask** — "phosphorylated MFF in mouse liver, low abundance" → filter chips (Claude, rule‑based fallback) → ranked datasets with green *fits* and amber *watch* chips that expand to the sentence in the protocol or paper that justifies them. Facet counts down the side. If nothing matches exactly it drops a filter, says which and why, and offers to put it back.
+- **Map** — a treemap of every tagged dataset by organism → sample type → enrichment → acquisition (or other orders). Click to drill, click a leaf to search it.
+- **Dataset card** — every tag with confidence bar, source (PRIDE metadata / paper / inferred) and quote; the raw PRIDE fields; the paper; "wrong?" on every tag records a correction.
+- **Compare** — two or more datasets side by side with a verdict (comparable / with caution / not) and the exact method difference that breaks it. The check you need before group stats across datasets.
+- **Reanalyse** — on each dataset: the files PRIDE holds (raw, peak lists, submitter results; sizes and links) and the database‑search parameters derived from the tags (tool, enzyme, fixed and variable mods, quantification, FDR, FASTA), each with the sentence it came from. We can't run MaxQuant/Mascot for you; this is the set‑up sheet.
+- **Analyse** — upload a protein table, pick group A and B, get log2 fold change, Welch t‑test, Benjamini‑Hochberg FDR and a volcano plot. Odetta Antico's lyso‑IP pipeline (`analysis/`) runs as an option when the columns match.
+- **Workflow** — Find → Confirm (a written case per shortlisted candidate, you tick it) → Set up the search → Analyse → Check.
+- **Eval** — humans vs model on a 50‑dataset gold set; five models vs each other on 200 datasets (cost, speed, agreement).
+- **API** — FastAPI with OpenAPI at `/docs`: `/search`, `/ask`, `/map`, `/compare`, `/dataset/{acc}` (+ `/why`, `/reanalyse`, `/files.txt`), `/analyse/*`, `/export.sdrf.tsv`, `/eval`. Scripts and agents can use everything without the UI.
 
 ## The tags
 
@@ -49,8 +56,10 @@ uv run crawl_pride.py && uv run build_db.py
 uv run select_slice.py --n 300
 uv run fetch_methods.py --accessions data/slice.txt
 
-# 3. tag with Claude (structured outputs). Put ANTHROPIC_API_KEY=... in .env or the environment.
-uv run tag.py --accessions data/slice.txt           # ~$0.006 per dataset on Sonnet 5
+# 3. tag. Either Claude Sonnet 5 (ANTHROPIC_API_KEY in .env, ~$0.024 per dataset) ...
+uv run tag.py --accessions data/slice.txt
+#    ... or a cheap model through Hugging Face's router / OpenRouter (~$0.0015 per dataset, 90-93% agreement with Sonnet):
+uv run tag_oai.py --provider hf --limit 20000      # HF_TOKENS=hf_a,hf_b in .env; rotates keys, resumes
 
 # 4. serve
 uv run api/main.py                                  # http://localhost:8000/docs
@@ -78,7 +87,10 @@ select_slice.py       diverse accessions to tag first
 fetch_methods.py      Europe PMC → papers.methods_text
 tag.py                Claude structured-output tagger (direct mode, resume-safe)
 tag_import.py         import tag JSON produced elsewhere (same schema)
+tag_oai.py            same tagger via Hugging Face router / OpenRouter (DeepSeek V4.1 Flash), key rotation
+tag_bench.py          benchmark several models on the same 200 datasets → eval/bench.json
 make_gold_template.py / eval_tags.py   human gold set + agreement report
+analysis/             Odetta's R/Python downstream scripts + example data
 load_demo.py          load bundled demo data without crawling
 api/main.py           FastAPI
 web/                  Next.js 16 + Tailwind + shadcn
@@ -87,8 +99,8 @@ PLAN.html, SPEC.md    the plan we built from
 
 ## Status and honesty
 
-- Tagged so far: the 296‑dataset demo slice (human/mouse‑heavy, every vocab value represented). The full archive is `uv run tag.py` for a few hours, ~$230 on Sonnet 5 or half that on Haiku 4.5.
-- The demo slice was tagged by Claude Sonnet 5 through Claude Code sessions using the exact prompt and schema in `tag.py` (an API key wasn't to hand overnight); `tag.py` produces the same output via the API.
+- Tagged so far: 1,671 datasets (most‑downloaded first, every vocab value represented), demo bundle in `data/demo/`. The rest of the archive is ~$60 on DeepSeek V4.1 Flash and a few hours; see Eval for the model comparison.
+- The first 291 were tagged by Claude Sonnet 5 through Claude Code sessions using the exact prompt and schema in `tag.py`; the rest by `tag.py` via the API. Every row records which model tagged it.
 - Methods sections were available for 59% of the slice (open‑access only). The rest were tagged from PRIDE metadata alone and say so.
 - Tags are model output. Confidence and evidence are shown everywhere so you can judge; "wrong?" on any tag records a correction.
 

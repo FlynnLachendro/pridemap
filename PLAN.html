@@ -131,6 +131,7 @@
     <a href="#l4">4 · Run‑sheet</a>
     <a href="#l5">5 · Overnight report</a>
     <a href="#l6">6 · What the app is</a>
+    <a href="#l7">7 · Saturday</a>
   </nav>
 </header>
 </div>
@@ -603,6 +604,52 @@ uv run tag.py --limit 2000                                               # ~$12 
     <li>It can't tell you whether protein X is in a dataset. Protein names aren't in the metadata. It tells you whether the dataset's method could have seen protein X.</li>
     <li>It isn't a replacement for PRIDE. It's a better front door that links back to PRIDE and the paper on every result.</li>
   </ul>
+</div></section>
+
+<!-- ============================================================ LEVEL 7 -->
+<section class="level lv2" id="l7"><div class="wrap">
+  <div class="lvhead"><div class="num">7</div><div><h2>Saturday: the full loop</h2><p class="lvsub">What changed between 09:00 and mid‑afternoon, and the plain story of the whole workflow.</p></div></div>
+
+  <h3>The loop, as the team described it</h3>
+  <div class="defs">
+    <div class="def"><b>1 · Find<small>Ask · Map</small></b><div>Question in plain words → filter chips → ranked datasets with "fits" and "watch" reasons and the sentence behind each. New today: facet counts down the side (click to narrow), a clear notice when a filter had to be dropped and why, and Claude doing the question parsing (3 s).</div></div>
+    <div class="def"><b>2 · Confirm<small>Workflow</small></b><div>Hit <em>+ shortlist</em> on candidates. The Workflow page writes a three‑sentence case for each one against your question, shows the tags that matter and what's on PRIDE, and you tick the ones you'll use. Human in charge, as Charlotte asked.</div></div>
+    <div class="def"><b>3 · Set up the search<small>Reanalyse panel on each dataset</small></b><div>The files PRIDE holds (raw / peak lists / submitter results, sizes, links) and the database‑search parameters read from the tags: tool (MaxQuant/FragPipe for DDA, DIA‑NN for DIA), enzyme, fixed and variable modifications, quantification, FDR, FASTA. Each line says which tag and quote it came from. We can't run Mascot or MaxQuant (no API, desktop software); this is the set‑up sheet so the search matches the experiment.</div></div>
+    <div class="def"><b>4 · Analyse<small>Analyse page</small></b><div>Upload the protein table (submitter's results, or your own MaxQuant/DIA‑NN output), pick group A and B, get log2 fold change, Welch t‑test, Benjamini‑Hochberg FDR and a volcano plot. Odetta's lyso‑IP pipeline runs as an option when the columns match. Her scripts live in <code>analysis/</code>.</div></div>
+    <div class="def"><b>5 · Check<small>Eval page · Compare</small></b><div>Compare says whether two datasets are comparable before you run stats across them, and which method difference breaks it. Eval shows humans vs model on the gold set and five models vs each other.</div></div>
+  </div>
+
+  <h3>Model benchmark (200 datasets each, same inputs)</h3>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Model</th><th>$ / 1,000</th><th>Full archive</th><th>Agreement with Sonnet 5</th><th>Failures / 200</th></tr></thead>
+    <tbody>
+      <tr><td>DeepSeek V4.1 Flash</td><td class="num">$1.47</td><td class="num">~$59</td><td class="num">93%</td><td class="num">6</td></tr>
+      <tr><td>Claude Haiku 5.5</td><td class="num">$1.33</td><td class="num">~$53</td><td class="num">90%</td><td class="num">1</td></tr>
+      <tr><td>Kimi K2.6</td><td class="num">$4.29</td><td class="num">~$171</td><td class="num">92%</td><td class="num">30</td></tr>
+      <tr><td>GPT‑5.4 mini</td><td class="num">$6.24</td><td class="num">~$249</td><td class="num">89%</td><td class="num">7</td></tr>
+      <tr><td>Gemini 3.8 Flash</td><td class="num">$9.31</td><td class="num">~$371</td><td class="num">93%</td><td class="num">2</td></tr>
+      <tr><td>Claude Sonnet 5 (reference)</td><td class="num">$24.00</td><td class="num">~$958</td><td class="num">—</td><td class="num">33 / 1000</td></tr>
+    </tbody>
+  </table></div>
+  <p>Decision: tag the rest with DeepSeek V4.1 Flash on Hugging Face's router (DeepInfra route, $0.20 / $0.60 per million, no HF markup), paid with the hackathon's $20 HF credits. 1,671 datasets tagged so far on Sonnet 5 ($33). The tagger rotates across several HF keys and resumes if stopped.</p>
+
+  <h3>Jargon, one line each</h3>
+  <div class="tblwrap"><table>
+    <tbody>
+      <tr><td><strong>Accession</strong></td><td>A dataset's ID, e.g. PXD007653.</td></tr>
+      <tr><td><strong>Database search</strong></td><td>Software turns spectra into a protein list by matching against a reference proteome. MaxQuant, Mascot, FragPipe (DDA); DIA‑NN, Spectronaut (DIA).</td></tr>
+      <tr><td><strong>Fixed / variable modification</strong></td><td>Fixed: applied to every residue of a kind during prep (carbamidomethyl C). Variable: may or may not be there in biology (oxidation M, phospho STY). The search must be told which to look for.</td></tr>
+      <tr><td><strong>Decoy search, FDR</strong></td><td>Search a scrambled fake proteome too; hits to fakes estimate how many "real" hits are wrong. 1% FDR is the convention.</td></tr>
+      <tr><td><strong>DDA vs DIA</strong></td><td>DDA picks the strongest peptides to fragment, DIA fragments everything in windows. Different software, not comparable with each other.</td></tr>
+      <tr><td><strong>Result table</strong></td><td>The search output: one row per protein, intensity per sample. What Odetta's scripts eat.</td></tr>
+      <tr><td><strong>Full‑text index</strong></td><td>Pre‑built word list over the metadata prose. Finds words authors wrote; protein names are in the data, not the write‑up.</td></tr>
+      <tr><td><strong>API</strong></td><td>Every screen is also a URL a script or agent can call; <code>/docs</code> describes them.</td></tr>
+      <tr><td><strong>SQLite</strong></td><td>The database is one file on the laptop; no server to install.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Look</h3>
+  <p>Restyled to Arbor's papyrus scheme: warm off‑white ground, 1 px borders instead of shadows, Crimson Pro headings, Source Serif body, JetBrains Mono for labels and numbers, walnut accent. Dark mode derived from the same palette.</p>
 </div></section>
 
 </body>
