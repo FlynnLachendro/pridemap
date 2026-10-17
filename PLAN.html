@@ -130,6 +130,7 @@
     <a href="#l3">3 · Architecture</a>
     <a href="#l4">4 · Run‑sheet</a>
     <a href="#l5">5 · Overnight report</a>
+    <a href="#l6">6 · What the app is</a>
   </nav>
 </header>
 </div>
@@ -558,6 +559,49 @@ uv run tag.py --limit 2000                                               # ~$12 
     <li>Multi‑condition datasets (SILAC + TMT, global + phospho) get one value per tag; the agents picked the distinguishing one and quoted the other in evidence.</li>
     <li>No Vercel deploy yet (you didn't tick it). Local demo is fine; a tunnel takes 2 minutes if wanted.</li>
     <li><code>created_at</code> on corrections is UTC.</li>
+  </ul>
+</div></section>
+
+<!-- ============================================================ LEVEL 6 -->
+<section class="level lv1" id="l6"><div class="wrap">
+  <div class="lvhead"><div class="num">6</div><div><h2>What the app is</h2><p class="lvsub">The plain description to give anyone who asks "so what did you build?"</p></div></div>
+
+  <h3>In one paragraph</h3>
+  <p><strong>PRIDE Map is a search engine over PRIDE, the public archive of mass‑spectrometry proteomics datasets, that understands how each dataset was made.</strong> We pulled the metadata for all 41,545 datasets through PRIDE's public API (titles, descriptions, free‑text sample and data‑processing protocols, organism, instrument, PubMed link; never the raw instrument files). For each dataset we also fetched the open‑access Methods section of its paper from Europe PMC where one exists. A language model (Claude Sonnet 5) reads both and fills in a fixed form of 14 tags: organism, sample type, tissue, cell line, disease, enrichment, DDA/DIA, labelling, enzyme, fractionation, instrument family, proteins identified, search engine, one‑line summary. Every tag comes with a confidence score, where it came from (PRIDE metadata, the paper, or inferred) and the exact sentence that justifies it. Those tags go into a database, and the app lets you search, browse and inspect them.</p>
+  <p>No embedding model is involved. The "AI" is one careful read of each dataset by an LLM with a strict output schema, plus one small LLM call per question to turn plain English into filters. Everything else is ordinary filtering and ranking over a SQLite table.</p>
+
+  <h3>Where it lives</h3>
+  <div class="tblwrap"><table>
+    <tbody>
+      <tr><td><strong>Code</strong></td><td><code>github.com/FlynnLachendro/pridemap</code>. Private until Sunday morning, then public under MIT (hackathon rule). Every commit is from after Friday's kickoff.</td></tr>
+      <tr><td><strong>Running</strong></td><td>Locally: <code>./dev.sh</code> starts the API on :8000 and the web app on :3000. Anyone can clone it and run it on the bundled 694‑dataset demo bundle in under two minutes, no API key needed.</td></tr>
+      <tr><td><strong>Deployed</strong></td><td>Not yet. When we want a public URL: the web app goes to Vercel (one command), the API goes to Fly.io or Railway with the SQLite file, or stays on a laptop behind a Cloudflare tunnel for the demo. About 20 minutes of work; decide with the team.</td></tr>
+      <tr><td><strong>Stack</strong></td><td>Python scripts run with <code>uv</code> (crawl, fetch papers, tag, eval). SQLite with full‑text search as the only database. FastAPI for the API, with OpenAPI docs at <code>/docs</code>. Next.js 16 + Tailwind + shadcn for the UI. Claude Sonnet 5 with structured outputs for tagging and question parsing.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>What's inside right now</h3>
+  <div class="fact">
+    <div><div class="n">41,545</div><div class="l">PRIDE datasets' metadata crawled and searchable by text</div></div>
+    <div><div class="n">694</div><div class="l">datasets fully tagged by the model, with 9,022 evidence quotes. ~$9 of API spend.</div></div>
+    <div><div class="n">557</div><div class="l">papers whose Methods section was read (open access only, ~60% of datasets)</div></div>
+  </div>
+  <p>The remaining ~41,000 datasets are findable by free text but don't have tags yet. Tagging everything is one command and roughly $900 on Sonnet 5, or a few hundred on Haiku. The UI says "694 of 41,545 tagged" on every page so nobody is misled.</p>
+
+  <h3>What you can do in it</h3>
+  <div class="defs">
+    <div class="def"><b>Ask<small>the home page</small></b><div>Type a question in plain English: "phosphorylated MFF in mouse liver, low abundance". Claude turns it into filter chips you can edit. Matching datasets come back ranked by fit, depth, recency and how often they've been reused. Each result shows green <em>fits</em> chips and amber <em>watch</em> chips ("DDA skips low‑abundance peptides", "TMT gives relative ratios"). Click any chip to see the sentence from the protocol or paper it came from. If nothing matches all your filters, it drops the least useful one, tells you which and why, and offers to put it back.</div></div>
+    <div class="def"><b>Map<small>/map</small></b><div>A treemap of every tagged dataset, split by organism → sample type → enrichment → acquisition, or other orders. Click a block to zoom in, click a leaf to search exactly that slice. This is "PRIDE in chunks": seeing at a glance that mouse liver phospho datasets are a handful, not hundreds.</div></div>
+    <div class="def"><b>Dataset card<small>/dataset/PXD…</small></b><div>One dataset in full: the one‑line summary, all 14 tags with confidence bars, source badges and quotes, the raw PRIDE fields, the paper link, and a "wrong?" button on every tag that records a correction for the next tagging round.</div></div>
+    <div class="def"><b>API<small>/docs</small></b><div>Everything the UI does is a GET or POST: <code>/search</code> with filters, <code>/ask</code> with a question, <code>/map</code>, <code>/dataset/{id}</code>, and <code>/export.sdrf.tsv</code> which exports the tags in the community's SDRF‑Proteomics format. Any script or AI agent can use it without the UI. That's the brief's "endpoints for agentic control".</div></div>
+    <div class="def"><b>Eval<small>gold/</small></b><div>A 50‑dataset gold set for two bioinformaticians to hand‑label, and a script that prints per‑tag agreement between humans and the model. That number is the honesty slide in the pitch.</div></div>
+  </div>
+
+  <h3>What it is not</h3>
+  <ul>
+    <li>It doesn't download or reanalyse raw mass‑spec data. It tells you <em>which</em> dataset to download and reanalyse, and why.</li>
+    <li>It can't tell you whether protein X is in a dataset. Protein names aren't in the metadata. It tells you whether the dataset's method could have seen protein X.</li>
+    <li>It isn't a replacement for PRIDE. It's a better front door that links back to PRIDE and the paper on every result.</li>
   </ul>
 </div></section>
 

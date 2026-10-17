@@ -7,7 +7,8 @@ export type Result = {
   tags: Record<string, string | number | null>; fits: Reason[]; watch: Reason[]; score: number;
 };
 export type Filters = Record<string, string | number | boolean | null | undefined>;
-export type AskOut = { question: string; parser: string; interpretation: string; relaxed?: string[]; filters: Filters; total: number; results: Result[] };
+export type Dropped = { key: string; value: string | number; why: string };
+export type AskOut = { question: string; parser: string; interpretation: string; dropped?: Dropped[]; filters: Filters; total: number; results: Result[] };
 export type Stats = { projects: number; papers_with_methods: number; tagged: number; corrections: number; histograms: Record<string, Record<string, number>> };
 export type Evidence = { tag: string; value: string | null; confidence: number; source: string; evidence: string };
 export type Dataset = {

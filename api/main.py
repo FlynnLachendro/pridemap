@@ -285,6 +285,14 @@ wants_unmodified=true if they want total/unmodified protein rather than a modifi
 Also write interpretation: one sentence saying how you read the question."""
 
 
+DROP_WHY = {
+    "q": "protein and gene names almost never appear in a dataset's description, so this can't be filtered on; "
+         "you check for the protein by reanalysing the dataset",
+    "tissue": "no tagged dataset from that tissue matched the other filters",
+    "since": "no match in that date range",
+}
+
+
 class AskOut(BaseModel):
     """Flat, all-required schema: structured outputs reject many defaulted/optional fields as 'too complex'."""
     organism: Optional[str]
@@ -376,19 +384,18 @@ def ask(body: AskIn):
         interp = "Read as: " + (", ".join(bits) if bits else "no specific filters; free-text search") + "."
     con = db()
     total, results = search(con, f)
-    relaxed = []
+    dropped = []
     # relaxation ladder: free text (protein names) first, then tissue, then the rest, so the user always sees something
     for drop in ["q", "tissue", "cell_line", "disease", "since", "labelling", "acquisition", "instrument_family", "fractionation", "enzyme"]:
         if total:
             break
-        if getattr(f, drop) in (None, False):
+        v = getattr(f, drop)
+        if v in (None, False):
             continue
         setattr(f, drop, None)
-        relaxed.append(drop)
+        dropped.append({"key": drop, "value": v, "why": DROP_WHY.get(drop, "no tagged dataset matched it together with the other filters")})
         total, results = search(con, f)
-    if relaxed:
-        interp += " No exact match, so I dropped: " + ", ".join(relaxed) + "."
-    return {"question": body.q, "parser": how, "interpretation": interp, "relaxed": relaxed,
+    return {"question": body.q, "parser": how, "interpretation": interp, "dropped": dropped,
             "filters": f.model_dump(exclude_none=True), "total": total, "results": results}
 
 
@@ -484,4 +491,4 @@ def root():
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=False, app_dir=str(pathlib.Path(__file__).parent))
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=True, app_dir=str(pathlib.Path(__file__).parent))

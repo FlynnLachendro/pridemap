@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ask, search, TAG_LABEL, pretty, type AskOut, type Filters, type Result, type Stats } from "@/lib/api";
+import { ask, search, TAG_LABEL, pretty, type AskOut, type Dropped, type Filters, type Result, type Stats } from "@/lib/api";
 import { ResultCard } from "@/components/result-card";
 import { Button } from "@/components/ui/button";
 
@@ -54,6 +54,17 @@ export function Ask({ stats }: { stats: Stats | null }) {
     });
   }
 
+  function restoreFilter(d: Dropped) {
+    if (!out) return;
+    const f = { ...out.filters, [d.key]: d.value };
+    start(async () => {
+      try {
+        const r = await search(f);
+        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, dropped: (out.dropped ?? []).filter((x) => x.key !== d.key) });
+      } catch (e) { setErr(String(e)); }
+    });
+  }
+
   function dropFilter(k: string) {
     if (!out) return;
     const f = { ...out.filters };
@@ -61,7 +72,7 @@ export function Ask({ stats }: { stats: Stats | null }) {
     start(async () => {
       try {
         const r = await search(f);
-        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, relaxed: [...(out.relaxed ?? []), k] });
+        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, dropped: [...(out.dropped ?? []), { key: k, value: String(out.filters[k]), why: "you removed it" }] });
       } catch (e) { setErr(String(e)); }
     });
   }
@@ -123,10 +134,24 @@ export function Ask({ stats }: { stats: Stats | null }) {
                 <span key={k} className="rounded-full bg-peak-soft text-peak px-2.5 py-1 text-xs font-bold">{label}</span>
               ))}
             </div>
-            {out.relaxed && out.relaxed.length > 0 && (
-              <p className="text-xs text-muted-foreground">Dropped to find matches: {out.relaxed.map((k) => TAG_LABEL[k] ?? k).join(", ")}.</p>
-            )}
           </div>
+
+          {out.dropped && out.dropped.length > 0 && (
+            <div className="rounded-xl border border-peak bg-peak-soft/30 p-4 grid gap-2 text-sm">
+              <p className="font-bold">No dataset matched everything, so I searched without:</p>
+              <ul className="grid gap-1.5">
+                {out.dropped.map((d) => (
+                  <li key={d.key} className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-peak/40 px-2.5 py-0.5 text-xs font-bold line-through decoration-peak text-muted-foreground">
+                      <span className="opacity-70">{TAG_LABEL[d.key] ?? d.key}</span> {pretty(d.value)}
+                    </span>
+                    <span className="text-muted-foreground">{d.why}.</span>
+                    <button type="button" onClick={() => restoreFilter(d)} className="text-xs underline">put it back</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <div className="flex items-baseline justify-between">
             <h2 className="text-lg font-bold tabular">{out.total} matching dataset{out.total === 1 ? "" : "s"}</h2>
