@@ -24,7 +24,8 @@ const MSG: Record<string, string> = {
   "tick-candidate": "Tour: Claude is writing the case for each candidate…",
   "load-example": "Tour: loading Odetta’s protein table…",
   "set-groups-run": "Tour: running lyso‑IP vs mock beads…",
-  "run-agent": "Tour: Claude is using the tools (searching, reading, comparing)…",
+  "run-agent": "Tour: asking Claude…",
+  "wait-agent": "Tour: Claude is using the tools (searching, reading, comparing)…",
 };
 async function waitFor(sel: string, ms = 15000) {
   const t0 = Date.now();
@@ -96,6 +97,10 @@ const ACTIONS: Record<string, () => Promise<void>> = {
   "run-agent": async () => {
     const b = (await waitFor('[data-tour="agent-run"]')) as HTMLButtonElement | null;
     b?.click();
+    await waitFor('[data-tour="agent-log"] li', 60000);   // first tool call has appeared
+    await sleep(400);
+  },
+  "wait-agent": async () => {
     await waitFor('[data-tour="agent-done"]', 120000);
     await sleep(400);
   },
@@ -110,6 +115,31 @@ const ACTIONS: Record<string, () => Promise<void>> = {
     await sleep(600);
   },
 };
+
+// Centre the element when it fits the viewport; otherwise put its top just below the top edge. Scrolls the nearest
+// scrollable ancestor (the app's <main>, not the window). `onlyIfOff` re-scrolls only when the element has drifted
+// out of view (used while entrance animations settle).
+function scroller(el: HTMLElement): HTMLElement | null {
+  let n = el.parentElement;
+  while (n) { const o = getComputedStyle(n).overflowY; if ((o === "auto" || o === "scroll") && n.scrollHeight > n.clientHeight) return n; n = n.parentElement; }
+  return null;
+}
+function scrollTo(el: HTMLElement | undefined, want?: "center" | "start", onlyIfOff = false) {
+  if (!el) return;
+  const sc = scroller(el);
+  const box = sc ? sc.getBoundingClientRect() : { top: 0, height: window.innerHeight };
+  const r = el.getBoundingClientRect();
+  const vh = box.height;
+  const fits = r.height < vh * 0.72;
+  const top = r.top - box.top;                          // element top relative to the scroller's viewport
+  if (onlyIfOff) {
+    const visible = top >= 0 && (fits ? top + r.height <= vh : top <= vh * 0.3);
+    if (visible) return;
+  }
+  const delta = top - (fits && want !== "start" ? (vh - r.height) / 2 : 24);
+  if (sc) sc.scrollTop = Math.max(0, sc.scrollTop + delta);
+  else window.scrollTo({ top: Math.max(0, window.scrollY + delta), behavior: "instant" as ScrollBehavior });
+}
 
 function label(href: string) {
   const p = href.split("?")[0];
@@ -142,10 +172,13 @@ export function Tour() {
       smoothScroll: false,
       onHighlightStarted: (el) => {
         const idx = d.getActiveIndex() ?? 0;
-        const want = steps[idx]?.scroll ?? "center";
-        (el as HTMLElement | undefined)?.scrollIntoView({ block: want, inline: "nearest", behavior: "instant" as ScrollBehavior });
+        scrollTo(el as HTMLElement | undefined, steps[idx]?.scroll);
       },
-      onHighlighted: () => { setTimeout(() => d.refresh(), 120); setTimeout(() => d.refresh(), 450); },
+      onHighlighted: (el) => {
+        const idx = d.getActiveIndex() ?? 0;
+        // entrance animations (route-in, .enter) shift boxes for ~300 ms; re-measure until they settle
+        for (const t of [60, 160, 320, 520, 800, 1200]) setTimeout(() => { if (cancelled) return; scrollTo(el as HTMLElement | undefined, steps[idx]?.scroll, true); d.refresh(); }, t);
+      },
       nextBtnText: "Next →",
       prevBtnText: "← Back",
       doneBtnText: "Finish",
@@ -160,7 +193,10 @@ export function Tour() {
         }
         const nxt = steps[idx + 1];
         if (!nxt) { cancelled = true; d.destroy(); status(null); router.push("/tour/done"); return; }
-        if (nxt.before && ACTIONS[nxt.before]) { status(MSG[nxt.before] ?? "Tour: working…"); await ACTIONS[nxt.before](); status(null); }
+        if (nxt.before && ACTIONS[nxt.before]) {
+          document.body.classList.add("tour-busy"); status(MSG[nxt.before] ?? "Tour: working…");
+          try { await ACTIONS[nxt.before](); } finally { status(null); document.body.classList.remove("tour-busy"); }
+        }
         d.moveNext();
       },
       steps: steps.map((s) => ({
@@ -169,6 +205,8 @@ export function Tour() {
       })),
     });
     drv.current = d;
+    const onResize = () => d.isActive() && d.refresh();
+    window.addEventListener("resize", onResize);
 
     (async () => {
       const first = steps[0];
@@ -181,7 +219,7 @@ export function Tour() {
       if (!cancelled) d.drive(0);
     })();
 
-    return () => { cancelled = true; d.destroy(); status(null); };
+    return () => { cancelled = true; window.removeEventListener("resize", onResize); d.destroy(); status(null); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 

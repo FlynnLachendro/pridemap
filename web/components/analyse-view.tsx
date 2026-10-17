@@ -146,7 +146,7 @@ export function AnalyseView() {
           <button type="button" onClick={useExample} disabled={!!busy} className="btn btn-lg" data-tour="example">Use the example table (Odetta&apos;s lyso‑IP batch 2)</button>
         </div>
         {inspect && (
-          <p className="text-sm">
+          <p className="text-sm" data-tour="loaded">
             <span className="font-semibold">{inspect.file}</span> · <span className="tabular">{inspect.n_rows.toLocaleString()}</span> rows × <span className="tabular">{inspect.n_cols.toLocaleString()}</span> columns · {inspect.suggested_groups.length} sample groups detected
             {inspect.odetta_compatible && <span className="ml-2 pill bg-ok-soft text-ok">lyso‑IP layout: Odetta&apos;s pipeline available</span>}
           </p>

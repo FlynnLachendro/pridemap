@@ -413,3 +413,6 @@ b, strong, .font-bold, .font-semibold { font-weight: 600; }
   ::selection { background: var(--teal-soft); }
 }
 @media (prefers-reduced-motion: reduce) { main > div, .driver-popover { animation: none; } }
+
+/* tour: hide the popover while the tour is doing something on the page (status pill explains) */
+.tour-busy .driver-popover { opacity: 0 !important; pointer-events: none; }

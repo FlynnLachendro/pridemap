@@ -79,7 +79,7 @@ export function AgentConsole({ compact = false }: { compact?: boolean }) {
       )}
 
       {events.length > 0 && (
-        <div className="card overflow-hidden">
+        <div className="card overflow-hidden" data-tour="agent-log">
           <div className="px-4 py-2 border-b flex items-center gap-3 text-xs font-mono text-muted-foreground">
             <span className={`inline-block w-2 h-2 rounded-full ${running ? "bg-peak animate-pulse" : done ? "bg-ok" : "bg-faint"}`} />
             {running ? "Claude is working with the tools…" : done ? `finished in ${done.steps} round${done.steps === 1 ? "" : "s"}, ${calls} tool call${calls === 1 ? "" : "s"}` : "stopped"}

@@ -11,13 +11,14 @@ await page.goto(`${BASE}/`);
 await page.evaluate(() => { localStorage.removeItem("pridemap.compare"); localStorage.removeItem("pridemap.confirmed"); });
 await page.goto(`${BASE}/?tour=0`);
 
-const TOTAL = 22;
-for (let i = 0; i < TOTAL; i++) {
-  await page.waitForSelector(".driver-popover", { timeout: 120000 });
+// Click Next until the tour lands on its finish page (step count comes from web/lib/tour.ts, not from here).
+for (let i = 0; i < 60 && !page.url().includes("/tour/done"); i++) {
+  await page.waitForSelector(".driver-popover:not(.tour-busy *)", { timeout: 180000 });
   await page.waitForTimeout(4500);                      // let the viewer read
   const next = page.locator(".driver-popover-next-btn");
   if (await next.count()) await next.click();
-  await page.waitForTimeout(1500);
+  await page.waitForFunction(() => !document.body.classList.contains("tour-busy"), null, { timeout: 180000 });
+  await page.waitForTimeout(1200);
 }
 await page.waitForTimeout(3000);
 await ctx.close();                                      // flushes the video
