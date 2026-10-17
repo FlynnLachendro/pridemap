@@ -28,6 +28,8 @@ type OdettaOut = {
   outputs: { name: string; rows: number; columns: string[]; head: Record<string, unknown>[]; error?: string }[];
 };
 type Mode = "welch" | "odetta";
+type SampleRow = { file_name: string; run: string; size_bytes: number | null; ftp: string | null; annotations: Record<string, { value: string; source: string; source_kind: string }>; label: string; local: boolean };
+type SampleData = { accession: string; runs: number; sources: Array<{ kind: string; file_name: string; runs_annotated: number; note: string }>; fields: Array<{ field: string; distinct: number; varies: boolean; identifier: boolean; values: string[] }>; varying_fields: string[]; rows: SampleRow[]; conflicts: Array<{ field: string; annotation_says: string; tag: string; tag_says: string; note: string }>; note: string | null; cached: boolean };
 type SortKey = keyof Row;
 
 const CUSTOM = "__custom__";
@@ -76,12 +78,169 @@ type RunStatus = {
 };
 const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
 
+/** Loads the Samplelist.xlsx / SDRF and lets the user pick two groups before starting the pipeline. */
+function SamplePicker({ accession, onSelect }: { accession: string; onSelect: (runs: string[], labelA: string, labelB: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<SampleData | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [factor, setFactor] = useState("");
+  const [valA, setValA] = useState("");
+  const [valB, setValB] = useState("");
+
+  useEffect(() => {
+    if (!open || data || loading) return;
+    let live = true;
+    setLoading(true); setErr(null);
+    fetch(`${API}/dataset/${encodeURIComponent(accession)}/samples`)
+      .then((r) => r.ok ? r.json() : r.text().then((t) => { throw new Error(t); }))
+      .then((d: SampleData) => {
+        if (!live) return;
+        setData(d);
+        const f = d.varying_fields[0] ?? "";
+        setFactor(f);
+        const vals = d.fields.find((x) => x.field === f)?.values ?? [];
+        setValA(vals[0] ?? ""); setValB(vals[1] ?? "");
+      })
+      .catch((e) => { if (live) setErr(String(e)); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [open, accession, data, loading]);
+
+  const factorField = data?.fields.find((f) => f.field === factor);
+  const runsA = useMemo(() => data?.rows.filter((r) => r.annotations[factor]?.value === valA) ?? [], [data, factor, valA]);
+  const runsB = useMemo(() => data?.rows.filter((r) => r.annotations[factor]?.value === valB) ?? [], [data, factor, valB]);
+  const allSelected = useMemo(() => [...runsA, ...runsB].map((r) => r.file_name), [runsA, runsB]);
+
+  const apply = () => { onSelect(allSelected, valA, valB); setOpen(false); };
+  const reset = () => { onSelect([], "", ""); };
+
+  const changeFactor = (f: string) => {
+    setFactor(f);
+    const vals = data?.fields.find((x) => x.field === f)?.values ?? [];
+    setValA(vals[0] ?? ""); setValB(vals[1] ?? "");
+  };
+
+  return (
+    <div className="rounded-md border bg-card p-3 grid gap-2">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm font-semibold">Pick samples</span>
+        <span className="text-xs text-faint">select two groups from the sample list instead of processing all raw files</span>
+        <button type="button" className="btn btn-sm ml-auto" onClick={() => setOpen((v) => !v)}>
+          {open ? "Collapse" : "Open sample list"}
+        </button>
+      </div>
+      {open && (
+        <div className="grid gap-3">
+          {loading && <p className="text-xs text-teal">Loading sample annotations…</p>}
+          {err && <p className="text-xs text-warn">{err}</p>}
+          {data?.note && !data.sources.length && (
+            <p className="text-xs text-faint rounded bg-muted/40 p-2">{data.note} Runs can still be filtered by selecting them from the list below, or use all runs.</p>
+          )}
+          {data && data.sources.length > 0 && (
+            <>
+              <div className="flex flex-wrap gap-2 text-xs text-faint">
+                {data.sources.map((s) => (
+                  <span key={s.file_name} className="pill">
+                    {s.kind === "spreadsheet" ? "spreadsheet" : "SDRF"} · <span className="font-mono">{s.file_name}</span> · {s.runs_annotated} runs annotated
+                  </span>
+                ))}
+              </div>
+              {data.conflicts.length > 0 && (
+                <p className="text-xs text-warn rounded bg-warn-soft/30 p-2">
+                  ⚠ Annotation vs tag conflict: {data.conflicts.map((c) => `${c.field} says "${c.annotation_says}" but dataset tags say "${c.tag_says}"`).join("; ")}. Neither is automatically right — the tag comes from the protocol text, the annotation from the deposited file.
+                </p>
+              )}
+              <div className="grid sm:grid-cols-3 gap-3 text-sm">
+                <label className="grid gap-1">
+                  <span className="label">Group by</span>
+                  <select value={factor} onChange={(e) => changeFactor(e.target.value)} className="input h-9">
+                    {data.varying_fields.map((f) => <option key={f} value={f}>{f}</option>)}
+                    {data.varying_fields.length === 0 && <option value="">(no varying fields found)</option>}
+                  </select>
+                </label>
+                <label className="grid gap-1">
+                  <span className="label">Group A · {runsA.length} run{runsA.length !== 1 ? "s" : ""}</span>
+                  <select value={valA} onChange={(e) => setValA(e.target.value)} className="input h-9">
+                    {factorField?.values.map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </label>
+                <label className="grid gap-1">
+                  <span className="label">Group B · {runsB.length} run{runsB.length !== 1 ? "s" : ""}</span>
+                  <select value={valB} onChange={(e) => setValB(e.target.value)} className="input h-9">
+                    {factorField?.values.filter((v) => v !== valA).map((v) => <option key={v} value={v}>{v}</option>)}
+                    {factorField && factorField.values.filter((v) => v !== valA).length === 0 && <option value="">(choose a different Group A value first)</option>}
+                  </select>
+                </label>
+              </div>
+              {/* Run table: shows all annotated runs coloured by group */}
+              {data.rows.length > 0 && (
+                <div className="overflow-x-auto rounded border text-xs max-h-56">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b bg-muted/40">
+                        <th className="px-2 py-1 text-left label">run</th>
+                        {data.varying_fields.slice(0, 4).map((f) => <th key={f} className="px-2 py-1 text-left label">{f}</th>)}
+                        <th className="px-2 py-1 text-left label">cached</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.rows.map((r) => {
+                        const inA = r.annotations[factor]?.value === valA;
+                        const inB = r.annotations[factor]?.value === valB;
+                        return (
+                          <tr key={r.file_name} className={`border-b last:border-0 ${inA ? "bg-teal-soft/40" : inB ? "bg-peak-soft/40" : "opacity-40"}`}>
+                            <td className="px-2 py-1 font-mono truncate max-w-[200px]" title={r.file_name}>{r.label || r.run}</td>
+                            {data.varying_fields.slice(0, 4).map((f) => <td key={f} className="px-2 py-1">{r.annotations[f]?.value ?? "—"}</td>)}
+                            <td className="px-2 py-1">{r.local ? "✓" : ""}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" className="btn btn-sm btn-primary" disabled={!valA || !valB || valA === valB || allSelected.length === 0} onClick={apply}>
+                  Use these {allSelected.length} run{allSelected.length !== 1 ? "s" : ""} ({runsA.length} A + {runsB.length} B)
+                </button>
+                <button type="button" className="btn btn-sm" onClick={reset}>Use all runs</button>
+                <span className="text-xs text-faint">· group labels carry into the Analyse step as the suggested A/B split</span>
+              </div>
+            </>
+          )}
+          {data && data.sources.length === 0 && !loading && (
+            <div className="grid gap-2">
+              <p className="text-xs text-faint rounded bg-muted/40 p-2">{data.note ?? "No sample annotation file found on PRIDE."} The {data.runs} runs can only be told apart by file name — select them individually below, or use all runs.</p>
+              <div className="overflow-x-auto rounded border text-xs max-h-56">
+                <table className="w-full">
+                  <thead><tr className="border-b bg-muted/40"><th className="px-2 py-1 text-left label">file name</th><th className="px-2 py-1 label">size</th><th className="px-2 py-1 label">cached</th></tr></thead>
+                  <tbody>
+                    {data.rows.map((r) => (
+                      <tr key={r.file_name} className="border-b last:border-0">
+                        <td className="px-2 py-1 font-mono text-[11px]">{r.file_name}</td>
+                        <td className="px-2 py-1 text-faint tabular text-right">{r.size_bytes ? `${(r.size_bytes / 1e9).toFixed(1)} GB` : "—"}</td>
+                        <td className="px-2 py-1 text-center">{r.local ? "✓" : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
-function RunHere({ accession, remoteAvailable }: { accession: string; remoteAvailable: boolean }) {
+function RunHere({ accession, runs }: { accession: string; runs?: string[] }) {
   const router = useRouter();
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const seen = useRef<string | null>(null);
 
   const poll = useCallback(async () => {
@@ -111,10 +270,20 @@ function RunHere({ accession, remoteAvailable }: { accession: string; remoteAvai
   const start = async () => {
     setStarting(true); setErr(null);
     try {
-      await jfetch(fetch(`${API}/dataset/${accession}/pipeline/start?web=${encodeURIComponent(window.location.origin)}`, { method: "POST" }));
+      const runsParam = runs?.length ? `&runs=${encodeURIComponent(runs.join(","))}` : "";
+      await jfetch(fetch(`${API}/dataset/${accession}/pipeline/start?web=${encodeURIComponent(window.location.origin)}${runsParam}`, { method: "POST" }));
       const s = await poll();
       if (s) setStatus(s);
     } catch (e) { setErr(String(e)); } finally { setStarting(false); }
+  };
+
+  const stop = async () => {
+    setStopping(true); setErr(null);
+    try {
+      await fetch(`${API}/dataset/${accession}/pipeline`, { method: "DELETE" });
+      const s = await poll();
+      if (s) setStatus(s);
+    } catch (e) { setErr(String(e)); } finally { setStopping(false); }
   };
 
   const stages = status?.stages ?? [];
@@ -123,25 +292,27 @@ function RunHere({ accession, remoteAvailable }: { accession: string; remoteAvai
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2" data-tour="run-here">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="text-sm font-semibold">Run it here</span>
+        <span className="text-sm font-semibold">Run on this machine</span>
         {status?.running
           ? <span className="pill">running · {done}/{stages.length - 1} stages</span>
           : status?.finished ? <span className="pill bg-ok-soft text-ok">finished</span>
           : status?.failed ? <span className="pill text-warn">stopped</span> : null}
-        {remoteAvailable && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2.5 py-0.5 text-xs font-medium text-ok">
-            <span className="size-1.5 rounded-full bg-ok animate-pulse" />
-            Remote MaxQuant connected
-          </span>
+        {status?.running && (
+          <button type="button" className="btn btn-sm btn-warn ml-auto" disabled={stopping} onClick={stop}>
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
         )}
-        <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={starting || !!status?.running} onClick={start}>
-          {status?.running ? <><span className="spinner mr-2" />Running…</> : starting ? "Starting…" : status?.exists ? "Resume" : "Run the whole pipeline"}
-        </button>
+        {!status?.running && (
+          <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={starting} onClick={start}>
+            {starting ? "Starting…" : status?.exists ? "Resume" : "Run the whole pipeline"}
+          </button>
+        )}
       </div>
       <p className="text-xs text-faint">
         PRIDE Map runs every stage for you on this machine — nothing to paste into a terminal. Safe to close this
         page; the run keeps going and resumes where it stopped.
       </p>
+      {starting && <p className="text-xs text-teal">Initialising pipeline…</p>}
       {err && <p className="text-xs text-warn">{err}</p>}
       {stages.length > 0 && (status?.running || status?.finished || status?.failed) && (
         <ol className="grid gap-0.5 text-xs">
@@ -158,11 +329,15 @@ function RunHere({ accession, remoteAvailable }: { accession: string; remoteAvai
           ))}
         </ol>
       )}
-      {active && status?.log && status.log.length > 0 && (
-        <details className="text-xs">
-          <summary className="cursor-pointer text-faint hover:text-foreground">output</summary>
-          <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{status.log.join("\n")}</pre>
-        </details>
+      {status?.log && status.log.length > 0 && (
+        status?.running
+          ? <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">{status.log.slice(-10).join("\n")}</pre>
+          : (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-faint hover:text-foreground">output ({status.log.length} lines)</summary>
+              <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{status.log.join("\n")}</pre>
+            </details>
+          )
       )}
     </div>
   );
@@ -198,17 +373,23 @@ function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; acc
   const stages = plan.stages ?? [];
   const label = tracks.length > 1 ? "search kit" : `${plan.engine_label} kit`;
   const auto = stages.filter((s) => s.where !== "you decide").length;
+  const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
+  const [labelA, setLabelA] = useState("");
+  const [labelB, setLabelB] = useState("");
+  const handleSelect = (runs: string[], a: string, b: string) => { setSelectedRuns(runs); setLabelA(a); setLabelB(b); };
   return (
     <div className="rounded-lg border bg-muted/30 p-4 grid gap-3" data-tour="searchkit">
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-semibold text-sm">Run the search</span>
         {tracks.map((t) => <span key={t.kind} className="pill">{t.kind} → {t.engine_label}</span>)}
         <span className="text-xs text-faint">{plan.raw_count} × {plan.vendor_label}</span>
+        {selectedRuns.length > 0 && <span className="pill bg-ok-soft text-ok">{selectedRuns.length} runs selected · {labelA} vs {labelB}</span>}
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
 
-      <RunHere accession={accession} remoteAvailable={remoteAvailable} />
-      {remoteAvailable && plan.maxquant_offered && <RunRemote accession={accession} />}
+      <SamplePicker accession={accession} onSelect={handleSelect} />
+      <RunHere accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} />
+      {remoteAvailable && plan.maxquant_offered && <RunRemote accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} />}
 
       <p className="text-xs text-muted-foreground">
         All {auto} stages — tool and disk check, download, {plan.convert ? "conversion, " : ""}
@@ -281,13 +462,22 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
   useEffect(() => {
     fetch(`${API}/remote-mq`).then((r) => r.ok ? r.json() : null).then((d) => { if (d) setRemoteAvailable(d.available); }).catch(() => {});
   }, []);
-  const look = async (a: string) => {
+  const look = async (a: string, autoOpen = false) => {
     const x = a.trim().toUpperCase();
     if (!x) return;
     setLoading(true); setErr(null); setRes(null);
-    try { setRes(await jfetch<PrideResults>(fetch(`${API}/dataset/${encodeURIComponent(x)}/results`))); } catch (e) { setErr(String(e)); } finally { setLoading(false); }
+    try {
+      const r = await jfetch<PrideResults>(fetch(`${API}/dataset/${encodeURIComponent(x)}/results`));
+      setRes(r);
+      // When arriving from the workflow's "Analyse" CTA and there's exactly one openable file, skip the click.
+      if (autoOpen && !r.plan?.engine) {
+        const all = [...r.tables, ...r.archives];
+        const openable = all.filter((t) => t.openable);
+        if (openable.length === 1) onOpen(r.accession, openable[0].file_name);
+      }
+    } catch (e) { setErr(String(e)); } finally { setLoading(false); }
   };
-  useEffect(() => { if (initial) { const id = window.setTimeout(() => { setAcc(initial); look(initial); }, 0); return () => window.clearTimeout(id); } }, [initial]);
+  useEffect(() => { if (initial) { const id = window.setTimeout(() => { setAcc(initial); look(initial, true); }, 0); return () => window.clearTimeout(id); } }, [initial]);
   const all = res ? [...res.tables, ...res.archives] : [];
   return (
     <div className="rounded-xl border bg-card p-5 grid gap-3" data-tour="from-pride">
@@ -301,21 +491,44 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
       </div>
       {err && <p className="text-warn text-sm">{err}</p>}
       {res && res.note && <p className="note text-sm"><span aria-hidden>ⓘ</span><span>{res.note} {res.raw_files > 0 && <Link href={`/dataset/${res.accession}#reanalyse`} className="underline">Open the set‑up sheet →</Link>}</span></p>}
-      {res && res.plan && res.plan.engine && <SearchKit plan={res.plan} accession={res.accession} remoteAvailable={remoteAvailable} />}
-      {res && all.length > 0 && (
-        <ul className="grid gap-1">
-          {all.slice(0, 8).map((t) => (
-            <li key={t.file_name} className="flex flex-wrap items-center gap-3 text-sm rounded-md border px-3 py-2">
-              <span className="font-mono text-xs truncate max-w-md" title={t.file_name}>{t.file_name}</span>
-              <span className="pill">{t.kind}</span>
-              {t.size_bytes ? <span className="text-faint tabular text-xs">{(t.size_bytes / 1e6).toFixed(1)} MB</span> : null}
-              <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={busy || !t.openable} onClick={() => onOpen(res.accession, t.file_name)} title={t.openable ? "" : "too large to fetch here; download from PRIDE and upload"}>Open in Analyse</button>
-            </li>
-          ))}
-          {all.length > 8 && <li className="text-xs text-faint">…and {all.length - 8} more on PRIDE</li>}
-        </ul>
+      {res && res.plan?.engine && all.length > 0 && (
+        <p className="note text-sm"><span aria-hidden>ⓘ</span><span>This dataset has both a submitter result table and raw files. <b>Quick path:</b> open the submitter&apos;s table below — it&apos;s ready now. <b>Thorough path:</b> re-run the search from the raw files with your own parameters using the kit below.</span></p>
       )}
-      <p className="text-xs text-muted-foreground">Uses the submitter&apos;s own search output on PRIDE (MaxQuant proteinGroups, DIA‑NN report, FragPipe tables, any CSV/TSV/XLSX). PRIDE Map can&apos;t run MaxQuant or DIA‑NN itself; if a dataset only has raw files, it works out which engine fits and hands you a ready‑made kit to run on your own machine.</p>
+
+      {/* Search kit: always rendered after a lookup; absent-with-reason when there are no raw files */}
+      {res && (res.plan?.engine
+        ? <SearchKit plan={res.plan} accession={res.accession} remoteAvailable={remoteAvailable} />
+        : res.raw_files === 0 && all.length > 0
+          ? <div className="rounded-lg border bg-muted/20 p-4 text-sm grid gap-1">
+              <span className="font-semibold">Re-run the search</span>
+              <span className="text-faint">No raw files are deposited for this dataset on PRIDE, so a re-search is not possible here. You can open the submitter&apos;s result table directly below.</span>
+            </div>
+          : null
+      )}
+
+      {/* Submitter result tables: always rendered after a lookup; absent-with-reason when there are no tables */}
+      {res && (all.length > 0
+        ? <div className="grid gap-1">
+            <p className="text-xs font-semibold text-faint uppercase tracking-wide px-1">Submitter results on PRIDE</p>
+            <ul className="grid gap-1">
+              {all.slice(0, 8).map((t) => (
+                <li key={t.file_name} className="flex flex-wrap items-center gap-3 text-sm rounded-md border px-3 py-2">
+                  <span className="font-mono text-xs truncate max-w-md" title={t.file_name}>{t.file_name}</span>
+                  <span className="pill">{t.kind}</span>
+                  {t.size_bytes ? <span className="text-faint tabular text-xs">{(t.size_bytes / 1e6).toFixed(1)} MB</span> : null}
+                  <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={busy || !t.openable} onClick={() => onOpen(res.accession, t.file_name)} title={t.openable ? "" : "too large to fetch here; download from PRIDE and upload"}>Open in Analyse</button>
+                </li>
+              ))}
+              {all.length > 8 && <li className="text-xs text-faint px-1">…and {all.length - 8} more on PRIDE</li>}
+            </ul>
+          </div>
+        : res.raw_files > 0
+          ? <div className="rounded-lg border bg-muted/20 p-4 text-sm grid gap-1">
+              <span className="font-semibold">Submitter results on PRIDE</span>
+              <span className="text-faint">No result table was deposited for this dataset. Run the search above from the {res.raw_files} raw file{res.raw_files !== 1 ? "s" : ""} to generate one.</span>
+            </div>
+          : null
+      )}
     </div>
   );
 }
