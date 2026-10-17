@@ -193,6 +193,7 @@ def main():
     import anthropic
     client = anthropic.Anthropic()
     lock = threading.Lock()
+    t0 = dt.datetime.now()
     tin = tout = done = 0
     pin, pout = PRICE.get(a.model, (2.0, 10.0))
 
@@ -234,8 +235,10 @@ def main():
                 cost = (usage.input_tokens * pin + usage.output_tokens * pout) / 1e6
                 if done % 10 == 0 or done == len(rows):
                     tot = (tin * pin + tout * pout) / 1e6
-                    print(f"{done}/{len(rows)} {acc} {d['summary_one_line'][:90]!r} ~${tot:.2f} so far", flush=True)
-    print(f"done={done} tokens in={tin} out={tout}")
+                    el = (dt.datetime.now() - t0).total_seconds()
+                    print(f"{done}/{len(rows)} {acc} {d['summary_one_line'][:70]!r} ~${tot:.2f} {el/60:.1f} min, {done/el*60:.0f}/min, ~{len(rows)*el/done/60:.0f} min total", flush=True)
+    el = (dt.datetime.now() - t0).total_seconds()
+    print(f"done={done} tokens in={tin} out={tout} cost=${(tin * pin + tout * pout) / 1e6:.2f} time={el/60:.1f} min")
 
 
 if __name__ == "__main__":
