@@ -373,6 +373,13 @@ def _suffixed(tr: dict) -> dict:
 
 
 def search_plan(t: dict, raw_names: list[str]) -> dict:
+    """The engine decision plus the full stage list. Every caller gets both, so none has to assemble them."""
+    plan = _build_plan(t, raw_names)
+    plan["stages"] = pipeline_stages(plan)
+    return plan
+
+
+def _build_plan(t: dict, raw_names: list[str]) -> dict:
     """Which search engine a researcher can actually run on THIS dataset's raw files, and why.
 
     Single owner of the engine decision: the kit, the Analyse banner and the set-up sheet all compose this
@@ -481,6 +488,68 @@ def dataset_search_plan(accession: str) -> dict:
 @router.get("/dataset/{accession}/searchplan")
 def dataset_searchplan(accession: str):
     return dataset_search_plan(accession)
+
+
+# ----------------------------------------------------------------------------- the pipeline, start to finish
+# MaxQuant's own job names, in the order it runs them. It writes one combined/proc/<job>.finished.txt per step and
+# appends to combined/proc/#runningTimes.txt, which is what run_all.sh tails for real progress. The list here is the
+# documented sequence so the UI can show what is coming before anyone commits hours of compute to it.
+MAXQUANT_STAGES = [
+    ("Configuring", "reads mqpar.xml, checks the raw files are readable"),
+    ("Testing fasta files", "parses the FASTA and the identifier rules"),
+    ("Feature detection", "finds 3D peaks (m/z × retention time × intensity) in every run"),
+    ("Deisotoping", "groups peaks into isotope patterns and assigns charge"),
+    ("Calculating peak properties", "centroids and scores each feature"),
+    ("Preparing searches", "builds the peptide index from the FASTA"),
+    ("MS/MS first search", "quick Andromeda search used only to calibrate"),
+    ("Mass recalibration", "corrects systematic m/z and retention-time drift"),
+    ("MS/MS search", "the real Andromeda search of every spectrum"),
+    ("Applying FDR", "target-decoy filtering to 1% PSM and peptide FDR"),
+    ("Matching between runs", "transfers identifications across runs by accurate mass and RT"),
+    ("Assembling proteins", "groups peptides into protein groups, razor/unique assignment"),
+    ("Protein FDR", "1% protein-level target-decoy filtering"),
+    ("Label-free quantification", "MaxLFQ normalisation across the runs"),
+    ("Writing tables", "writes combined/txt/, including proteinGroups.txt"),
+]
+DIANN_STAGES = [
+    ("Loading FASTA", "in-silico digest of the protein database"),
+    ("Spectral library prediction", "deep-learning prediction of spectra and retention times"),
+    ("First pass", "identifies precursors across the runs"),
+    ("RT alignment", "aligns retention time between runs"),
+    ("Quantification", "MaxLFQ protein quantities"),
+    ("Writing report", "writes report.tsv and report.pg_matrix.tsv"),
+]
+
+
+def pipeline_stages(plan: dict) -> list[dict]:
+    """Every stage from 'PRIDE holds only raw files' to 'a protein table this app can analyse'.
+
+    Single owner of the stage list: run_all.sh echoes it, progress.jsonl records it, and the UI draws it.
+    """
+    stages = [
+        {"id": "download", "label": "Download raw files from PRIDE",
+         "detail": f"{plan['raw_count']} runs"
+                   + (f" plus {plan['sidecars']} index sidecars" if plan.get("sidecars") else "")
+                   + " over FTP; expect tens of GB", "where": "your machine"},
+        {"id": "fasta", "label": "Fetch the protein database",
+         "detail": "reviewed UniProt reference proteome for the dataset's organism", "where": "your machine"},
+    ]
+    if plan.get("convert"):
+        stages.append({"id": "convert", "label": f"Convert {plan['vendor_label']} to mzML",
+                       "detail": f"{plan['convert']['tool']}; the search engines cannot read the vendor format directly",
+                       "where": "your machine"})
+    for tr in plan.get("tracks") or []:
+        subs = MAXQUANT_STAGES if tr["engine"] == "maxquant" else DIANN_STAGES
+        stages.append({
+            "id": f"search_{tr['kind'].lower()}", "label": f"{tr['engine_label']} — {tr['run_count']} {tr['kind']} runs",
+            "detail": f"config {tr['config']} → {tr['output_table']}", "where": "your machine",
+            "engine": tr["engine"], "engine_label": tr["engine_label"], "output_table": tr["output_table"],
+            "substages": [{"name": n, "detail": d} for n, d in subs]})
+    stages.append({
+        "id": "analyse", "label": "Analyse the protein table",
+        "detail": "pick group A and group B — log2 fold change, Welch t-test, Benjamini-Hochberg FDR and a volcano plot",
+        "where": "PRIDE Map"})
+    return stages
 
 
 # ----------------------------------------------------------------------------- MaxQuant / DIA-NN kits
@@ -642,13 +711,220 @@ def _download_sh(ctx: dict) -> str:
     return "\n".join(lines)
 
 
+KIT_GITIGNORE = """\
+# Everything the pipeline downloads or produces. None of it belongs in git:
+# the raw files alone run to tens of GB.
+raw/
+mzml/
+fasta/
+combined/
+out_*/
+.pipeline/
+progress.jsonl
+*.log
+"""
+
+
+def _stage_lib() -> str:
+    """Shared stage framework: echoes to the terminal AND appends a JSON line per event.
+
+    Three audiences, one source of truth — the terminal for whoever is watching, progress.jsonl for the UI or
+    any later tooling, and .pipeline/<id>.done markers so re-running resumes instead of repeating hours of work.
+    """
+    return r'''
+PIPE_DIR=".pipeline"
+PROGRESS="progress.jsonl"
+mkdir -p "$PIPE_DIR"
+
+_now()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
+_epoch() { date +%s; }
+
+# JSON-escape a string (quotes, backslashes, control chars) so progress.jsonl stays parseable.
+_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/ /g' | tr -d '\000-\037'; }
+
+emit() {  # emit <event> <stage-id> <message> [extra-json]
+  local event="$1" id="$2" msg="$3" extra="${4:-}"
+  printf '{"ts":"%s","event":"%s","stage":"%s","message":"%s"%s}\n' \
+    "$(_now)" "$(_esc "$event")" "$(_esc "$id")" "$(_esc "$msg")" \
+    "${extra:+,$extra}" >> "$PROGRESS"
+}
+
+STAGE_START=0
+STAGE_ID=""
+STAGE_N=0
+
+stage() {  # stage <id> <label>; returns 1 when already done so the caller can skip
+  STAGE_ID="$1"; local label="$2"
+  STAGE_N=$((STAGE_N + 1))
+  if [ -f "$PIPE_DIR/$STAGE_ID.done" ]; then
+    printf '\n[%d/%d] %s\n      ✓ already done — skipping (delete %s/%s.done to redo)\n' \
+      "$STAGE_N" "$TOTAL_STAGES" "$label" "$PIPE_DIR" "$STAGE_ID"
+    emit stage_skipped "$STAGE_ID" "$label"
+    return 1
+  fi
+  STAGE_START=$(_epoch)
+  printf '\n[%d/%d] %s\n      started %s\n' "$STAGE_N" "$TOTAL_STAGES" "$label" "$(_now)"
+  emit stage_started "$STAGE_ID" "$label"
+  return 0
+}
+
+stage_done() {
+  local secs=$(( $(_epoch) - STAGE_START ))
+  printf '      ✓ done in %dm %02ds\n' "$((secs / 60))" "$((secs % 60))"
+  emit stage_finished "$STAGE_ID" "completed" "\"seconds\":$secs"
+  : > "$PIPE_DIR/$STAGE_ID.done"
+}
+
+step() {  # a sub-step inside a stage
+  printf '        · %s\n' "$1"
+  emit substage "$STAGE_ID" "$1"
+}
+
+fail() {
+  printf '\n      ✗ FAILED: %s\n' "$1" >&2
+  emit stage_failed "$STAGE_ID" "$1"
+  exit 1
+}
+
+# Tail MaxQuant's own progress. It writes one combined/proc/<job>.finished.txt per internal step; we echo each
+# as it appears, so the long opaque middle of the run reports what it is actually doing.
+MQ_SEEN="$PIPE_DIR/mq_seen"
+
+mq_scan() {  # one pass: echo every finished step not already reported, oldest first
+  local proc="combined/proc" f name
+  [ -d "$proc" ] || return 0
+  # -tr sorts by mtime oldest-first, so a burst between polls is reported in the order MaxQuant finished them.
+  # Job names contain spaces, so read line by line rather than word-splitting.
+  ls -tr "$proc"/*.finished.txt 2>/dev/null | while IFS= read -r f; do
+    [ -e "$f" ] || continue
+    name="$(basename "$f" .finished.txt)"
+    if ! grep -Fqx -- "$name" "$MQ_SEEN" 2>/dev/null; then
+      printf '%s\n' "$name" >> "$MQ_SEEN"
+      printf '        · MaxQuant: %s\n' "$name"
+      emit maxquant_step "$STAGE_ID" "$name"
+    fi
+  done
+}
+
+watch_maxquant() {
+  : > "$MQ_SEEN"
+  while :; do mq_scan; sleep 5; done
+}
+'''
+
+
+def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd: str = "diann-linux") -> str:
+    """One command that runs the whole pipeline, echoing every stage and recording it to progress.jsonl."""
+    acc = ctx["accession"]
+    fasta_path, _ = _fasta(ctx)
+    total = len(plan.get("stages") or [])
+    out = [
+        "#!/usr/bin/env bash",
+        f"# Full reanalysis pipeline for {acc}, generated by PRIDE Map.",
+        "#",
+        "# Runs on YOUR machine, start to finish. Re-running resumes: finished stages are skipped.",
+        "# Every stage is echoed here and appended to progress.jsonl as one JSON object per line.",
+        "#",
+        "# Needs: curl, and whichever of msconvert / MaxQuant / DIA-NN the stages below use.",
+        "set -euo pipefail",
+        'cd "$(dirname "$0")"',
+        "",
+        f"TOTAL_STAGES={total}",
+        f'ACCESSION="{acc}"',
+        _stage_lib(),
+        'printf "PRIDE Map pipeline — %s\\n" "$ACCESSION"',
+        f'printf "%s\\n" "{total} stages. Progress is also written to progress.jsonl."',
+        'emit run_started "" "pipeline start"',
+        "",
+        "# ---------------------------------------------------------------- 1. raw files",
+        'if stage download "Download raw files from PRIDE"; then',
+        '  step "fetching into raw/ — this is the slow one, expect tens of GB"',
+        '  bash download_raw.sh || fail "raw download failed (re-run to resume; curl -C - continues part files)"',
+        '  step "$(find raw -type f | wc -l | tr -d " ") files in raw/"',
+        "  stage_done",
+        "fi",
+        "",
+        "# ---------------------------------------------------------------- 2. protein database",
+        'if stage fasta "Fetch the protein database"; then',
+        f'  bash download_fasta.sh || fail "FASTA download failed"',
+        f'  [ -s "{fasta_path}" ] || fail "{fasta_path} is missing or empty"',
+        f'  step "$(grep -c \'^>\' "{fasta_path}" || echo 0) sequences in {fasta_path}"',
+        "  stage_done",
+        "fi",
+    ]
+    if plan.get("convert"):
+        out += [
+            "",
+            "# ---------------------------------------------------------------- 3. vendor format -> mzML",
+            f'if stage convert "Convert {plan["vendor_label"]} to mzML"; then',
+            '  command -v msconvert >/dev/null 2>&1 || fail "msconvert not on PATH — see convert_to_mzml.sh for the Docker alternative"',
+            '  bash convert_to_mzml.sh || fail "msconvert failed"',
+            '  step "$(find mzml -name \'*.mzML\' | wc -l | tr -d \' \') mzML files written"',
+            "  stage_done",
+            "fi",
+        ]
+    for tr in plan.get("tracks") or []:
+        kind = tr["kind"].lower()
+        if tr["engine"] == "maxquant":
+            out += [
+                "",
+                f"# ---------------------------------------------------------------- {tr['engine_label']} ({tr['run_count']} {tr['kind']} runs)",
+                f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
+                f'  command -v {mq_cmd} >/dev/null 2>&1 || command -v mono >/dev/null 2>&1 \\',
+                f'    || fail "{mq_cmd} not found. MaxQuant is .NET: run it on Windows, or via mono on Linux/macOS."',
+                '  step "MaxQuant writes one combined/proc/<step>.finished.txt per internal step; echoing them as they land"',
+                "  watch_maxquant & MQ_WATCH=$!",
+                '  trap \'kill "$MQ_WATCH" 2>/dev/null || true\' EXIT',
+                f'  if command -v {mq_cmd} >/dev/null 2>&1; then',
+                f'    {mq_cmd} {tr["config"]} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
+                "  else",
+                f'    mono "$(command -v MaxQuantCmd.exe || echo MaxQuantCmd.exe)" {tr["config"]} \\',
+                '      || fail "MaxQuant (mono) failed — see combined/proc/ for the step it stopped on"',
+                "  fi",
+                '  kill "$MQ_WATCH" 2>/dev/null || true; trap - EXIT',
+                '  mq_scan  # final sweep: catch steps that finished between the last poll and now',
+                f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
+                f'  step "$(($(wc -l < "{tr["output_table"]}") - 1)) protein groups in {tr["output_table"]}"',
+                "  stage_done",
+                "fi",
+            ]
+        else:
+            out += [
+                "",
+                f"# ---------------------------------------------------------------- {tr['engine_label']} ({tr['run_count']} {tr['kind']} runs)",
+                f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
+                f'  command -v {diann_cmd} >/dev/null 2>&1 || fail "{diann_cmd} not on PATH — https://github.com/vdemichev/DiaNN/releases"',
+                '  step "library-free: DIA-NN predicts a spectral library from the FASTA first"',
+                f'  bash run_diann_{kind}.sh || fail "DIA-NN failed"',
+                f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
+                f'  step "$(($(wc -l < "{tr["output_table"]}") - 1)) protein groups in {tr["output_table"]}"',
+                "  stage_done",
+                "fi",
+            ]
+    tables = [tr["output_table"] for tr in (plan.get("tracks") or [])]
+    out += [
+        "",
+        "# ---------------------------------------------------------------- done",
+        'emit run_finished "" "pipeline complete"',
+        'printf "\\n%s\\n" "──────────────────────────────────────────────"',
+        'printf "Pipeline complete. Upload to PRIDE Map → Analyse:\\n"',
+        *[f'printf "  • %s\\n" "{t}"' for t in tables],
+        'printf "\\nThere, pick group A and group B to get log2 fold change, Welch t-test,\\n"',
+        'printf "Benjamini-Hochberg FDR and a volcano plot.\\n"',
+        'printf "Stage-by-stage record: progress.jsonl\\n"',
+        "",
+    ]
+    return "\n".join(out)
+
+
 def search_kit(accession: str) -> tuple[bytes, dict]:
     """A ready-to-run kit for the engine that can actually process this dataset's raw files."""
     ctx = _kit_context(accession)
     plan = search_plan(ctx["t"], [f.get("file_name") or "" for f in ctx["raw"]])
     p = ctx["p"]
     fasta_path, _ = _fasta(ctx)
-    files: dict[str, str] = {"download_raw.sh": _download_sh(ctx), "download_fasta.sh": _fasta_sh(ctx)}
+    files: dict[str, str] = {"download_raw.sh": _download_sh(ctx), "download_fasta.sh": _fasta_sh(ctx),
+                             ".gitignore": KIT_GITIGNORE}
     steps = [f"1. `bash download_raw.sh` pulls the {len(ctx['raw'])} raw files from PRIDE's FTP into raw/ "
              "(runs plus their index sidecars — the readers need both).",
              f"2. `bash download_fasta.sh` fetches the protein database to `{fasta_path}`, where the configs expect it."]
@@ -707,10 +983,32 @@ def search_kit(accession: str) -> tuple[bytes, dict]:
         readme += [f"> {plan['caveat']}", ""]
     if not plan["maxquant_offered"] and plan.get("maxquant_reason"):
         readme += [f"**Why not MaxQuant:** {plan['maxquant_reason']}", ""]
-    readme += ["## Steps", ""] + steps + ["",
+    if tracks:
+        readme += ["## Run it", "",
+                   "```bash",
+                   "bash run_all.sh",
+                   "```", "",
+                   "That is the whole pipeline. It echoes each stage as it goes, appends one JSON object per event "
+                   "to `progress.jsonl`, and tails MaxQuant's own internal steps so the long middle of the run is "
+                   "not a black box. Re-running resumes — finished stages are skipped, so a failure costs you that "
+                   "stage and not the download.",
+                   "",
+                   "`.gitignore` is included: nothing the pipeline downloads or writes should ever enter git.",
+                   "", "### What it does, stage by stage", ""]
+        for i, s in enumerate(plan.get("stages") or [], 1):
+            readme.append(f"{i}. **{s['label']}** — {s['detail']} _({s['where']})_")
+            for sub in s.get("substages") or []:
+                readme.append(f"   - {sub['name']} — {sub['detail']}")
+        readme += ["", "## The individual steps", "",
+                   "`run_all.sh` just chains these; run them yourself if you prefer.", ""] + steps
+    else:
+        readme += ["## Steps", ""] + steps
+    readme += ["",
                "Nothing in this kit runs on PRIDE Map — every step happens on your own machine.",
                f"Values PRIDE Map could not derive are marked `{NA}` or `REPLACE_WITH_...`; fill them in from the paper.",
                ""]
+    if tracks:
+        files["run_all.sh"] = run_all_sh(ctx, plan)
     files["README.md"] = "\n".join(readme)
 
     buf = io.BytesIO()

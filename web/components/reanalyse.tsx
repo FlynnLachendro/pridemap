@@ -14,6 +14,7 @@ type Out = {
     maxquant_offered: boolean; maxquant_reason: string | null; caveat: string | null; conflict: string | null;
     convert: { from: string; to: string; tool: string; url: string } | null; kit_url: string;
     mixed: boolean; runs_dda: number; runs_dia: number;
+    stages: { id: string; label: string; detail: string; where: string; substages?: { name: string; detail: string }[] }[];
     tracks: { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string }[];
   };
 };
@@ -118,8 +119,17 @@ export function Reanalyse({ accession }: { accession: string }) {
             <p className="text-xs text-muted-foreground">{out.plan.why}</p>
             {out.plan.conflict && <p className="text-warn text-xs">⚠ {out.plan.conflict}</p>}
             {out.plan.caveat && <p className="text-xs text-muted-foreground">{out.plan.caveat}</p>}
+            <div className="rounded-md border bg-muted/30 px-3 py-2 grid gap-0.5">
+              <code className="text-sm">bash run_all.sh</code>
+              <span className="text-xs text-muted-foreground">
+                Runs all {(out.plan.stages ?? []).length} stages end to end, echoing each one and recording it to
+                <code> progress.jsonl</code>. Resumes where it stopped; MaxQuant&apos;s own internal steps are tailed
+                from <code>combined/proc/</code> so the long middle is not a black box.
+              </span>
+            </div>
             <div className="label">What you get</div>
             <ul className="grid gap-0.5 text-xs text-muted-foreground">
+              <li>• <code>run_all.sh</code>: the whole pipeline in one command, with per-stage progress</li>
               <li>• <code>download_raw.sh</code>: pulls the {out.plan.raw_count} raw files ({out.plan.vendor_label}) from PRIDE&apos;s FTP</li>
               {out.plan.convert && <li>• <code>convert_to_mzml.sh</code>: {out.plan.convert.from} → {out.plan.convert.to} via <a className="underline" href={out.plan.convert.url} target="_blank" rel="noreferrer">{out.plan.convert.tool}</a></li>}
               <li>• <code>download_fasta.sh</code>: the reference proteome, saved where the configs expect it</li>

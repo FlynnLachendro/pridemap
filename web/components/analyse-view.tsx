@@ -43,11 +43,17 @@ const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" :
 type PrideTable = { file_name: string; category: string; size_bytes: number | null; kind: string; openable: boolean };
 /** Which search engine can actually run on this dataset's raw files — decided by the API from vendor + acquisition. */
 type Track = { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string; why: string };
+type Substage = { name: string; detail: string };
+type Stage = {
+  id: string; label: string; detail: string; where: string;
+  engine?: string; engine_label?: string; output_table?: string; substages?: Substage[];
+};
 type SearchPlan = {
   vendor: string | null; vendor_label: string; acquisition: string; tag_acquisition: string | null; raw_count: number;
   engine: string | null; engine_label: string | null; why: string | null; output_table: string | null;
   maxquant_offered: boolean; maxquant_reason: string | null; caveat: string | null; conflict: string | null;
-  mixed: boolean; runs_dda: number; runs_dia: number; runs_unclassified: number; sidecars: number; tracks: Track[];
+  mixed: boolean; runs_dda: number; runs_dia: number; runs_unclassified: number; sidecars: number;
+  tracks: Track[]; stages: Stage[];
   convert: { from: string; to: string; tool: string; url: string; why: string } | null; kit_url?: string;
 };
 type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTable[]; raw_files: number; has_results: boolean; note: string | null; plan: SearchPlan | null };
@@ -55,12 +61,8 @@ type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTa
 /** Raw-only dataset: name the engine that can actually run, say why, and hand over a kit for it. */
 function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string }) {
   const tracks = plan.tracks ?? [];
+  const stages = plan.stages ?? [];
   const label = tracks.length > 1 ? "search kit" : `${plan.engine_label} kit`;
-  const prep = [
-    `Download the raw files from PRIDE (${plan.raw_count} runs${plan.sidecars ? ` plus ${plan.sidecars} index sidecars the readers need`: ""})`,
-    "Fetch the protein database with the included script",
-    ...(plan.convert ? [`Convert ${plan.convert.from} → ${plan.convert.to} with ${plan.convert.tool}`] : []),
-  ];
   return (
     <div className="rounded-lg border bg-muted/30 p-4 grid gap-3" data-tour="searchkit">
       <div className="flex flex-wrap items-center gap-3">
@@ -73,18 +75,47 @@ function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string })
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
       {plan.caveat && <p className="text-xs text-muted-foreground">{plan.caveat}</p>}
-      <ol className="grid gap-1 text-xs text-muted-foreground">
-        {prep.map((s, i) => <li key={s}>{i + 1}. {s}</li>)}
-      </ol>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {tracks.map((t) => (
-          <div key={t.kind} className="rounded-md border bg-card px-3 py-2 text-xs grid gap-0.5">
-            <div className="font-semibold">{t.engine_label} <span className="text-faint font-normal">· {t.run_count} {t.kind} runs</span></div>
-            <div className="text-muted-foreground">config <code>{t.config}</code></div>
-            <div className="text-muted-foreground">upload <code>{t.output_table}</code> here when it finishes</div>
-          </div>
-        ))}
+
+      <div className="rounded-md border bg-card px-3 py-2 grid gap-1">
+        <div className="text-xs text-muted-foreground">One command runs the whole pipeline:</div>
+        <code className="text-sm">bash run_all.sh</code>
+        <div className="text-xs text-faint">
+          Echoes every stage as it goes, writes <code>progress.jsonl</code>, and resumes where it stopped if a stage fails.
+        </div>
       </div>
+
+      <ol className="grid gap-1.5">
+        {stages.map((s, i) => (
+          <li key={s.id} className="text-xs">
+            <div className="flex items-baseline gap-2">
+              <span className="tabular text-faint shrink-0">{i + 1}.</span>
+              <span className="font-semibold">{s.label}</span>
+              <span className={`pill shrink-0 ${s.where === "PRIDE Map" ? "" : "text-faint"}`}>{s.where}</span>
+            </div>
+            <div className="text-muted-foreground pl-6">{s.detail}</div>
+            {s.substages && s.substages.length > 0 && (
+              <details className="pl-6 mt-0.5">
+                <summary className="cursor-pointer text-faint hover:text-foreground">
+                  what {s.engine_label} does inside — {s.substages.length} steps
+                </summary>
+                <ol className="grid gap-0.5 mt-1 border-l pl-3">
+                  {s.substages.map((sub) => (
+                    <li key={sub.name} className="text-muted-foreground">
+                      <span className="font-medium">{sub.name}</span> — {sub.detail}
+                    </li>
+                  ))}
+                </ol>
+                <p className="text-faint mt-1">
+                  {s.engine === "maxquant"
+                    ? "run_all.sh tails combined/proc/ and echoes each of these as MaxQuant finishes it."
+                    : "Reported as DIA-NN progresses."}
+                </p>
+              </details>
+            )}
+          </li>
+        ))}
+      </ol>
+
       {!plan.maxquant_offered && plan.maxquant_reason && (
         <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {plan.maxquant_reason}</p>
       )}
