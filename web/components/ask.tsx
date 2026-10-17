@@ -60,7 +60,18 @@ export function Ask({ stats }: { stats: Stats | null }) {
     start(async () => {
       try {
         const r = await search(f);
-        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, dropped: (out.dropped ?? []).filter((x) => x.key !== d.key) });
+        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, facets: r.facets, dropped: (out.dropped ?? []).filter((x) => x.key !== d.key) });
+      } catch (e) { setErr(String(e)); }
+    });
+  }
+
+  function applyFacet(k: string, v: string) {
+    if (!out) return;
+    const f = { ...out.filters, [k]: v === "unknown" ? undefined : v };
+    start(async () => {
+      try {
+        const r = await search(f);
+        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, facets: r.facets, dropped: [] });
       } catch (e) { setErr(String(e)); }
     });
   }
@@ -72,7 +83,7 @@ export function Ask({ stats }: { stats: Stats | null }) {
     start(async () => {
       try {
         const r = await search(f);
-        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, dropped: [...(out.dropped ?? []), { key: k, value: String(out.filters[k]), why: "you removed it" }] });
+        setOut({ ...out, filters: r.filters, total: r.total, results: r.results, facets: r.facets, dropped: [...(out.dropped ?? []), { key: k, value: String(out.filters[k]), why: "you removed it" }] });
       } catch (e) { setErr(String(e)); }
     });
   }
@@ -153,13 +164,31 @@ export function Ask({ stats }: { stats: Stats | null }) {
             </div>
           )}
 
-          <div className="flex items-baseline justify-between">
-            <h2 className="text-lg font-bold tabular">{out.total} matching dataset{out.total === 1 ? "" : "s"}</h2>
-            <span className="text-xs text-muted-foreground">ranked by fit, depth, recency, reuse</span>
-          </div>
-          {out.results.length === 0 && <p className="text-muted-foreground">Nothing tagged matches yet. Only {stats?.tagged ?? "some"} datasets are tagged so far; try removing a filter.</p>}
-          <div className="grid gap-3">
-            {out.results.map((r: Result, i: number) => <ResultCard key={r.accession} r={r} rank={i + 1} />)}
+          <div className="grid lg:grid-cols-[220px_1fr] gap-5 items-start">
+            <aside className="grid gap-4 lg:sticky lg:top-20">
+              {out.facets && Object.entries(out.facets).map(([k, vals]) => (
+                <div key={k}>
+                  <div className="label mb-1">{TAG_LABEL[k] ?? k}</div>
+                  <ul className="grid gap-0.5">
+                    {vals.map(([v, n]) => (
+                      <li key={v}>
+                        <button type="button" onClick={() => applyFacet(k, v)} className={`w-full flex justify-between gap-2 text-sm px-1.5 py-0.5 rounded-md hover:bg-secondary ${out.filters[k] === v ? "bg-secondary font-semibold" : ""}`}>
+                          <span className="truncate">{pretty(v)}</span><span className="tabular text-faint">{n}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </aside>
+            <div className="grid gap-3 min-w-0">
+              <div className="flex items-baseline justify-between">
+                <h2 className="text-xl tabular">{out.total} matching dataset{out.total === 1 ? "" : "s"}</h2>
+                <span className="text-xs text-faint font-mono">ranked by fit, depth, recency, reuse</span>
+              </div>
+              {out.results.length === 0 && <p className="text-muted-foreground">Nothing tagged matches yet. Only {stats?.tagged ?? "some"} datasets are tagged so far; try removing a filter.</p>}
+              {out.results.map((r: Result, i: number) => <ResultCard key={r.accession} r={r} rank={i + 1} />)}
+            </div>
           </div>
         </section>
       )}

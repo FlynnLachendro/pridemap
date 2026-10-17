@@ -8,7 +8,8 @@ export type Result = {
 };
 export type Filters = Record<string, string | number | boolean | null | undefined>;
 export type Dropped = { key: string; value: string | number; why: string };
-export type AskOut = { question: string; parser: string; interpretation: string; dropped?: Dropped[]; filters: Filters; total: number; results: Result[] };
+export type Facets = Record<string, [string, number][]>;
+export type AskOut = { question: string; parser: string; interpretation: string; dropped?: Dropped[]; filters: Filters; total: number; results: Result[]; facets?: Facets };
 export type Stats = { projects: number; papers_with_methods: number; tagged: number; corrections: number; histograms: Record<string, Record<string, number>> };
 export type Evidence = { tag: string; value: string | null; confidence: number; source: string; evidence: string };
 export type Dataset = {
@@ -26,9 +27,10 @@ async function j<T>(r: Promise<Response>): Promise<T> {
 }
 export const ask = (q: string) => j<AskOut>(fetch(`${API}/ask`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ q }) }));
 export const search = (f: Filters) => {
+  // returns results + facet counts for the current filter set
   const p = new URLSearchParams();
   Object.entries(f).forEach(([k, v]) => { if (v !== null && v !== undefined && v !== false && v !== "") p.set(k, String(v)); });
-  return j<{ filters: Filters; total: number; results: Result[] }>(fetch(`${API}/search?${p}`));
+  return j<{ filters: Filters; total: number; results: Result[]; facets?: Facets }>(fetch(`${API}/search?${p}`));
 };
 export const stats = () => j<Stats>(fetch(`${API}/stats`, { next: { revalidate: 30 } }));
 export const dataset = (acc: string) => j<Dataset>(fetch(`${API}/dataset/${acc}`, { cache: "no-store" }));

@@ -57,7 +57,7 @@ export function CompareView() {
           <button type="button" onClick={() => { setInput(sel.join(",")); go(sel.join(",")); }} className="h-11 px-4 rounded-xl border font-bold">Use my {sel.length} picked</button>
         )}
       </form>
-      {!a && <p className="text-sm text-muted-foreground">Tip: on the Ask page, hit <b>+ compare</b> on two or more results, then the bar at the bottom brings you here.</p>}
+      {!a && <p className="text-sm text-muted-foreground">Tip: on the Ask page, hit <b>+ shortlist</b> on two or more results, then use the bar at the bottom.</p>}
       {err && <p className="text-warn text-sm">{err}</p>}
 
       {out && a && (

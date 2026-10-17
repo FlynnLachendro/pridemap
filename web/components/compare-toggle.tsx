@@ -12,7 +12,7 @@ export function CompareToggle({ accession, className }: { accession: string; cla
       aria-pressed={on}
       className={cn("text-xs rounded-full border px-2 py-0.5 font-bold", on ? "bg-peak-soft text-peak border-peak" : "text-muted-foreground hover:bg-secondary", className)}
     >
-      {on ? "✓ comparing" : "+ compare"}
+      {on ? "✓ shortlisted" : "+ shortlist"}
     </button>
   );
 }

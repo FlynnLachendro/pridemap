@@ -76,7 +76,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
           </section>
         )}
 
-        <Reanalyse accession={p.accession} />
+        <div id="reanalyse"><Reanalyse accession={p.accession} /></div>
 
         <section className="grid gap-3">
           <h2 className="font-bold">What PRIDE says</h2>

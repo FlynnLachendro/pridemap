@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "anthropic>=0.80", "pydantic>=2"]
+# dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "anthropic>=0.80", "pydantic>=2", "pandas>=2", "numpy", "scipy", "openpyxl", "python-multipart"]
 # ///
 """PRIDE Map API.  run:  uv run api/main.py   (http://localhost:8000/docs)
 
@@ -222,6 +222,23 @@ def reasons(r, ev, f: Filters):
     return fits, watch
 
 
+FACET_TAGS = ["organism", "sample_type", "enrichment", "acquisition", "labelling", "enzyme", "fractionation", "instrument_family"]
+
+
+def facets(con, f: Filters, top=8):
+    """Value counts per tag within the current filter set (ignoring that tag's own filter, like a shop sidebar)."""
+    out = {}
+    for tag in FACET_TAGS:
+        g = Filters(**{**f.model_dump(), tag: None})
+        _, rows = search(con, g, limit=100000)
+        counts = {}
+        for r in rows:
+            v = r["tags"].get(tag) or "unknown"
+            counts[v] = counts.get(v, 0) + 1
+        out[tag] = sorted(counts.items(), key=lambda x: -x[1])[:top]
+    return out
+
+
 # ----------------------------------------------------------------------------- question → filters
 RULES = [
     ("enrichment", "phospho", r"phospho"),
@@ -367,8 +384,9 @@ def search_route(
     since: Optional[int] = None, q: Optional[str] = None, limit: int = Query(25, le=200), offset: int = 0,
 ):
     f = Filters(**{k: v for k, v in locals().items() if k in Filters.model_fields})
-    total, results = search(db(), f, limit, offset)
-    return {"filters": f.model_dump(exclude_none=True), "total": total, "results": results}
+    con = db()
+    total, results = search(con, f, limit, offset)
+    return {"filters": f.model_dump(exclude_none=True), "total": total, "results": results, "facets": facets(con, f)}
 
 
 @app.post("/ask")
@@ -396,7 +414,7 @@ def ask(body: AskIn):
         dropped.append({"key": drop, "value": v, "why": DROP_WHY.get(drop, "no tagged dataset matched it together with the other filters")})
         total, results = search(con, f)
     return {"question": body.q, "parser": how, "interpretation": interp, "dropped": dropped,
-            "filters": f.model_dump(exclude_none=True), "total": total, "results": results}
+            "filters": f.model_dump(exclude_none=True), "total": total, "results": results, "facets": facets(con, f)}
 
 
 @app.get("/map")
@@ -663,6 +681,363 @@ def reanalyse(accession: str):
 def files_txt(accession: str, category: Optional[str] = None):
     files = pride_files(db(), accession)
     return "\n".join(f["ftp"] for f in files if f["ftp"] and (not category or f["category"] == category)) + "\n"
+
+
+# ----------------------------------------------------------------------------- why / eval
+WHY_SYSTEM = """You help a proteomics researcher decide whether a public PRIDE dataset is a good candidate for their question.
+Write 3 short sentences, plain English, no bullet points: (1) what the dataset is, (2) why it fits the question, (3) the main caveat.
+Ground every claim in the tags and evidence given. Never invent methods. If the question is empty, judge general reusability."""
+
+
+@app.get("/dataset/{accession}/why")
+def why(accession: str, q: str = ""):
+    con = db()
+    t = con.execute("SELECT t.*, p.title FROM tags t JOIN projects p USING(accession) WHERE t.accession=?", (accession,)).fetchone()
+    if not t:
+        raise HTTPException(404, "not tagged")
+    t = dict(t)
+    ev = {e["tag"]: dict(e) for e in con.execute("SELECT tag, value, confidence, evidence, source FROM tag_evidence WHERE accession=?", (accession,))}
+    facts = "\n".join(f"{k}: {t.get(k)} (confidence {ev.get(k, {}).get('confidence')}, evidence: {ev.get(k, {}).get('evidence')!r})" for k in TAG_COLS + ["depth_proteins"])
+    text, how = None, "rules"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic
+            client = anthropic.Anthropic(timeout=45, max_retries=1)
+            msg = client.messages.create(model=os.environ.get("ASK_MODEL", "claude-sonnet-5"), max_tokens=400, output_config={"effort": "low"},
+                                         system=WHY_SYSTEM, messages=[{"role": "user", "content": f"Question: {q or '(none)'}\nDataset {accession}: {t['title']}\nSummary: {t.get('summary_one_line')}\n{facts}"}])
+            text = next((b.text for b in msg.content if b.type == "text"), None)
+            how = "llm"
+        except Exception as e:
+            print("why failed:", e, file=sys.stderr)
+    if not text:
+        caveats = [k for k in TAG_COLS if ev.get(k) and (ev[k]["confidence"] or 1) < 0.6]
+        text = (f"{t.get('summary_one_line') or t['title']}. "
+                f"It is a {pretty(t.get('acquisition'))} {pretty(t.get('labelling'))} dataset on {t.get('organism')} {t.get('tissue') or t.get('cell_line') or ''} "
+                f"with {pretty(t.get('enrichment'))} enrichment, digested with {pretty(t.get('enzyme'))} on an {pretty(t.get('instrument_family'))}. "
+                + (f"Low-confidence tags to check by hand: {', '.join(caveats)}." if caveats else "All key tags are high confidence."))
+    return {"accession": accession, "question": q, "why": text.strip(), "parser": how}
+
+
+@app.get("/eval")
+def eval_route():
+    out = {}
+    for name in ["bench", "report"]:
+        f = ROOT / "eval" / f"{name}.json"
+        out[name] = json.load(open(f)) if f.exists() else None
+    out["tagged_by_model"] = {r[0]: r[1] for r in db().execute("SELECT model, count(*) FROM tags GROUP BY model")}
+    return out
+
+
+# ----------------------------------------------------------------------------- analyse
+# Upload a protein table (search-engine export), pick group A vs B, get log2FC / Welch t / BH q + a volcano.
+# pandas/numpy/scipy are imported lazily so the rest of the API works even if they aren't installed yet.
+import shutil
+import subprocess
+import uuid
+
+from fastapi import File, UploadFile
+
+UPLOADS = ROOT / "data" / "uploads"
+ANALYSIS_DIR = ROOT / "analysis"
+EXAMPLE_TABLE = ANALYSIS_DIR / "data" / "lysoip_brain_batch2.csv"
+UPLOAD_EXTS = (".csv", ".tsv", ".txt", ".xlsx")
+MAX_UPLOAD = 200 * 1024 * 1024
+REPLICATE_RE = re.compile(r"^(.+?)[._ ](\d{1,3})$")  # Set1_Brain_IP_LTKI.3 -> stem Set1_Brain_IP_LTKI
+ID_PRIORITY = ["genes", "gene names", "gene", "protein.group", "protein ids", "majority protein ids", "protein.names", "protein", "accession", "id"]
+TRUTHY = {"+", "true", "1", "yes", "y"}
+_DF_CACHE: dict = {}
+
+
+class RunIn(BaseModel):
+    upload_id: str
+    id_column: str
+    group_a: list[str]
+    group_b: list[str]
+    log_transform: str = "auto"  # auto | log2 | none
+    min_valid: int = 2
+    contaminant_column: Optional[str] = None
+
+
+class OdettaIn(BaseModel):
+    upload_id: str
+    prefix: str = "Set1_Brain"
+    name: str = "batch"
+
+
+def _safe_id(upload_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,80}", upload_id or ""):
+        raise HTTPException(400, "bad upload_id")
+    return upload_id
+
+
+def upload_path(upload_id: str) -> pathlib.Path:
+    _safe_id(upload_id)
+    for ext in UPLOAD_EXTS:
+        p = UPLOADS / f"{upload_id}{ext}"
+        if p.exists():
+            return p
+    raise HTTPException(404, "unknown upload_id (uploads are kept in data/uploads)")
+
+
+def as_csv(path: pathlib.Path) -> pathlib.Path:
+    """Odetta's script wants CSV; convert xlsx once and cache next to it."""
+    if path.suffix != ".xlsx":
+        return path
+    out = path.with_name(path.stem + "_conv.csv")
+    if not out.exists():
+        load_df(path.stem).to_csv(out, index=False)
+    return out
+
+
+def load_df(upload_id: str):
+    import pandas as pd
+    if upload_id in _DF_CACHE:
+        return _DF_CACHE[upload_id]
+    path = upload_path(upload_id)
+    if path.suffix == ".xlsx":
+        df = pd.read_excel(path)
+    else:
+        with open(path, "r", errors="replace") as fh:
+            head = fh.readline()
+        sep = "\t" if head.count("\t") > head.count(",") else ","
+        df = pd.read_csv(path, sep=sep, low_memory=False)
+    df.columns = [str(c) for c in df.columns]
+    while len(_DF_CACHE) >= 3:
+        _DF_CACHE.pop(next(iter(_DF_CACHE)))
+    _DF_CACHE[upload_id] = df
+    return df
+
+
+def _clean(v):
+    """JSON-safe scalar: NaN/inf -> None, numpy -> python."""
+    if v is None:
+        return None
+    if isinstance(v, float):
+        return None if (math.isnan(v) or math.isinf(v)) else v
+    if hasattr(v, "item"):
+        return _clean(v.item())
+    return v
+
+
+def inspect_df(upload_id: str):
+    import numpy as np
+    import pandas as pd
+    df = load_df(upload_id)
+    n = len(df)
+    id_columns, numeric, fill = [], [], {}
+    for c in df.columns:
+        s = df[c]
+        if s.dtype == bool or s.dtype == object or str(s.dtype) in ("string", "str"):
+            nn = s.notna().sum()
+            if nn >= 0.5 * n and s.nunique() >= 0.8 * max(nn, 1) and not pd.api.types.is_bool_dtype(s):
+                # text column with mostly unique values: an identifier, unless it's secretly numeric
+                num = pd.to_numeric(s, errors="coerce")
+                if num.notna().sum() < 0.5 * nn:
+                    id_columns.append(c)
+                    continue
+        num = pd.to_numeric(s, errors="coerce") if not pd.api.types.is_numeric_dtype(s) else s
+        if pd.api.types.is_bool_dtype(num):
+            continue
+        f = float(num.notna().mean()) if n else 0.0
+        if f >= 0.2:
+            numeric.append(c)
+            fill[c] = f
+    pri = {k: i for i, k in enumerate(ID_PRIORITY)}
+    id_columns.sort(key=lambda c: (pri.get(c.lower(), 99), df.columns.get_loc(c)))
+    groups: dict = {}
+    for c in numeric:
+        m = REPLICATE_RE.match(c)
+        if m:
+            groups.setdefault(m.group(1), []).append(c)
+    suggested = [{"stem": k, "columns": v, "fill": round(float(np.mean([fill[c] for c in v])), 3)} for k, v in groups.items() if len(v) >= 2]
+    suggested.sort(key=lambda g: (-len(g["columns"]), -g["fill"], g["stem"]))
+    ki = {m.group(1) for c in df.columns if (m := re.match(r"^(.+)_IP_LTKI\.\d+$", c)) and not c.startswith("Imputation_")}
+    wt = {m.group(1) for c in df.columns if (m := re.match(r"^(.+)_IP_LTWT\.\d+$", c)) and not c.startswith("Imputation_")}
+    prefixes = sorted(ki & wt)
+    contaminant_columns = [c for c in df.columns if re.search(r"contamin|reverse|decoy|only identified by site", c, re.I)]
+    return {
+        "upload_id": upload_id, "file": upload_path(upload_id).name, "n_rows": int(n), "n_cols": int(df.shape[1]),
+        "id_columns": id_columns, "numeric_columns": numeric, "suggested_groups": suggested,
+        "contaminant_columns": contaminant_columns,
+        "odetta_compatible": bool(prefixes), "odetta_prefixes": prefixes,
+    }
+
+
+@app.post("/analyse/inspect")
+async def analyse_inspect(file: UploadFile = File(...)):
+    ext = pathlib.Path(file.filename or "table.csv").suffix.lower()
+    if ext not in UPLOAD_EXTS:
+        raise HTTPException(400, f"unsupported file type {ext}; use .csv, .tsv, .txt or .xlsx")
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    uid = uuid.uuid4().hex[:12]
+    dest = UPLOADS / f"{uid}{ext}"
+    size = 0
+    with open(dest, "wb") as out:
+        while chunk := await file.read(1 << 20):
+            size += len(chunk)
+            if size > MAX_UPLOAD:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(413, "file larger than 200 MB")
+            out.write(chunk)
+    try:
+        return inspect_df(uid)
+    except HTTPException:
+        raise
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, f"could not read the table: {e}")
+
+
+@app.get("/analyse/example")
+def analyse_example():
+    """Register Odetta's lyso-IP batch 2 export as an upload (symlink) so the UI has a one-click example."""
+    src = EXAMPLE_TABLE if EXAMPLE_TABLE.exists() else EXAMPLE_TABLE.with_suffix(".xlsx")
+    if not src.exists():
+        raise HTTPException(404, "example table not found under analysis/data/")
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    uid = "example_" + src.stem
+    dest = UPLOADS / f"{uid}{src.suffix}"
+    if not dest.exists():
+        try:
+            os.symlink(src, dest)
+        except OSError:
+            shutil.copyfile(src, dest)
+    return {"upload_id": uid, "file": src.name}
+
+
+@app.get("/analyse/{upload_id}")
+def analyse_get(upload_id: str):
+    """Re-open an existing upload (same payload as POST /analyse/inspect)."""
+    return inspect_df(upload_id)
+
+
+def bh_fdr(p):
+    """Benjamini-Hochberg q-values; NaN p stays NaN."""
+    import numpy as np
+    p = np.asarray(p, float)
+    q = np.full_like(p, np.nan)
+    ok = ~np.isnan(p)
+    m = int(ok.sum())
+    if m == 0:
+        return q
+    order = np.argsort(p[ok])
+    ranked = p[ok][order] * m / np.arange(1, m + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    qq = np.empty(m)
+    qq[order] = np.minimum(ranked, 1.0)
+    q[ok] = qq
+    return q
+
+
+@app.post("/analyse/run")
+def analyse_run(body: RunIn):
+    import numpy as np
+    import pandas as pd
+    from scipy import stats as sps
+    df = load_df(body.upload_id)
+    missing = [c for c in [body.id_column, *body.group_a, *body.group_b] if c not in df.columns]
+    if missing:
+        raise HTTPException(400, f"columns not in table: {missing[:5]}")
+    if len(body.group_a) < 2 or len(body.group_b) < 2:
+        raise HTTPException(400, "each group needs at least 2 columns (replicates) for a t-test")
+    if set(body.group_a) & set(body.group_b):
+        raise HTTPException(400, "a column can't be in both groups")
+    n_input = len(df)
+    dropped_contaminants = 0
+    if body.contaminant_column:
+        if body.contaminant_column not in df.columns:
+            raise HTTPException(400, "contaminant column not in table")
+        flag = df[body.contaminant_column].astype(str).str.strip().str.lower().isin(TRUTHY)
+        dropped_contaminants = int(flag.sum())
+        df = df[~flag]
+    ids = df[body.id_column].astype(str).where(df[body.id_column].notna(), "").to_numpy()
+    A = df[body.group_a].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    B = df[body.group_b].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    A[~(A > 0)] = np.nan  # 0 / negative / NaN = missing
+    B[~(B > 0)] = np.nan
+    allv = np.concatenate([A.ravel(), B.ravel()])
+    allv = allv[~np.isnan(allv)]
+    p99 = float(np.percentile(allv, 99)) if allv.size else 0.0
+    mode = body.log_transform
+    if mode == "auto":
+        mode = "log2" if p99 > 100 else "none"
+    if mode == "log2":
+        A, B = np.log2(A), np.log2(B)
+    elif mode != "none":
+        raise HTTPException(400, "log_transform must be auto, log2 or none")
+    min_valid = max(2, int(body.min_valid))
+    n_a, n_b = np.sum(~np.isnan(A), axis=1), np.sum(~np.isnan(B), axis=1)
+    keep = (n_a >= min_valid) & (n_b >= min_valid)
+    A, B, ids, n_a, n_b = A[keep], B[keep], ids[keep], n_a[keep], n_b[keep]
+    with np.errstate(all="ignore"):
+        ma, mb = np.nanmean(A, axis=1), np.nanmean(B, axis=1)
+        va, vb = np.nanvar(A, axis=1, ddof=1), np.nanvar(B, axis=1, ddof=1)
+        se = np.sqrt(va / n_a + vb / n_b)
+        t = (mb - ma) / se
+        dof = se ** 4 / ((va / n_a) ** 2 / (n_a - 1) + (vb / n_b) ** 2 / (n_b - 1))
+        p = 2 * sps.t.sf(np.abs(t), dof)
+    p = np.where(np.isfinite(p), p, np.nan)
+    q = bh_fdr(p)
+    log2fc = mb - ma
+    sig = ~np.isnan(q) & (q < 0.05)
+    up, down = sig & (log2fc > 0), sig & (log2fc < 0)
+    order = np.argsort(np.where(np.isnan(p), np.inf, p), kind="stable")
+    n_keep = max(2000, int(sig.sum()))
+    top = order[:n_keep]
+    r = lambda x, d=4: None if (x is None or not np.isfinite(x)) else round(float(x), d)  # noqa: E731
+    rows = [{"id": ids[i], "log2fc": r(log2fc[i]), "t": r(t[i], 3), "p": r(p[i], 6) if p[i] >= 1e-4 else _clean(float(p[i])),
+             "q": r(q[i], 6) if q[i] >= 1e-4 else _clean(float(q[i])), "mean_a": r(ma[i], 3), "mean_b": r(mb[i], 3),
+             "n_a": int(n_a[i]), "n_b": int(n_b[i])} for i in top]
+    vol_idx = order[:20000]
+    volcano = [{"id": ids[i], "log2fc": r(log2fc[i], 3), "neglog10p": r(-np.log10(p[i]), 3),
+                "sig": "up" if up[i] else "down" if down[i] else "ns"} for i in vol_idx if not np.isnan(p[i])]
+    return {
+        "summary": {"n_proteins": int(n_input), "n_dropped_contaminants": dropped_contaminants, "n_tested": int(len(ids)),
+                    "n_sig_q05": int(sig.sum()), "n_up": int(up.sum()), "n_down": int(down.sum()),
+                    "log_transform": mode, "p99_raw": r(p99, 2), "min_valid": min_valid,
+                    "sign": "positive = higher in B", "test": "Welch t-test, two-sided; q = Benjamini-Hochberg FDR"},
+        "columns": ["id", "log2fc", "p", "q", "t", "mean_a", "mean_b", "n_a", "n_b"],
+        "rows": rows, "volcano": volcano,
+    }
+
+
+@app.post("/analyse/odetta")
+def analyse_odetta(body: OdettaIn):
+    """Run Odetta's TESE lyso-IP script on an upload. Never 500s: failures come back as ok=false with the log."""
+    import pandas as pd
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,60}", body.prefix) or not re.fullmatch(r"[A-Za-z0-9_\-]{1,60}", body.name):
+        return {"ok": False, "error": "prefix and name must be letters, digits, _ or -", "stdout": "", "stderr": "", "outputs": []}
+    try:
+        csv = as_csv(upload_path(body.upload_id))
+    except HTTPException as e:
+        return {"ok": False, "error": str(e.detail), "stdout": "", "stderr": "", "outputs": []}
+    except Exception as e:
+        return {"ok": False, "error": f"could not convert to CSV: {e}", "stdout": "", "stderr": "", "outputs": []}
+    outdir = UPLOADS / f"{body.upload_id}_out"
+    outdir.mkdir(parents=True, exist_ok=True)
+    script = ANALYSIS_DIR / "tese_lysoip_analysis.py"
+    uv = shutil.which("uv")
+    cmd = ([uv, "run", "--with", "pandas", "--with", "numpy", "--with", "scipy", "python"] if uv else [sys.executable]) + [
+        str(script), "--input", str(csv), "--name", body.name, "--prefix", body.prefix, "--outdir", str(outdir)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=str(ROOT))
+        out, err, rc = proc.stdout, proc.stderr, proc.returncode
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "script timed out after 600 s", "stdout": "", "stderr": "", "outputs": [], "command": " ".join(cmd)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "stdout": "", "stderr": "", "outputs": [], "command": " ".join(cmd)}
+    outputs = []
+    for f in sorted(outdir.glob("*.csv")):
+        try:
+            d = pd.read_csv(f, low_memory=False)
+            head = [{k: _clean(v) for k, v in rec.items()} for rec in d.head(20).to_dict(orient="records")]
+            outputs.append({"name": f.name, "rows": int(len(d)), "columns": [str(c) for c in d.columns], "head": head})
+        except Exception as e:
+            outputs.append({"name": f.name, "rows": 0, "columns": [], "head": [], "error": str(e)})
+    tail = lambda s: "\n".join(s.strip().splitlines()[-30:])  # noqa: E731
+    return {"ok": rc == 0, "returncode": rc, "error": None if rc == 0 else f"script exited with {rc}",
+            "stdout": tail(out), "stderr": tail(err), "outputs": outputs, "outdir": str(outdir.relative_to(ROOT)), "command": " ".join(cmd)}
 
 
 @app.get("/")

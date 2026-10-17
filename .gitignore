@@ -19,3 +19,4 @@ data/tags_json/
 data/chunks/
 analysis/data/*.csv
 analysis/out*/
+data/uploads/
