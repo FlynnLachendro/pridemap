@@ -1,6 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { markSetupSeen } from "@/lib/progress-store";
+import { SamplePicker } from "@/components/sample-picker";
 import { API } from "@/lib/api";
 
 type Param = { value: unknown; why?: string; tag?: string; confidence?: number | null; evidence?: string | null; missed_cleavages?: number; from_pride_ptms?: string[] };
@@ -23,14 +24,93 @@ const CAT: Record<string, string> = { RAW: "Raw instrument files", PEAK: "Peak l
 const gb = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${(b / 1e6).toFixed(0)} MB`);
 const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : String(v));
 
+type RemoteJob = { status: "idle" | "submitting" | "running" | "done" | "error"; job_id: string | null; log: string; err: string | null };
+
+function RunRemote({ accession }: { accession: string }) {
+  const [job, setJob] = useState<RemoteJob>({ status: "idle", job_id: null, log: "", err: null });
+  const seen = useRef<string | null>(null);
+
+  const poll = useCallback(async (id: string) => {
+    const r = await fetch(`${API}/dataset/${accession}/pipeline/remote/${id}/status`);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json() as Promise<{ status: string; log: string }>;
+  }, [accession]);
+
+  useEffect(() => {
+    if (!job.job_id || job.status !== "running") return;
+    let live = true;
+    const tick = async () => {
+      try {
+        const s = await poll(job.job_id!);
+        if (!live) return;
+        if (s.status === "done" || s.status === "error") {
+          setJob((j) => ({ ...j, status: s.status as "done" | "error", log: s.log }));
+        } else {
+          setJob((j) => ({ ...j, log: s.log }));
+        }
+      } catch (e) { if (live) setJob((j) => ({ ...j, status: "error", err: String(e) })); }
+    };
+    const id = window.setInterval(tick, 3000);
+    tick();
+    return () => { live = false; window.clearInterval(id); };
+  }, [job.job_id, job.status, poll]);
+
+  // clean up on unmount if job finished
+  useEffect(() => {
+    return () => {
+      if (job.job_id && job.status === "done" && seen.current !== job.job_id) {
+        seen.current = job.job_id;
+        fetch(`${API}/dataset/${accession}/pipeline/remote/${job.job_id}`, { method: "DELETE" }).catch(() => {});
+      }
+    };
+  }, [accession, job.job_id, job.status]);
+
+  const start = async () => {
+    setJob({ status: "submitting", job_id: null, log: "", err: null });
+    try {
+      const r = await fetch(`${API}/dataset/${accession}/pipeline/remote`, { method: "POST" });
+      if (!r.ok) throw new Error(await r.text());
+      const { job_id } = await r.json();
+      setJob({ status: "running", job_id, log: "", err: null });
+    } catch (e) { setJob({ status: "error", job_id: null, log: "", err: String(e) }); }
+  };
+
+  const busy = job.status === "submitting" || job.status === "running";
+  return (
+    <div className="rounded-md border bg-card p-3 grid gap-2 mt-2">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm font-semibold">Run on cloud (MaxQuant via Devin)</span>
+        {job.status === "running" && <span className="pill">running…</span>}
+        {job.status === "done" && <span className="pill bg-ok-soft text-ok">done</span>}
+        {job.status === "error" && <span className="pill text-warn">error</span>}
+        <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={busy} onClick={start}>
+          {busy ? <><span className="spinner mr-2" />{job.status === "submitting" ? "Submitting…" : "Running…"}</> : "Run on cloud"}
+        </button>
+      </div>
+      <p className="text-xs text-faint">Submits the kit to the remote MaxQuant server; results download automatically when the search finishes.</p>
+      {job.err && <p className="text-xs text-warn">{job.err}</p>}
+      {job.log && (
+        <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">{job.log}</pre>
+      )}
+      {job.status === "done" && job.job_id && (
+        <a className="btn btn-sm btn-primary self-start" href={`${API}/dataset/${accession}/pipeline/remote/${job.job_id}/results`} download={`${accession}_proteinGroups.txt`}>
+          Download proteinGroups.txt
+        </a>
+      )}
+    </div>
+  );
+}
+
 export function Reanalyse({ accession }: { accession: string }) {
   const [out, setOut] = useState<Out | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [remoteAvailable, setRemoteAvailable] = useState(false);
   useEffect(() => { markSetupSeen(accession); }, [accession]);
   useEffect(() => {
     let live = true;
     fetch(`${API}/dataset/${accession}/reanalyse`).then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
       .then((d) => { if (live) setOut(d); }).catch((e) => { if (live) setErr(String(e)); });
+    fetch(`${API}/remote-mq`).then((r) => r.json()).then((d) => { if (live) setRemoteAvailable(d.available); }).catch(() => {});
     return () => { live = false; };
   }, [accession]);
   if (err) return <p className="text-warn text-sm">{err}</p>;
@@ -41,7 +121,15 @@ export function Reanalyse({ accession }: { accession: string }) {
   return (
     <section className="grid gap-4">
       <div>
-        <h2 className="text-lg">Reanalyse this dataset</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-lg">Reanalyse this dataset</h2>
+          {remoteAvailable && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2.5 py-0.5 text-xs font-medium text-ok">
+              <span className="size-1.5 rounded-full bg-ok animate-pulse" />
+              Remote MaxQuant connected
+            </span>
+          )}
+        </div>
         <p className="text-sm text-muted-foreground">
           {out.has_submitter_results ? "Submitter results are on PRIDE; you may not need to re-search." : "No submitter results on PRIDE; search the raw files with the parameters below."}
         </p>
@@ -107,12 +195,24 @@ export function Reanalyse({ accession }: { accession: string }) {
         </div>
       )}
 
+      {out.plan && out.plan.raw_count > 1 && <SamplePicker accession={accession} />}
+
       {out.plan && out.plan.engine && out.plan.engine !== "quantms" && (
         <div className="rounded-xl border bg-card overflow-hidden" data-tour="searchkit">
           <div className="px-4 py-3 border-b flex items-center justify-between gap-3 flex-wrap">
-            <h3 className="text-base">
-              Run the search on your machine with {out.plan.tracks.map((t) => t.engine_label).join(" + ")}
-            </h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-base">
+                {remoteAvailable && out.plan.maxquant_offered
+                  ? <>Run with {out.plan.tracks.map((t) => t.engine_label).join(" + ")} — local or cloud</>
+                  : <>Run the search on your machine with {out.plan.tracks.map((t) => t.engine_label).join(" + ")}</>}
+              </h3>
+              {remoteAvailable && out.plan.maxquant_offered && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2 py-0.5 text-xs text-ok">
+                  <span className="size-1.5 rounded-full bg-ok animate-pulse" />
+                  cloud ready
+                </span>
+              )}
+            </div>
             <a className="btn btn-primary btn-sm" href={`${API}${out.plan.kit_url}`} download>Download kit (zip)</a>
           </div>
           <div className="px-4 py-3 grid gap-2 text-sm">
@@ -144,6 +244,7 @@ export function Reanalyse({ accession }: { accession: string }) {
               <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {out.plan.maxquant_reason}</p>
             )}
           </div>
+          {remoteAvailable && out.plan.maxquant_offered && <RunRemote accession={accession} />}
         </div>
       )}
 

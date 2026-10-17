@@ -13,6 +13,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -239,6 +240,13 @@ def _run_key(name: str) -> str:
     return RUN_NAME_RE.sub("", base).strip().lower()
 
 
+def _loose_key(key: str) -> str:
+    """A run key with zero-padding removed from its numbers. Submitters routinely write Daria_1 in the sample
+    sheet while the deposited file is Daria_01, which would silently drop the annotations for runs 1-9 — the
+    failure looks like 'this dataset has no sample metadata' rather than an error, so match on both forms."""
+    return re.sub(r"\d+", lambda m: m.group(0).lstrip("0") or "0", key)
+
+
 def _slug(value: str, n: int = 14) -> str:
     s = re.sub(r"[^A-Za-z0-9]+", "", re.sub(r"\s*y\.?o\.?\s*", "", str(value or ""), flags=re.I))
     return s[:n]
@@ -371,7 +379,11 @@ def sample_annotations(accession: str, refresh: bool = False) -> dict:
         key = _run_key(name)
         annotations: dict[str, dict] = {}
         for src, table in per_run.items():
-            for field, value in (table.get(key) or {}).items():
+            row_fields = table.get(key)
+            if row_fields is None:
+                loose = {_loose_key(k): v for k, v in table.items()}
+                row_fields = loose.get(_loose_key(key))
+            for field, value in (row_fields or {}).items():
                 annotations.setdefault(field, {"value": value, "source": src.split(":", 1)[1],
                                                "source_kind": src.split(":", 1)[0]})
         rows.append({"file_name": name, "run": key, "size_bytes": f.get("size_bytes"), "ftp": f.get("ftp"),
@@ -839,11 +851,15 @@ def pipeline_stages(plan: dict) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------- MaxQuant / DIA-NN kits
-# Bioconda's MaxQuant container. Published amd64 only, and MaxQuant is .NET: on an arm64 host it runs under
-# emulation, where Mono's JIT dies in its own trampoline before MaxQuant parses an argument. So the image is
-# detected AND smoke-tested, rather than assumed to work because it is present.
+# Bioconda's MaxQuant container. Published amd64 only, and MaxQuant is .NET: under QEMU emulation Mono's JIT
+# aborts in its own trampolines before MaxQuant parses an argument. So the image is detected AND smoke-tested,
+# rather than assumed to work because it is present — and on a non-amd64 host we build a native image instead
+# of relying on emulation at all (see _mq_docker_lib).
 MAXQUANT_IMAGE = "quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1"
 MAXQUANT_IMAGE_VERSION = "2.0.3.0"
+# Our own native-architecture rebuild of the same MaxQuant release, built on the host that needs it.
+MAXQUANT_NATIVE_IMAGE = f"pridemap/maxquant:{MAXQUANT_IMAGE_VERSION}-native"
+MAXQUANT_MONO_BASE = "mono:6.12"  # multi-arch: amd64, arm64/v8, armv7, ppc64le
 DOCKER_MOUNT = "/data"
 
 MQ_INSTRUMENT = {"orbitrap": 0, "timstof": 1, "qtof": 2, "fticr": 0, "ion_trap": 0}
@@ -1084,6 +1100,96 @@ def _download_sh(ctx: dict) -> str:
 PWIZ_IMAGE = "chambm/pwiz-skyline-i-agree-to-the-vendor-licenses"
 
 
+def _mq_docker_lib(plan: dict) -> list[str]:
+    """Which MaxQuant image this host should use, how to prove it runs, and how to build it if it must.
+
+    Single owner of that decision: preflight.sh and run_all.sh both source these definitions, so the image the
+    preflight verifies is necessarily the image the search runs in.
+
+    MaxQuant ships 113 managed .NET assemblies plus five native x86-64 libraries. The assemblies are
+    architecture-neutral CIL and Thermo's RawFileReader is pure managed, so on a non-amd64 host we copy the
+    assemblies out of the published image — without ever executing them — and rebuild them onto a native Mono
+    base. Mono's own architecture is then the host's, which is the configuration Mono is actually tested in.
+    The exception is Bruker: libtimsdata.so and libbaf2sql_c.so are vendor-supplied x86-64 only, so Bruker data
+    has no native path and must go through emulation.
+    """
+    bruker = (plan.get("vendor") == "bruker")
+    lines = [
+        "# ---- which MaxQuant image fits this host",
+        f"MQ_IMAGE_AMD64={MAXQUANT_IMAGE}",
+        f"MQ_IMAGE_NATIVE={MAXQUANT_NATIVE_IMAGE}",
+        'MQ_ARCH="$(uname -m)"',
+        "case \"$MQ_ARCH\" in x86_64|amd64) MQ_NEED_NATIVE=0 ;; *) MQ_NEED_NATIVE=1 ;; esac",
+    ]
+    if bruker:
+        lines += [
+            "# This deposition is Bruker: its readers are vendor x86-64 binaries with no arm64 build, so the",
+            "# native rebuild would load MaxQuant but fail to open a single run. Emulation is the only option.",
+            "MQ_NEED_NATIVE=0",
+        ]
+    lines += [
+        'if [ "$MQ_NEED_NATIVE" = "1" ]; then',
+        '  MQ_IMAGE="$MQ_IMAGE_NATIVE"; MQ_RUN_OPTS=""',
+        "else",
+        '  MQ_IMAGE="$MQ_IMAGE_AMD64"; MQ_RUN_OPTS="--platform linux/amd64"',
+        "fi",
+        "",
+        "# Prints MaxQuant's version, or whatever it crashed with. Never fails the caller: the text is the",
+        "# evidence, and the caller decides. Captured by the caller rather than piped, because under pipefail a",
+        "# pipeline reports the crashing container's status instead of the matcher's — which silently turned an",
+        "# earlier version of this check into an always-pass.",
+        "mq_probe() {",
+        '  docker run --rm $MQ_RUN_OPTS "$MQ_IMAGE" maxquant --version 2>&1 || true',
+        "}",
+        "",
+        "# Mono aborts in its JIT under emulation; a working MaxQuant prints its own banner.",
+        "mq_probe_ok() {",
+        '  case "$1" in *"should not be reached"*|*"Assertion at"*|*SIGABRT*|*SIGSEGV*) return 1 ;; esac',
+        '  case "$1" in *MaxQuantCmd*) return 0 ;; esac',
+        "  return 1",
+        "}",
+        "",
+        "# Build the native image from the published one. docker create + docker cp reads the assemblies out of",
+        "# the amd64 image without running any amd64 code, so this works on a host that cannot execute it.",
+        "mq_build_native() {",
+        '  local d cid rc',
+        '  d="$(mktemp -d)" || return 1',
+        '  printf "  … building a native %s MaxQuant image, once (~1.4GB pull, a few minutes)\\n" "$MQ_ARCH"',
+        '  docker pull -q --platform linux/amd64 "$MQ_IMAGE_AMD64" >/dev/null 2>&1 \\',
+        '    || { rm -rf "$d"; return 1; }',
+        '  cid="$(docker create --platform linux/amd64 "$MQ_IMAGE_AMD64" true 2>/dev/null)" \\',
+        '    || { rm -rf "$d"; return 1; }',
+        '  docker cp "$cid":/usr/local/bin/. "$d/bin" >/dev/null 2>&1; rc=$?',
+        '  docker rm -f "$cid" >/dev/null 2>&1 || true',
+        '  [ "$rc" = "0" ] || { rm -rf "$d"; return 1; }',
+        "  cat > \"$d/Dockerfile\" <<'MQDOCKERFILE'",
+        f"FROM {MAXQUANT_MONO_BASE}",
+        "COPY bin/ /opt/maxquant/",
+        "RUN printf '#!/bin/bash\\nexec mono /opt/maxquant/MaxQuantCmd.exe \"$@\"\\n' \\",
+        "      > /usr/local/bin/maxquant \\",
+        " && chmod +x /usr/local/bin/maxquant",
+        f"WORKDIR {DOCKER_MOUNT}",
+        "ENTRYPOINT []",
+        "MQDOCKERFILE",
+        '  docker build -q -t "$MQ_IMAGE_NATIVE" "$d" >/dev/null 2>&1; rc=$?',
+        '  rm -rf "$d"',
+        '  return $rc',
+        "}",
+        "",
+        "# Make $MQ_IMAGE exist, by whichever route this host needs.",
+        "mq_provision() {",
+        '  if [ "$MQ_NEED_NATIVE" = "1" ]; then',
+        "    mq_build_native",
+        "  else",
+        '    printf "  … pulling %s (one-time, ~1.4GB)\\n" "$MQ_IMAGE"',
+        '    docker pull -q --platform linux/amd64 "$MQ_IMAGE" >/dev/null 2>&1',
+        "  fi",
+        "}",
+        "",
+    ]
+    return lines
+
+
 def preflight_sh(ctx: dict, plan: dict) -> str:
     """Check every tool and enough disk BEFORE the download, not four hours into it.
 
@@ -1156,8 +1262,9 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
             "",
         ]
     if "maxquant" in engines:
+        out += _mq_docker_lib(plan)
         out += [
-            "# ---- MaxQuant. Native install, or the Bioconda container, which we can fetch and verify.",
+            "# ---- MaxQuant. Native install, or the container, which we can provision and verify.",
             "MQ_RUNNER=none",
             "NEED_MQ_PULL=0",
             'if [ -n "${MAXQUANT_CMD:-}" ] && command -v "$MAXQUANT_CMD" >/dev/null 2>&1; then',
@@ -1167,23 +1274,30 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
             'elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
             '  MQ_RUNNER=mono; ok "MaxQuant via mono (\\$MAXQUANT_DIR)"',
             'elif [ "${HAVE_DOCKER:-0}" = "1" ]; then',
-            f'  if ! docker image inspect {MAXQUANT_IMAGE} >/dev/null 2>&1; then',
+            "  MQ_RUNNER=docker",
+            '  if ! docker image inspect "$MQ_IMAGE" >/dev/null 2>&1; then',
             "    NEED_MQ_PULL=1",
-            f'    warn "MaxQuant will come from {MAXQUANT_IMAGE} — a ~1.4GB pull, once"',
-            "    MQ_RUNNER=docker",
+            '    if [ "$MQ_NEED_NATIVE" = "1" ]; then',
+            '      warn "MaxQuant will be built for $MQ_ARCH from $MQ_IMAGE_AMD64 — once, after the other checks pass"',
+            "    else",
+            '      warn "MaxQuant will come from $MQ_IMAGE — a ~1.4GB pull, once"',
+            "    fi",
             "  else",
             "    # Present is not the same as working: prove it can start before committing to the download.",
-            "    # Captured rather than piped — under pipefail a pipeline reports the crashing container's status,",
-            "    # not grep's match, which silently turned this check into an always-pass.",
-            f'    MQ_PROBE="$(docker run --rm {MAXQUANT_IMAGE} mono /usr/local/bin/MaxQuantCmd.exe --version 2>&1 || true)"',
-            '    if [ "${MQ_PROBE#*should not be reached}" != "$MQ_PROBE" ]; then',
-            '      bad "the MaxQuant image is present but crashes on this host: it is linux/amd64, this machine '
-            'is $(uname -m), and Mono dies in its own JIT under QEMU emulation. Easiest fix: in Docker Desktop, '
-            'Settings > General, switch on Rosetta for x86_64/amd64 emulation and re-run — Rosetta runs Mono '
-            'correctly where QEMU does not. Otherwise run this kit on an x86_64 machine, or install MaxQuant '
-            'natively and set MAXQUANT_CMD."',
+            '    MQ_PROBE="$(mq_probe)"',
+            '    if mq_probe_ok "$MQ_PROBE"; then',
+            '      ok "MaxQuant ($MQ_IMAGE, verified it starts)"',
+            '    elif [ "$MQ_NEED_NATIVE" = "1" ]; then',
+            '      NEED_MQ_PULL=1',
+            '      warn "the native MaxQuant image is stale or broken — it will be rebuilt"',
+            '    elif [ "$MQ_ARCH" = "x86_64" ] || [ "$MQ_ARCH" = "amd64" ]; then',
+            "      # Same architecture as the image, so emulation is not the explanation; show what it said.",
+            '      bad "the MaxQuant image is present but will not start on this $MQ_ARCH host: $MQ_PROBE"',
             "    else",
-            '      MQ_RUNNER=docker; ok "MaxQuant (docker image, verified it starts)"',
+            '      bad "the MaxQuant image is present but crashes here: it is linux/amd64, this machine is '
+            '$MQ_ARCH, and Mono aborts in its own JIT under QEMU emulation. This deposition is Bruker, whose '
+            'readers the vendor ships for x86-64 only, so there is no native build to fall back on. Switch on '
+            'Rosetta in Docker Desktop (Settings > General) and re-run, or run this kit on an x86_64 machine."',
             "    fi",
             "  fi",
             "else",
@@ -1226,17 +1340,16 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
     if "maxquant" in engines:
         out += [
             'if [ "${NEED_MQ_PULL:-0}" = "1" ]; then',
-            f'  printf "  … pulling {MAXQUANT_IMAGE} (one-time, ~1.4GB)\\n"',
-            f'  docker pull -q --platform linux/amd64 {MAXQUANT_IMAGE} >/dev/null 2>&1 \\',
-            f'    || {{ printf "  ✗ could not pull {MAXQUANT_IMAGE}\\n" >&2; exit 1; }}',
-            "  # Pulled is not the same as runnable; the same smoke test as above, now that it exists.",
-            f'  MQ_PROBE="$(docker run --rm {MAXQUANT_IMAGE} mono /usr/local/bin/MaxQuantCmd.exe --version 2>&1 || true)"',
-            '  if [ "${MQ_PROBE#*should not be reached}" != "$MQ_PROBE" ]; then',
-            '    printf "  ✗ MaxQuant pulled, but it crashes under emulation on this $(uname -m) host. '
-            'Switch on Rosetta in Docker Desktop (Settings > General) and re-run, or use an x86_64 machine.\\n" >&2',
+            '  mq_provision \\',
+            '    || { printf "  ✗ could not provision MaxQuant (%s)\\n" "$MQ_IMAGE" >&2; exit 1; }',
+            "  # Provisioned is not the same as runnable; the same smoke test as above, now that it exists.",
+            '  MQ_PROBE="$(mq_probe)"',
+            '  if ! mq_probe_ok "$MQ_PROBE"; then',
+            '    printf "  ✗ MaxQuant was provisioned but will not start on this %s host:\\n%s\\n" \\',
+            '      "$MQ_ARCH" "$MQ_PROBE" >&2',
             "    exit 1",
             "  fi",
-            '  printf "  ✓ MaxQuant (docker, pulled and verified)\\n"',
+            '  printf "  ✓ MaxQuant (%s, provisioned and verified)\\n" "$MQ_IMAGE"',
             "fi",
         ]
     out += [
@@ -1422,6 +1535,8 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         '[ -n "$MQ" ]    || { command -v MaxQuantCmd.exe >/dev/null 2>&1 && MQ=MaxQuantCmd.exe; }',
         '[ -n "$DIANN" ] || { command -v diann-linux >/dev/null 2>&1 && DIANN=diann-linux; }',
         '[ -n "$DIANN" ] || { command -v diann >/dev/null 2>&1 && DIANN=diann; }',
+        # Same definitions preflight.sh checked, so the search runs in the image that was verified.
+        *(_mq_docker_lib(plan) if "maxquant" in {tr["engine"] for tr in (plan.get("tracks") or [])} else []),
         _stage_lib(),
         'printf "PRIDE Map pipeline — %s\\n" "$ACCESSION"',
         f'printf "%s\\n" "{max(1, total - 1)} automated stages, then group A vs B is yours to pick. '
@@ -1487,9 +1602,9 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 '      || fail "MaxQuant (mono) failed — see combined/proc/ for the step it stopped on"',
                 '  elif command -v docker >/dev/null 2>&1; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#{DOCKER_MOUNT}#g" {tr["config"]} > {_docker_config(tr["config"])}',
-                f'    step "running MaxQuant in {MAXQUANT_IMAGE}; paths resolved against {DOCKER_MOUNT}"',
-                f'    docker run --rm --platform linux/amd64 -v "$PWD":{DOCKER_MOUNT} -w {DOCKER_MOUNT} \\',
-                f'      {MAXQUANT_IMAGE} maxquant {DOCKER_MOUNT}/{_docker_config(tr["config"])} \\',
+                f'    step "running MaxQuant in $MQ_IMAGE; paths resolved against {DOCKER_MOUNT}"',
+                f'    docker run --rm $MQ_RUN_OPTS -v "$PWD":{DOCKER_MOUNT} -w {DOCKER_MOUNT} \\',
+                f'      "$MQ_IMAGE" maxquant {DOCKER_MOUNT}/{_docker_config(tr["config"])} \\',
                 '      || fail "MaxQuant (docker) failed — see combined/proc/ for the step it stopped on"',
                 "  else",
                 '    fail "MaxQuant not found — preflight.sh explains the options (MAXQUANT_CMD / MAXQUANT_DIR / docker)"',
@@ -1913,3 +2028,94 @@ def corrections_stats():
     return {"total": sum(by_tag.values()), "accessions": con.execute("SELECT count(DISTINCT accession) FROM corrections").fetchone()[0],
             "by_tag": by_tag,
             "applied": con.execute("SELECT count(*) FROM tags WHERE model LIKE '%(corrected)'").fetchone()[0]}
+
+
+@router.get("/remote-mq")
+def remote_mq_info():
+    """Tells the UI whether a remote MaxQuant server is configured (MQ_SERVER_URL in .env)."""
+    return {"available": bool(os.environ.get("MQ_SERVER_URL", "").strip())}
+
+
+# ----------------------------------------------------------------------------- remote MaxQuant server (Devin/cloud)
+# Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to a remote Linux machine running the Devin-provisioned
+# mq_server. Temporary: tear down by unsetting MQ_SERVER_URL.
+
+def _mq_remote_url() -> str:
+    url = os.environ.get("MQ_SERVER_URL", "").rstrip("/")
+    if not url:
+        raise HTTPException(503, "MQ_SERVER_URL is not set — add it to .env")
+    return url
+
+
+def _mq_auth_headers() -> dict:
+    token = os.environ.get("MQ_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+@router.post("/dataset/{accession}/pipeline/remote")
+def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
+    """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
+    base_url = _mq_remote_url()
+    kit_bytes, _ = search_kit(accession, _api_base(request), "", runs=parse_runs(runs))
+    boundary = "PrideMapBoundary"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="kit"; filename="kit.zip"\r\n'
+        f"Content-Type: application/zip\r\n\r\n"
+    ).encode() + kit_bytes + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"{base_url}/run", data=body,
+        headers={**_mq_auth_headers(), "Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise HTTPException(e.code, e.read().decode(errors="replace"))
+    except Exception as e:
+        raise HTTPException(502, f"remote MQ server unreachable: {e}")
+
+
+@router.get("/dataset/{accession}/pipeline/remote/{job_id}/status")
+def pipeline_remote_status(accession: str, job_id: str):
+    """Poll job status from the remote server. Returns {status, log}."""
+    base_url = _mq_remote_url()
+    req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise HTTPException(e.code, e.read().decode(errors="replace"))
+    except Exception as e:
+        raise HTTPException(502, f"remote MQ server unreachable: {e}")
+
+
+@router.get("/dataset/{accession}/pipeline/remote/{job_id}/results")
+def pipeline_remote_results(accession: str, job_id: str):
+    """Download proteinGroups.txt from a completed remote job."""
+    base_url = _mq_remote_url()
+    req = urllib.request.Request(f"{base_url}/results/{job_id}", headers=_mq_auth_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read()
+        return Response(content=data, media_type="text/tab-separated-values",
+                        headers={"Content-Disposition": f'attachment; filename="{accession}_proteinGroups.txt"'})
+    except urllib.error.HTTPError as e:
+        raise HTTPException(e.code, e.read().decode(errors="replace"))
+    except Exception as e:
+        raise HTTPException(502, f"remote MQ server unreachable: {e}")
+
+
+@router.delete("/dataset/{accession}/pipeline/remote/{job_id}")
+def pipeline_remote_delete(accession: str, job_id: str):
+    """Clean up a finished job's temp directory on the remote server."""
+    base_url = _mq_remote_url()
+    req = urllib.request.Request(f"{base_url}/job/{job_id}", headers=_mq_auth_headers(), method="DELETE")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise HTTPException(e.code, e.read().decode(errors="replace"))
+    except Exception as e:
+        raise HTTPException(502, f"remote MQ server unreachable: {e}")
