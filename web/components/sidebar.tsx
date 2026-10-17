@@ -72,7 +72,7 @@ export function Sidebar({ className }: { className?: string }) {
         <Wordmark />
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-4" aria-label="Primary">
+      <nav className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 flex flex-col gap-4 min-w-0" aria-label="Primary">
         {NAV_GROUPS.map((g) => (
           <div key={g.title} className="grid gap-0.5">
             <div className="nav-group">{g.title}</div>
@@ -92,7 +92,7 @@ export function Sidebar({ className }: { className?: string }) {
                     {rows && rows.length > 6 && <li><Link href="/collections" className="nav-sub-link text-faint">all {rows.length} collections…</Link></li>}
                     <li>
                       <button type="button" className="nav-sub-link w-full text-teal" onClick={() => setNewOpen(true)}>
-                        <Plus size={13} strokeWidth={2.4} aria-hidden /><span>New collection{sel.length ? ` from shortlist (${sel.length})` : ""}</span>
+                        <Plus size={13} strokeWidth={2.4} aria-hidden /><span className="truncate">{sel.length ? `New from shortlist (${sel.length})` : "New collection"}</span>
                       </button>
                     </li>
                   </ul>

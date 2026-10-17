@@ -28,7 +28,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
       </div>
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar className="hidden md:flex w-52" />
+        <Sidebar className="hidden md:flex w-56" />
         <main className="flex-1 min-w-0 overflow-y-auto bg-background">
           <WorkflowRail />
           <div className="w-full max-w-6xl mx-auto px-5 py-8 pb-24">{children}</div>
