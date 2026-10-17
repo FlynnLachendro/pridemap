@@ -120,7 +120,7 @@ export function Tour() {
         const step = steps[idx];
         if (step.next) { cancelled = true; d.destroy(); status(`Tour: opening ${label(step.next)}…`); try { sessionStorage.setItem("tour-status", `Tour: opening ${label(step.next)}…`); } catch {} window.dispatchEvent(new Event("pridemap-navigating")); router.push(step.next); return; }
         const nxt = steps[idx + 1];
-        if (!nxt) { cancelled = true; d.destroy(); status(null); router.push("/about"); return; }
+        if (!nxt) { cancelled = true; d.destroy(); status(null); router.push("/tour/done"); return; }
         if (nxt.before && ACTIONS[nxt.before]) { status(MSG[nxt.before] ?? "Tour: working…"); await ACTIONS[nxt.before](); status(null); }
         d.moveNext();
       },

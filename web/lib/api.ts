@@ -51,3 +51,12 @@ export const TAG_LABEL: Record<string, string> = {
   search_engine: "search engine", depth_proteins: "proteins identified", since: "since", q: "free text",
 };
 export const METHOD_TAGS = ["enrichment", "acquisition", "labelling", "enzyme", "fractionation", "instrument_family", "search_engine"];
+
+export const TOUR_Q_HISTORY_KEY = "pridemap.history";
+export function remember(q: string) {
+  try {
+    const cur: { q: string; at: string }[] = JSON.parse(localStorage.getItem(TOUR_Q_HISTORY_KEY) ?? "[]");
+    const next = [{ q, at: new Date().toISOString() }, ...cur.filter((h) => h.q !== q)].slice(0, 8);
+    localStorage.setItem(TOUR_Q_HISTORY_KEY, JSON.stringify(next));
+  } catch {}
+}

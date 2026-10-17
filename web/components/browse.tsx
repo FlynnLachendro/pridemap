@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { API, ask, pretty, TAG_LABEL, type AskOut, type Dropped, type Result } from "@/lib/api";
+import { API, ask, pretty, remember, TAG_LABEL, TOUR_Q_HISTORY_KEY, type AskOut, type Dropped, type Result } from "@/lib/api";
 import { ResultCard } from "@/components/result-card";
 import { ProteinCard } from "@/components/protein-card";
 import { CompareToggle } from "@/components/compare-toggle";
@@ -47,6 +47,7 @@ export function Browse() {
   const [view, setView] = useState<"cards" | "table">("cards");
   const [facetFind, setFacetFind] = useState<Record<string, string>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [recent, setRecent] = useState<string[]>([]);
   const lastUrl = useRef("");
 
   // all state lives in the URL so links from the map / dataset pages and sharing just work
@@ -55,6 +56,12 @@ export function Browse() {
     params.forEach((v, k) => { if (v) f[k] = v; });
     return f;
   }, [params]);
+
+  useEffect(() => {
+    // read after paint (localStorage is client-only; avoids a hydration mismatch and a sync setState in the effect body)
+    const id = window.setTimeout(() => { try { setRecent((JSON.parse(localStorage.getItem(TOUR_Q_HISTORY_KEY) ?? "[]") as { q: string }[]).map((h) => h.q)); } catch {} }, 0);
+    return () => window.clearTimeout(id);
+  }, [askOut, filters]);
 
   const push = useCallback((next: Record<string, string | undefined>) => {
     const p = new URLSearchParams();
@@ -84,6 +91,7 @@ export function Browse() {
   function submit(text: string) {
     const t = text.trim();
     if (!t) { push({}); setAskOut(null); return; }
+    remember(t);
     if (looksLikeQuestion(t)) {
       start(async () => {
         try {
@@ -129,8 +137,13 @@ export function Browse() {
       <div className="flex flex-wrap gap-1.5 items-center text-xs">
         <span className="text-faint font-mono">Try:</span>
         {EXAMPLES.map((ex) => <button key={ex} type="button" onClick={() => { setQ(ex); submit(ex); }} className="pill hover:bg-surface-2">{ex}</button>)}
-
       </div>
+      {recent.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 items-center text-xs -mt-2">
+          <span className="text-faint font-mono">Recent:</span>
+          {recent.slice(0, 5).map((r) => <button key={r} type="button" onClick={() => { setQ(r); submit(r); }} className="pill hover:bg-surface-2">{r}</button>)}
+        </div>
+      )}
 
       {err && <p className="text-warn text-sm">API error: {err}</p>}
 
