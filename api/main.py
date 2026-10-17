@@ -34,7 +34,7 @@ app = FastAPI(
     description="Find the right PRIDE proteomics dataset. LLM-tagged, filterable, explained. "
     "Every tag carries confidence + the evidence sentence it came from.",
 )
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], expose_headers=["Content-Disposition"])
 
 TAG_COLS = ["organism", "sample_type", "tissue", "cell_line", "disease", "enrichment", "acquisition",
             "labelling", "enzyme", "fractionation", "instrument_family", "search_engine"]
