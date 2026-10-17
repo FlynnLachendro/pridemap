@@ -199,6 +199,8 @@ def main():
     def work(p):
         try:
             tags, usage = tag_one(client, a.model, p)
+            if tags is None:
+                return p["accession"], None, None, "no parsed output (refusal or empty response)"
             return p["accession"], tags, usage, None
         except Exception as e:
             return p["accession"], None, None, f"{type(e).__name__}: {e}"[:300]
