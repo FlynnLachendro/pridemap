@@ -69,6 +69,7 @@ class Filters(BaseModel):
     instrument_family: Optional[str] = None
     search_engine: Optional[str] = None
     since: Optional[int] = None
+    years: Optional[str] = None  # comma list of publication years (browse facet)
     q: Optional[str] = None
     # intent flags that change "watch" warnings
     wants_absolute_quant: bool = False
@@ -104,7 +105,7 @@ ORG_ALIASES = {"human": "homo sapiens", "mouse": "mus musculus", "rat": "rattus 
 def norm_org(v: Optional[str]):
     if not v:
         return v
-    return ORG_ALIASES.get(v.lower().strip(), v)
+    return "|".join(ORG_ALIASES.get(x.lower().strip(), x) for x in v.split("|"))
 
 
 def search(con, f: Filters, limit=25, offset=0):
@@ -116,8 +117,9 @@ def search(con, f: Filters, limit=25, offset=0):
         if k == "organism":
             v = norm_org(v)
         if k in FUZZY:
-            where.append(f"lower(t.{k}) LIKE ?")
-            params.append(f"%{v.lower()}%")
+            vals = [x.strip() for x in v.split("|") if x.strip()]  # '|' separates several picked values; ',' may appear inside names
+            where.append("(" + " OR ".join(f"lower(t.{k}) LIKE ?" for _ in vals) + ")")
+            params += [f"%{x.lower()}%" for x in vals]
         else:
             vals = [x.strip() for x in v.split(",") if x.strip()]
             where.append(f"t.{k} IN ({','.join('?' * len(vals))})")
@@ -125,6 +127,10 @@ def search(con, f: Filters, limit=25, offset=0):
     if f.since:
         where.append("p.publication_date >= ?")
         params.append(f"{f.since}-01-01")
+    if f.years:
+        ys = [y.strip() for y in f.years.split(",") if y.strip()]
+        where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})")
+        params += ys
     join_fts = ""
     if f.q:
         join_fts = " JOIN projects_fts fts ON fts.accession = p.accession"
@@ -235,8 +241,9 @@ def where_for(f: Filters, exclude: str | None = None):
         if k == "organism":
             v = norm_org(v)
         if k in FUZZY:
-            where.append(f"lower(t.{k}) LIKE ?")
-            params.append(f"%{v.lower()}%")
+            vals = [x.strip() for x in v.split("|") if x.strip()]  # '|' separates several picked values; ',' may appear inside names
+            where.append("(" + " OR ".join(f"lower(t.{k}) LIKE ?" for _ in vals) + ")")
+            params += [f"%{x.lower()}%" for x in vals]
         else:
             vals = [x.strip() for x in v.split(",") if x.strip()]
             where.append(f"t.{k} IN ({','.join('?' * len(vals))})")
@@ -244,6 +251,10 @@ def where_for(f: Filters, exclude: str | None = None):
     if f.since:
         where.append("p.publication_date >= ?")
         params.append(f"{f.since}-01-01")
+    if f.years and exclude != "year":
+        ys = [y.strip() for y in f.years.split(",") if y.strip()]
+        where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})")
+        params += ys
     join = ""
     if f.q:
         join = " JOIN projects_fts fts ON fts.accession = p.accession"
@@ -259,6 +270,9 @@ def facets(con, f: Filters, top=8):
         join, where, params = where_for(f, exclude=tag)
         rows = con.execute(f"SELECT COALESCE(t.{tag}, 'unknown'), count(*) n FROM tags t JOIN projects p ON p.accession = t.accession{join}{where} GROUP BY 1 ORDER BY n DESC LIMIT ?", params + [top]).fetchall()
         out[tag] = [[r[0], r[1]] for r in rows]
+    join, where, params = where_for(f, exclude="year")
+    rows = con.execute(f"SELECT substr(p.publication_date,1,4) y, count(*) n FROM tags t JOIN projects p ON p.accession = t.accession{join}{where} GROUP BY 1 ORDER BY y DESC LIMIT ?", params + [top]).fetchall()
+    out["year"] = [[r[0] or "unknown", r[1]] for r in rows]
     return out
 
 
@@ -981,7 +995,7 @@ def bh_fdr(p):
 
 
 @app.post("/analyse/run")
-def analyse_run(body: RunIn):
+def analyse_run(body: RunIn, all_rows: bool = False):
     np, pd = _sci()
     from scipy import stats as sps
     df = load_df(body.upload_id)
@@ -1032,7 +1046,7 @@ def analyse_run(body: RunIn):
     sig = ~np.isnan(q) & (q < 0.05)
     up, down = sig & (log2fc > 0), sig & (log2fc < 0)
     order = np.argsort(np.where(np.isnan(p), np.inf, p), kind="stable")
-    n_keep = max(2000, int(sig.sum()))
+    n_keep = len(order) if all_rows else max(2000, int(sig.sum()))
     top = order[:n_keep]
     r = lambda x, d=4: None if (x is None or not np.isfinite(x)) else round(float(x), d)  # noqa: E731
     rows = [{"id": ids[i], "log2fc": r(log2fc[i]), "t": r(t[i], 3), "p": r(p[i], 6) if p[i] >= 1e-4 else _clean(float(p[i])),
@@ -1087,6 +1101,123 @@ def analyse_odetta(body: OdettaIn):
     tail = lambda s: "\n".join(s.strip().splitlines()[-30:])  # noqa: E731
     return {"ok": rc == 0, "returncode": rc, "error": None if rc == 0 else f"script exited with {rc}",
             "stdout": tail(out), "stderr": tail(err), "outputs": outputs, "outdir": str(outdir.relative_to(ROOT)), "command": " ".join(cmd)}
+
+
+# ----------------------------------------------------------------------------- analysis report bundle (Odetta: export what was done + the code)
+import io
+import subprocess
+import zipfile
+from fastapi.responses import StreamingResponse
+
+
+class ReportIn(RunIn):
+    accession: Optional[str] = None   # PRIDE dataset the table came from, if any
+    label_a: str = "A"
+    label_b: str = "B"
+    notes: Optional[str] = None
+
+
+REPRODUCE = """#!/usr/bin/env python3
+# Reproduces the PRIDE Map "Analyse" step exactly as run on {when}.
+# Needs: pandas numpy scipy   (uv run --with pandas --with numpy --with scipy reproduce.py)
+import json, sys
+import numpy as np, pandas as pd
+from scipy import stats as sps
+
+P = json.load(open("params.json"))
+df = pd.read_csv(P["input_file"], low_memory=False) if not P["input_file"].endswith(".xlsx") else pd.read_excel(P["input_file"])
+if P.get("contaminant_column"):
+    flag = df[P["contaminant_column"]].astype(str).str.strip().str.lower().isin({{"+", "true", "1", "yes", "y"}})
+    df = df[~flag]
+ids = df[P["id_column"]].astype(str).to_numpy()
+A = np.array(df[P["group_a"]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float), copy=True)
+B = np.array(df[P["group_b"]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float), copy=True)
+A[~(A > 0)] = np.nan; B[~(B > 0)] = np.nan
+if P["log_transform"] == "log2":
+    A, B = np.log2(A), np.log2(B)
+n_a, n_b = np.sum(~np.isnan(A), 1), np.sum(~np.isnan(B), 1)
+keep = (n_a >= P["min_valid"]) & (n_b >= P["min_valid"])
+A, B, ids, n_a, n_b = A[keep], B[keep], ids[keep], n_a[keep], n_b[keep]
+with np.errstate(all="ignore"):
+    ma, mb = np.nanmean(A, 1), np.nanmean(B, 1)
+    va, vb = np.nanvar(A, 1, ddof=1), np.nanvar(B, 1, ddof=1)
+    se = np.sqrt(va / n_a + vb / n_b)
+    t = (mb - ma) / se
+    dof = se**4 / ((va / n_a)**2 / (n_a - 1) + (vb / n_b)**2 / (n_b - 1))
+    p = 2 * sps.t.sf(np.abs(t), dof)
+# Benjamini-Hochberg
+order = np.argsort(np.where(np.isnan(p), np.inf, p)); m = np.sum(~np.isnan(p)); q = np.full_like(p, np.nan)
+ranked = p[order][:m]; qv = ranked * m / (np.arange(m) + 1); qv = np.minimum.accumulate(qv[::-1])[::-1]; q[order[:m]] = np.minimum(qv, 1)
+out = pd.DataFrame({{"id": ids, "log2fc": mb - ma, "t": t, "p": p, "q": q, "mean_a": ma, "mean_b": mb, "n_a": n_a, "n_b": n_b}}).sort_values("p")
+out.to_csv("results_reproduced.csv", index=False)
+print(f"tested={{len(out)}} significant_q05={{int((out.q < 0.05).sum())}}")
+"""
+
+
+@app.post("/analyse/report")
+def analyse_report(body: ReportIn):
+    """Zip: report.md (methods paragraph + parameters + summary + top hits), results.csv (every tested protein),
+    params.json, reproduce.py (standalone, same maths), provenance.json. Made for uploading next to a paper."""
+    res = analyse_run(RunIn(**body.model_dump(exclude={"accession", "label_a", "label_b", "notes"})), all_rows=True)
+    np, pd = _sci()
+    when = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
+    except Exception:
+        commit = "unknown"
+    import scipy
+    s = res["summary"]
+    src = upload_path(body.upload_id)
+    params = {"input_file": src.name, "id_column": body.id_column, "group_a": body.group_a, "group_b": body.group_b,
+              "label_a": body.label_a, "label_b": body.label_b, "log_transform": s["log_transform"], "min_valid": s["min_valid"],
+              "contaminant_column": body.contaminant_column, "pride_accession": body.accession}
+    # full results, not just the top 2000: rerun the frame through the same function already did the maths; export rows
+    rows = res["rows"]
+    top = rows[:25]
+    md = [f"# Differential analysis report", "",
+          f"Generated by PRIDE Map (commit {commit}) on {when}.", "",
+          "## Methods", "",
+          f"Protein intensities were taken from `{src.name}`" + (f" (PRIDE dataset {body.accession})" if body.accession else "") + ". "
+          + (f"{s['n_dropped_contaminants']} rows flagged in `{body.contaminant_column}` were removed as contaminants. " if body.contaminant_column else "")
+          + f"Intensities were {'log2-transformed' if s['log_transform'] == 'log2' else 'used as provided (already log-scale)'}; zero and missing values were treated as missing. "
+          f"Proteins quantified in at least {s['min_valid']} replicates of both groups were tested ({s['n_tested']:,} of {s['n_proteins']:,}). "
+          f"Group {body.label_a} comprised {len(body.group_a)} samples ({', '.join(body.group_a)}) and group {body.label_b} {len(body.group_b)} samples ({', '.join(body.group_b)}). "
+          f"Log2 fold change is mean({body.label_b}) − mean({body.label_a}), so positive values are higher in {body.label_b}. "
+          f"Differences were assessed with a two-sided Welch t-test per protein; p-values were adjusted for multiple testing with the Benjamini–Hochberg procedure, "
+          f"and proteins with q < 0.05 were called significant. Analysis used numpy {np.__version__}, pandas {pd.__version__}, scipy {scipy.__version__}.", "",
+          "## Results", "",
+          f"- proteins in table: {s['n_proteins']:,}", f"- tested: {s['n_tested']:,}", f"- significant (q < 0.05): {s['n_sig_q05']:,}",
+          f"- higher in {body.label_b}: {s['n_up']:,}", f"- higher in {body.label_a}: {s['n_down']:,}", "",
+          f"## Top {len(top)} by p-value", "", "| id | log2FC | p | q | n_a | n_b |", "|---|---|---|---|---|---|"]
+    md += [f"| {r['id']} | {r['log2fc']} | {r['p']} | {r['q']} | {r['n_a']} | {r['n_b']} |" for r in top]
+    if body.notes:
+        md += ["", "## Notes", "", body.notes]
+    md += ["", "## Files", "", "- `results.csv`: every tested protein with log2FC, t, p, q, group means and replicate counts",
+           "- `params.json`: the exact parameters", "- `reproduce.py`: standalone script with the same maths; run it next to the input file to regenerate `results.csv`",
+           "- `provenance.json`: software versions, commit, timestamp"]
+    csv_buf = io.StringIO()
+    pd.DataFrame(rows, columns=res["columns"]).to_csv(csv_buf, index=False)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("report.md", "\n".join(md))
+        z.writestr("results.csv", csv_buf.getvalue())
+        z.writestr("params.json", json.dumps(params, indent=1))
+        z.writestr("reproduce.py", REPRODUCE.format(when=when))
+        z.writestr("provenance.json", json.dumps({"app": "PRIDE Map", "commit": commit, "generated": when, "python": sys.version.split()[0],
+                                                   "numpy": np.__version__, "pandas": pd.__version__, "scipy": scipy.__version__,
+                                                   "input_file": src.name, "input_sha256": _sha256(src), "pride_accession": body.accession}, indent=1))
+    buf.seek(0)
+    name = f"pridemap_analysis_{(body.accession or 'table')}_{dt.datetime.now(dt.UTC).strftime('%Y%m%d')}.zip"
+    return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+def _sha256(path: pathlib.Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ----------------------------------------------------------------------------- protein (UniProt)
@@ -1150,6 +1281,65 @@ def protein(name: str, organism: Optional[str] = None):
     con.execute("INSERT OR REPLACE INTO protein_cache VALUES (?,?,?)", (key, json.dumps(out), dt.datetime.now(dt.UTC).isoformat()))
     con.commit()
     return out
+
+
+# ----------------------------------------------------------------------------- browse (PRIDE-style landing)
+@app.get("/browse")
+def browse(
+    q: Optional[str] = None, organism: Optional[str] = None, sample_type: Optional[str] = None, tissue: Optional[str] = None,
+    cell_line: Optional[str] = None, disease: Optional[str] = None, enrichment: Optional[str] = None, acquisition: Optional[str] = None,
+    labelling: Optional[str] = None, enzyme: Optional[str] = None, fractionation: Optional[str] = None, instrument_family: Optional[str] = None,
+    search_engine: Optional[str] = None, years: Optional[str] = None, since: Optional[int] = None,
+    tagged: str = "all", sort: str = "relevance", page: int = 1, size: int = Query(20, le=100), facet_top: int = 12,
+):
+    """Faceted browse over everything. Tagged datasets get ranking + reasons; untagged ones (until tagging finishes) are
+    included when `tagged=all`, found by keyword / organism / year only, and flagged `tagged: false`."""
+    f = Filters(**{k: v for k, v in locals().items() if k in Filters.model_fields})
+    con = db()
+    _, tagged_rows = search(con, f, limit=1000000)
+    if sort == "downloads":
+        tagged_rows.sort(key=lambda r: -(r["downloads"] or 0))
+    elif sort == "date":
+        tagged_rows.sort(key=lambda r: r["publication_date"] or "", reverse=True)
+    elif sort == "depth":
+        tagged_rows.sort(key=lambda r: -(r["tags"].get("depth_proteins") or 0))
+    untagged_rows = []
+    tag_filters_set = any(getattr(f, k) for k in TAG_COLS if k != "organism")
+    if tagged == "all" and not tag_filters_set:
+        where, params, join = ["t.accession IS NULL"], [], ""
+        if f.q:
+            join = " JOIN projects_fts fts ON fts.accession = p.accession"
+            where.append("projects_fts MATCH ?")
+            params.append(fts_query(f.q))
+        if f.organism:
+            vals = norm_org(f.organism).split("|")
+            where.append("(" + " OR ".join("lower(p.organisms) LIKE ?" for _ in vals) + ")")
+            params += [f"%{v.lower()}%" for v in vals]
+        if f.since:
+            where.append("p.publication_date >= ?"); params.append(f"{f.since}-01-01")
+        if f.years:
+            ys = [y.strip() for y in f.years.split(",") if y.strip()]
+            where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})"); params += ys
+        order = {"downloads": "p.organic_downloads DESC", "date": "p.publication_date DESC"}.get(sort, "p.organic_downloads DESC")
+        rows = con.execute(f"SELECT p.accession, p.title, p.publication_date, p.organic_downloads, p.pubmed_id, p.organisms, p.organism_parts, p.instruments, p.experiment_types "
+                           f"FROM projects p LEFT JOIN tags t ON t.accession = p.accession{join} WHERE {' AND '.join(where)} ORDER BY {order}", params).fetchall()
+        for r in rows:
+            untagged_rows.append({"accession": r["accession"], "title": r["title"], "summary": None, "publication_date": r["publication_date"],
+                                  "downloads": r["organic_downloads"], "pubmed_id": r["pubmed_id"], "pride_url": PRIDE_URL + r["accession"], "tagged": False,
+                                  "raw": {"organisms": jl(r["organisms"]), "organism_parts": jl(r["organism_parts"]), "instruments": jl(r["instruments"]), "experiment_types": jl(r["experiment_types"])},
+                                  "tags": {}, "fits": [], "watch": [], "score": 0})
+    for r in tagged_rows:
+        r["tagged"] = True
+    if sort in ("downloads", "date") and untagged_rows:
+        key = (lambda r: -(r["downloads"] or 0)) if sort == "downloads" else (lambda r: r["publication_date"] or "")
+        allrows = sorted(tagged_rows + untagged_rows, key=key, reverse=(sort == "date"))
+    else:
+        allrows = tagged_rows + untagged_rows  # relevance: tagged (ranked) first, then untagged by downloads
+    total = len(allrows)
+    start = (page - 1) * size
+    return {"filters": f.model_dump(exclude_none=True), "sort": sort, "page": page, "size": size, "total": total,
+            "counts": {"tagged": len(tagged_rows), "untagged": len(untagged_rows)},
+            "results": allrows[start:start + size], "facets": facets(con, f, top=facet_top)}
 
 
 @app.get("/")
