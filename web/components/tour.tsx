@@ -133,7 +133,7 @@ export function Tour() {
       },
       steps: steps.map((s) => ({
         element: s.el,
-        popover: { title: s.title, description: s.text, side: s.side ?? "bottom", align: "start", progressText: `${s.i + 1} of ${STEPS.length}` },
+        popover: { title: s.title, description: s.text, side: s.side ?? "bottom", align: "start", progressText: `${s.i + 1} of ${STEPS.length}`, doneBtnText: s.next ? "Next →" : "Finish" },
       })),
     });
     drv.current = d;

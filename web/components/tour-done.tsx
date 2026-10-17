@@ -11,6 +11,7 @@ const PLACES = [
   { href: "/flow", title: "Workflow", when: "Run the whole loop with your shortlist: confirm, set up the search, analyse, check." },
   { href: "/analyse", title: "Analyse", when: "Protein table in, fold changes, FDR, volcano and a publication bundle out." },
   { href: "/eval", title: "Eval", when: "See how far to trust the tags: humans vs model, model vs model." },
+  { href: "/mcp", title: "MCP / agents", when: "Plug all of this into Claude Desktop, Claude Code or your own agent, and watch one use it." },
   { href: "/collections", title: "Collections", when: "Name a shortlist, share the link, export it as SDRF or a download script." },
   { href: "/saved", title: "Saved searches", when: "Save a question and see which datasets have landed in PRIDE since." },
 ];
