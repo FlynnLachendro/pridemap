@@ -29,5 +29,6 @@ export const STEPS: TourStep[] = [
   { route: "/analyse", el: '[data-tour="groups"]', title: "Pick group A and group B", text: "Lyso‑IP against mock beads. You run it.", before: "set-groups-run" },
   { route: "/analyse", el: '[data-tour="results"]', title: "Your first look", text: "8,223 proteins tested, 225 significant, volcano plot, sortable table. The pandas step, without pandas." },
   { route: "/analyse", el: '[data-tour="report"]', title: "Take it to the paper", text: "One zip: a Methods paragraph written from these exact parameters, every tested protein, the parameters, a script that reproduces the result, and software versions.", next: "/eval?tour=14" },
-  { route: "/eval", el: '[data-tour="bench"]', title: "Know how much to trust it", text: "Five models on the same 200 datasets: cost, speed, agreement. Humans vs model on a hand‑labelled set. Every tag in the app shows its confidence and evidence.", next: "/tour/done" },
+  { route: "/eval", el: '[data-tour="bench"]', title: "Know how much to trust it", text: "Five models on the same 200 datasets: cost, speed, agreement. Humans vs model on a hand‑labelled set. Every tag in the app shows its confidence and evidence.", next: "/mcp?tour=15" },
+  { route: "/mcp", el: '[data-tour="agent"]', title: "Let your own assistant do all of this", text: "Every step you just took is also a tool an AI agent can call through MCP. Here Claude is answering a question by searching, reading a dataset and comparing, live, with the same evidence you saw.", before: "run-agent", next: "/tour/done" },
 ];

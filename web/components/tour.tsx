@@ -21,6 +21,7 @@ const MSG: Record<string, string> = {
   "tick-candidate": "Tour: Claude is writing the case for each candidate…",
   "load-example": "Tour: loading Odetta’s protein table…",
   "set-groups-run": "Tour: running lyso‑IP vs mock beads…",
+  "run-agent": "Tour: Claude is using the tools (searching, reading, comparing)…",
 };
 async function waitFor(sel: string, ms = 15000) {
   const t0 = Date.now();
@@ -70,6 +71,12 @@ const ACTIONS: Record<string, () => Promise<void>> = {
     await waitFor('[data-tour="groups"]', 30000);
     await sleep(500);
   },
+  "run-agent": async () => {
+    const b = (await waitFor('[data-tour="agent-run"]')) as HTMLButtonElement | null;
+    b?.click();
+    await waitFor('[data-tour="agent-done"]', 120000);
+    await sleep(400);
+  },
   "set-groups-run": async () => {
     const sel = (await waitFor('[data-tour="group-b"]')) as HTMLSelectElement | null;
     if (sel) {
@@ -84,7 +91,7 @@ const ACTIONS: Record<string, () => Promise<void>> = {
 
 function label(href: string) {
   const p = href.split("?")[0];
-  return p.startsWith("/dataset/") ? "the dataset’s set‑up sheet" : { "/compare": "Compare", "/flow": "Workflow", "/analyse": "Analyse", "/eval": "Eval" }[p] ?? p;
+  return p.startsWith("/dataset/") ? "the dataset’s set‑up sheet" : { "/compare": "Compare", "/flow": "Workflow", "/analyse": "Analyse", "/eval": "Eval", "/mcp": "the agent page", "/tour/done": "the finish" }[p] ?? p;
 }
 
 export function Tour() {

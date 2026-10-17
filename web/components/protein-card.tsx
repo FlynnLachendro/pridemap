@@ -1,9 +1,10 @@
 "use client";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { API } from "@/lib/api";
 
 type P = { found: boolean; name: string; accession?: string; protein_name?: string; gene?: string; organism?: string; length?: number; mass_kda?: number;
-  tissue_specificity?: string | null; function?: string; locations?: string[]; tryptic_peptides_usable?: number; detectability?: string; url?: string; error?: string };
+  tissue_specificity?: string | null; function?: string; locations?: string[]; tryptic_peptides_usable?: number; detectability?: string; url?: string; error?: string; synonyms?: string[] };
 
 export function ProteinCard({ name, organism, tissue }: { name: string; organism?: string; tissue?: string }) {
   const [p, setP] = useState<P | null>(null);
@@ -32,6 +33,12 @@ export function ProteinCard({ name, organism, tissue }: { name: string; organism
       </div>
       {p.tissue_specificity && <p className="text-muted-foreground"><span className="label mr-2">Tissue</span>{p.tissue_specificity}</p>}
       {p.function && <p className="text-muted-foreground line-clamp-2"><span className="label mr-2">Function</span>{p.function}</p>}
+      {p.synonyms && p.synonyms.length > 0 && (
+        <div className="flex flex-wrap gap-2 items-center pt-1">
+          <Link href={`/?q=${encodeURIComponent(p.synonyms.join("|"))}${organism ? `&organism=${encodeURIComponent(organism)}` : ""}`} className="btn btn-sm">Datasets that mention {p.gene ?? p.name} →</Link>
+          <span className="text-xs text-faint">searches titles, descriptions and protocols for: {p.synonyms.join(", ")}</span>
+        </div>
+      )}
 
     </div>
   );

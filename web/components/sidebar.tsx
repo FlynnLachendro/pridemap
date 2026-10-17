@@ -14,6 +14,9 @@ export const NAV = [
   { href: "/analyse", label: "Analyse" },
   { href: "/flow", label: "Workflow" },
   { href: "/eval", label: "Eval" },
+  { href: "/collections", label: "Collections" },
+  { href: "/saved", label: "Saved searches" },
+  { href: "/mcp", label: "MCP / agents" },
   { href: "/about", label: "About" },
 ];
 

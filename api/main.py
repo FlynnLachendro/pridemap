@@ -181,7 +181,10 @@ def search(con, f: Filters, limit=25, offset=0):
 
 
 def fts_query(q: str) -> str:
-    # quote each token so punctuation can't break FTS5 syntax; OR tokens for recall
+    # 'a|b c' means alternatives, each matched as a phrase; otherwise OR the tokens for recall. Quoting keeps FTS5 syntax safe.
+    if "|" in q:
+        alts = [a.strip() for a in q.split("|") if a.strip()]
+        return " OR ".join('"' + " ".join(re.findall(r"[A-Za-z0-9\-]+", a)) + '"' for a in alts) or '""'
     toks = [t for t in re.findall(r"[A-Za-z0-9\-]+", q) if len(t) > 2]
     return " OR ".join(f'"{t}"' for t in toks) or '""'
 
@@ -1251,7 +1254,7 @@ def protein(name: str, organism: Optional[str] = None):
         return json.loads(row[0])
     q = f"(gene_exact:{name} OR protein_name:{name})" + (f" AND organism_id:{taxon}" if taxon else "") + " AND reviewed:true"
     url = ("https://rest.uniprot.org/uniprotkb/search?query=" + urllib.parse.quote(q)
-           + "&fields=accession,protein_name,gene_primary,organism_name,cc_tissue_specificity,cc_subcellular_location,cc_function,sequence,length,mass&format=json&size=1")
+           + "&fields=accession,protein_name,gene_names,organism_name,cc_tissue_specificity,cc_subcellular_location,cc_function,sequence,length,mass&format=json&size=1")
     try:
         with urllib.request.urlopen(url, timeout=30) as r:
             res = json.load(r).get("results", [])
@@ -1274,6 +1277,9 @@ def protein(name: str, organism: Optional[str] = None):
             "organism": r.get("organism", {}).get("scientificName"),
             "length": r.get("sequence", {}).get("length"), "mass_kda": round((r.get("sequence", {}).get("molWeight") or 0) / 1000, 1),
             "tissue_specificity": tissue, "function": (func or "")[:400], "locations": locs,
+            "synonyms": list(dict.fromkeys([x for g in (r.get("genes") or []) for x in ([g.get("geneName", {}).get("value")] + [s.get("value") for s in g.get("synonyms", [])]) if x]
+                                           + [r.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value")]
+                                           + [a.get("fullName", {}).get("value") for a in r.get("proteinDescription", {}).get("alternativeNames", [])]))[:8],
             "tryptic_peptides_usable": usable, "tryptic_peptides_total": total,
             "detectability": ("good" if usable >= 8 else "fair" if usable >= 4 else "poor") + f": trypsin yields {usable} peptides of usable length (7–25 aa)",
             "url": f"https://www.uniprot.org/uniprotkb/{r['primaryAccession']}/entry",
@@ -1340,6 +1346,15 @@ def browse(
     return {"filters": f.model_dump(exclude_none=True), "sort": sort, "page": page, "size": size, "total": total,
             "counts": {"tagged": len(tagged_rows), "untagged": len(untagged_rows)},
             "results": allrows[start:start + size], "facets": facets(con, f, top=facet_top)}
+
+
+# ----------------------------------------------------------------------------- feature routers (separate modules)
+from collections_api import router as collections_router  # noqa: E402
+from omics import router as omics_router  # noqa: E402
+from agent_api import router as agent_router  # noqa: E402
+app.include_router(collections_router)
+app.include_router(omics_router)
+app.include_router(agent_router)
 
 
 @app.get("/")
