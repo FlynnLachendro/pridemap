@@ -109,7 +109,7 @@ HANDOVER.html         the full handover (run, architecture, pitch, gotchas); man
 
 ## Status and honesty
 
-- Tagged: 40,500+ of 41,548 datasets (1,661 by Claude Sonnet 5, the rest by DeepSeek V4.1 Flash through Hugging Face's router, ~$33 + ~$50); ~180 failed the model call and ~800 were added to PRIDE after the crawl. The bundle in `data/demo/` (gzipped shards, loaded by `./dev.sh`) carries every tagged dataset; the full SQLite file is attached to the GitHub release as `pride.db.zst` (`zstd -d` it into `data/`). See Eval for the model comparison.
+- Tagged: 41,361 of 41,548 datasets (1,661 by Claude Sonnet 5, the rest by DeepSeek V4.1 Flash through Hugging Face's router, ~$33 + ~$50); ~180 failed the model call and ~800 were added to PRIDE after the crawl. The bundle in `data/demo/` (gzipped shards, loaded by `./dev.sh`) carries every tagged dataset; the full SQLite file is attached to the GitHub release as `pride.db.zst` (`zstd -d` it into `data/`). See Eval for the model comparison.
 - The first 291 were tagged by Claude Sonnet 5 through Claude Code sessions using the exact prompt and schema in `tag.py`; every row records which model tagged it.
 - Methods sections were available for ~64% of datasets (open‑access only). The rest were tagged from PRIDE metadata alone and say so.
 - Tags are model output. Confidence and evidence are shown everywhere so you can judge; "wrong?" on any tag records a correction.

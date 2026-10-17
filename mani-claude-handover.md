@@ -126,7 +126,7 @@ Git‑ignored and therefore **not on a fresh clone**: `data/raw/`, `data/pride.d
 - Analyse from PRIDE: `GET /dataset/{acc}/results` (candidate tables; raw-only datasets get a note) and `POST /analyse/from_pride {accession, file_name}` (fetches from PRIDE FTP over https into `data/uploads/<ACC>_<file>.<ext>`, unzips the best table from archives, 400 MB cap). UI: `FromPride` panel at the top of `/analyse` (`?acc=PXD…` prefills), Workflow step 4 links `Analyse PXD… →` per confirmed dataset.
 - Eval page: three explainer cards (what a tag is, what agreement means and against what, what is missing) + captions on both tables.
 - Dataset page `BackLink`; sidebar collections list collapsible (`pridemap.side-collections`), count badge on the entry.
-- Full data: tagging finished Saturday evening (~40.5k of 41.5k; ~180 model failures, ~800 projects newer than the crawl). `data/demo/*.jsonl.gz` carries all of it; `pride.db.zst` is a GitHub release asset for a one-file install: `zstd -d pride.db.zst -o data/pride.db`.
+- Full data: tagging finished Saturday evening (41,361 of 41,548; ~180 model failures, ~800 projects newer than the crawl). `data/demo/*.jsonl.gz` carries all of it; `pride.db.zst` is a GitHub release asset for a one-file install: `zstd -d pride.db.zst -o data/pride.db`.
 
 ## 8. Open work, in priority order
 
