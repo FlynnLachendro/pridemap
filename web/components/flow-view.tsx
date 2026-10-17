@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { API, pretty, TAG_LABEL, type Result } from "@/lib/api";
+import { API, pretty, TAG_LABEL } from "@/lib/api";
 import { useCompare } from "@/lib/compare-store";
 
 type Why = { why: string; parser: string };
@@ -25,12 +25,12 @@ function Step({ n, title, done, children }: { n: number; title: string; done?: b
 }
 
 function Candidate({ acc, q, confirmed, onConfirm }: { acc: string; q: string; confirmed: boolean; onConfirm: (v: boolean) => void }) {
-  const [r, setR] = useState<Result | null>(null);
+  const [r, setR] = useState<{ summary: string | null; title: string; tags: Record<string, string | number | null> } | null>(null);
   const [why, setWhy] = useState<Why | null>(null);
   const [re, setRe] = useState<Re | null>(null);
   useEffect(() => {
     let live = true;
-    fetch(`${API}/search?q=${encodeURIComponent(acc)}&limit=1`).then((x) => x.json()).then((d) => { if (live) setR(d.results?.find((x: Result) => x.accession === acc) ?? d.results?.[0] ?? null); }).catch(() => {});
+    fetch(`${API}/dataset/${acc}`).then((x) => x.json()).then((d) => { if (live) setR({ summary: d.tags?.summary_one_line ?? null, title: d.project?.title ?? acc, tags: d.tags ?? {} }); }).catch(() => {});
     fetch(`${API}/dataset/${acc}/why?q=${encodeURIComponent(q)}`).then((x) => x.json()).then((d) => { if (live) setWhy(d); }).catch(() => {});
     fetch(`${API}/dataset/${acc}/reanalyse`).then((x) => x.json()).then((d) => { if (live) setRe(d); }).catch(() => {});
     return () => { live = false; };

@@ -225,17 +225,40 @@ def reasons(r, ev, f: Filters):
 FACET_TAGS = ["organism", "sample_type", "enrichment", "acquisition", "labelling", "enzyme", "fractionation", "instrument_family"]
 
 
+def where_for(f: Filters, exclude: str | None = None):
+    """Same WHERE logic as search(), as SQL + params, optionally ignoring one tag (for facet counts)."""
+    where, params = [], []
+    for k in TAG_COLS:
+        v = getattr(f, k)
+        if not v or k == exclude:
+            continue
+        if k == "organism":
+            v = norm_org(v)
+        if k in FUZZY:
+            where.append(f"lower(t.{k}) LIKE ?")
+            params.append(f"%{v.lower()}%")
+        else:
+            vals = [x.strip() for x in v.split(",") if x.strip()]
+            where.append(f"t.{k} IN ({','.join('?' * len(vals))})")
+            params += vals
+    if f.since:
+        where.append("p.publication_date >= ?")
+        params.append(f"{f.since}-01-01")
+    join = ""
+    if f.q:
+        join = " JOIN projects_fts fts ON fts.accession = p.accession"
+        where.append("projects_fts MATCH ?")
+        params.append(fts_query(f.q))
+    return join, (" WHERE " + " AND ".join(where) if where else ""), params
+
+
 def facets(con, f: Filters, top=8):
-    """Value counts per tag within the current filter set (ignoring that tag's own filter, like a shop sidebar)."""
+    """Value counts per tag within the current filter set, ignoring that tag's own filter (like a shop sidebar). Pure SQL."""
     out = {}
     for tag in FACET_TAGS:
-        g = Filters(**{**f.model_dump(), tag: None})
-        _, rows = search(con, g, limit=100000)
-        counts = {}
-        for r in rows:
-            v = r["tags"].get(tag) or "unknown"
-            counts[v] = counts.get(v, 0) + 1
-        out[tag] = sorted(counts.items(), key=lambda x: -x[1])[:top]
+        join, where, params = where_for(f, exclude=tag)
+        rows = con.execute(f"SELECT COALESCE(t.{tag}, 'unknown'), count(*) n FROM tags t JOIN projects p ON p.accession = t.accession{join}{where} GROUP BY 1 ORDER BY n DESC LIMIT ?", params + [top]).fetchall()
+        out[tag] = [[r[0], r[1]] for r in rows]
     return out
 
 
@@ -748,6 +771,17 @@ TRUTHY = {"+", "true", "1", "yes", "y"}
 _DF_CACHE: dict = {}
 
 
+def _sci():
+    """numpy + pandas, or a clear 503 until the API is restarted with the new dependencies."""
+    try:
+        import numpy as np
+        import pandas as pd
+        return np, pd
+    except ImportError:
+        raise HTTPException(503, "analysis needs pandas/numpy/scipy: restart the API (uv run api/main.py) to pick up the new dependencies")
+
+
+
 class RunIn(BaseModel):
     upload_id: str
     id_column: str
@@ -790,7 +824,7 @@ def as_csv(path: pathlib.Path) -> pathlib.Path:
 
 
 def load_df(upload_id: str):
-    import pandas as pd
+    _, pd = _sci()
     if upload_id in _DF_CACHE:
         return _DF_CACHE[upload_id]
     path = upload_path(upload_id)
@@ -820,8 +854,7 @@ def _clean(v):
 
 
 def inspect_df(upload_id: str):
-    import numpy as np
-    import pandas as pd
+    np, pd = _sci()
     df = load_df(upload_id)
     n = len(df)
     id_columns, numeric, fill = [], [], {}
@@ -863,8 +896,14 @@ def inspect_df(upload_id: str):
     }
 
 
-@app.post("/analyse/inspect")
-async def analyse_inspect(file: UploadFile = File(...)):
+try:  # FastAPI refuses to register a File(...) route without python-multipart; keep the API bootable until the server is restarted with the new deps
+    import multipart  # noqa: F401
+    HAVE_MULTIPART = True
+except ImportError:
+    HAVE_MULTIPART = False
+
+
+async def _analyse_inspect(file: UploadFile):
     ext = pathlib.Path(file.filename or "table.csv").suffix.lower()
     if ext not in UPLOAD_EXTS:
         raise HTTPException(400, f"unsupported file type {ext}; use .csv, .tsv, .txt or .xlsx")
@@ -887,6 +926,16 @@ async def analyse_inspect(file: UploadFile = File(...)):
     except Exception as e:
         dest.unlink(missing_ok=True)
         raise HTTPException(400, f"could not read the table: {e}")
+
+
+if HAVE_MULTIPART:
+    @app.post("/analyse/inspect")
+    async def analyse_inspect(file: UploadFile = File(...)):
+        return await _analyse_inspect(file)
+else:
+    @app.post("/analyse/inspect")
+    async def analyse_inspect_unavailable():
+        raise HTTPException(503, "upload needs python-multipart: restart the API (uv run api/main.py) to pick up the new dependencies")
 
 
 @app.get("/analyse/example")
@@ -914,7 +963,7 @@ def analyse_get(upload_id: str):
 
 def bh_fdr(p):
     """Benjamini-Hochberg q-values; NaN p stays NaN."""
-    import numpy as np
+    np, _ = _sci()
     p = np.asarray(p, float)
     q = np.full_like(p, np.nan)
     ok = ~np.isnan(p)
@@ -932,8 +981,7 @@ def bh_fdr(p):
 
 @app.post("/analyse/run")
 def analyse_run(body: RunIn):
-    import numpy as np
-    import pandas as pd
+    np, pd = _sci()
     from scipy import stats as sps
     df = load_df(body.upload_id)
     missing = [c for c in [body.id_column, *body.group_a, *body.group_b] if c not in df.columns]
@@ -1005,7 +1053,7 @@ def analyse_run(body: RunIn):
 @app.post("/analyse/odetta")
 def analyse_odetta(body: OdettaIn):
     """Run Odetta's TESE lyso-IP script on an upload. Never 500s: failures come back as ok=false with the log."""
-    import pandas as pd
+    _, pd = _sci()
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,60}", body.prefix) or not re.fullmatch(r"[A-Za-z0-9_\-]{1,60}", body.name):
         return {"ok": False, "error": "prefix and name must be letters, digits, _ or -", "stdout": "", "stderr": "", "outputs": []}
     try:
