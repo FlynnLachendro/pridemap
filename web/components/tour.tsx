@@ -122,9 +122,9 @@ export function Tour() {
 }
 
 export function TourButton({ className }: { className?: string }) {
-  const router = useRouter();
+  // Full page load on purpose: the tour starts from a clean Browse page whatever page you're on.
   return (
-    <button type="button" className={className} onClick={() => { try { localStorage.removeItem("pridemap.compare"); localStorage.removeItem("pridemap.confirmed"); } catch {} router.push("/?tour=0"); }}>
+    <button type="button" className={className} onClick={() => { try { localStorage.removeItem("pridemap.compare"); localStorage.removeItem("pridemap.confirmed"); } catch {} window.location.assign("/?tour=0"); }}>
       ▶ Take the tour
     </button>
   );

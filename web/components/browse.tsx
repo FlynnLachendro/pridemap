@@ -63,7 +63,7 @@ export function Browse() {
 
   const load = useCallback((f: Record<string, string>) => {
     const p = new URLSearchParams();
-    Object.entries(f).forEach(([k, v]) => { if (k !== "ask" && v) p.set(k, v); });
+    Object.entries(f).forEach(([k, v]) => { if (k !== "ask" && k !== "tour" && v) p.set(k, v); });
     if (!p.get("size")) p.set("size", "20");
     const url = `${API}/browse?${p.toString()}`;
     if (url === lastUrl.current) return;
@@ -106,7 +106,7 @@ export function Browse() {
     push({ ...filters, [pk]: next.join(sep(key)) || undefined, page: undefined });
   }
   const isOn = (key: string, value: string) => (filters[paramKey(key)] ?? "").split(sep(key)).includes(value);
-  const activeChips = Object.entries(filters).filter(([k]) => !["page", "size", "sort", "tagged", "view", "ask", "q"].includes(k));
+  const activeChips = Object.entries(filters).filter(([k]) => !["page", "size", "sort", "tagged", "view", "ask", "q", "tour"].includes(k));
 
   const total = out?.total ?? 0;
   const page = Number(filters.page ?? 1);
