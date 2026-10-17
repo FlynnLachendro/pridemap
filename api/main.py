@@ -250,22 +250,36 @@ _FACET_CACHE: dict = {}
 
 
 def facets(con, f: Filters, top=8):
-    """Value counts per tag within the current filter set, ignoring that tag's own filter (like a shop sidebar). Pure SQL,
-    joins projects only when a project-level filter (year, text) is set, cached 60 s per filter set."""
+    """Value counts per tag within the current filter set, ignoring that tag's own filter (like a shop sidebar).
+    One pass over the filtered rows serves every unfiltered facet; only tags that are themselves filtered need
+    their own query. Cached 60 s per filter set."""
     key = (json.dumps(f.model_dump(), sort_keys=True), top)
     hit = _FACET_CACHE.get(key)
     if hit and time.time() - hit[0] < 60:
         return hit[1]
-    out = {}
     needs_projects = bool(f.q or f.since or f.years)
-    for tag in FACET_TAGS:
-        join, where, params = where_for(f, exclude=tag)
-        src = f"FROM tags t JOIN projects p ON p.accession = t.accession{join}" if needs_projects else "FROM tags t"
-        rows = con.execute(f"SELECT COALESCE(t.{tag}, 'unknown'), count(*) n {src}{where} GROUP BY 1 ORDER BY n DESC LIMIT ?", params + [top]).fetchall()
-        out[tag] = [[r[0], r[1]] for r in rows]
-    join, where, params = where_for(f, exclude="year")
-    rows = con.execute(f"SELECT substr(p.publication_date,1,4) y, count(*) n FROM tags t JOIN projects p ON p.accession = t.accession{join}{where} GROUP BY 1 ORDER BY y DESC LIMIT ?", params + [top]).fetchall()
-    out["year"] = [[r[0] or "unknown", r[1]] for r in rows]
+    cols = FACET_TAGS + ["year"]
+
+    def count_rows(exclude):
+        join, where, params = where_for(f, exclude=exclude)
+        src = f"FROM tags t JOIN projects p ON p.accession = t.accession{join}" if (needs_projects or exclude == "year" or True) else "FROM tags t"
+        sel = ", ".join(f"t.{c}" for c in FACET_TAGS) + ", substr(p.publication_date,1,4)"
+        counts = {c: {} for c in cols}
+        for row in con.execute(f"SELECT {sel} {src}{where}", params):
+            for c, v in zip(cols, row):
+                v = v or "unknown"
+                counts[c][v] = counts[c].get(v, 0) + 1
+        return counts
+
+    base = count_rows(exclude=None)
+    out = {}
+    for c in cols:
+        filtered = (c == "year" and bool(f.years)) or (c != "year" and bool(getattr(f, c, None)))
+        counts = count_rows(exclude=c)[c] if filtered else base[c]
+        items = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+        if c == "year":
+            items = sorted(counts.items(), key=lambda x: x[0], reverse=True)
+        out[c] = [[k, n] for k, n in items[:top]]
     _FACET_CACHE[key] = (time.time(), out)
     return out
 

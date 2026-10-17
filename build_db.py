@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE INDEX IF NOT EXISTS idx_projects_pubmed ON projects(pubmed_id);
 CREATE INDEX IF NOT EXISTS idx_projects_pubdate ON projects(publication_date);
+CREATE INDEX IF NOT EXISTS idx_projects_cover ON projects(accession, organic_downloads, publication_date, pubmed_id);
+CREATE INDEX IF NOT EXISTS idx_projects_untagged ON projects(organic_downloads DESC, accession, organisms, publication_date);
+CREATE INDEX IF NOT EXISTS idx_projects_dl ON projects(organic_downloads);
+CREATE INDEX IF NOT EXISTS idx_ev_acc ON tag_evidence(accession);
 CREATE TABLE IF NOT EXISTS papers (
   pubmed_id INTEGER PRIMARY KEY, pmcid TEXT, is_open_access INTEGER, title TEXT,
   methods_text TEXT, fetched_at TEXT, error TEXT
@@ -42,6 +46,12 @@ CREATE TABLE IF NOT EXISTS tag_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_tags_enrichment ON tags(enrichment);
 CREATE INDEX IF NOT EXISTS idx_tags_organism ON tags(organism);
+CREATE INDEX IF NOT EXISTS idx_tags_sample ON tags(sample_type);
+CREATE INDEX IF NOT EXISTS idx_tags_acq ON tags(acquisition);
+CREATE INDEX IF NOT EXISTS idx_tags_lab ON tags(labelling);
+CREATE INDEX IF NOT EXISTS idx_tags_enz ON tags(enzyme);
+CREATE INDEX IF NOT EXISTS idx_tags_frac ON tags(fractionation);
+CREATE INDEX IF NOT EXISTS idx_tags_inst ON tags(instrument_family);
 CREATE TABLE IF NOT EXISTS corrections (
   id INTEGER PRIMARY KEY AUTOINCREMENT, accession TEXT, tag TEXT, suggested_value TEXT,
   note TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
