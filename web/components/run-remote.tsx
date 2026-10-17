@@ -173,7 +173,20 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         </ol>
       {busy && (
         <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">
-          {job.status === "submitting" ? "Submitting job…" : job.log ? job.log.split("\n").slice(-10).join("\n") : "Waiting for output…"}
+          {job.status === "submitting"
+            ? [
+                `Dataset : ${accession}`,
+                runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
+                "",
+                "Submitting job…",
+              ].join("\n")
+            : [
+                `Dataset : ${accession}`,
+                runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
+                job.job_id ? `Job ID  : ${job.job_id}` : "",
+                "",
+                job.log ? job.log.split("\n").slice(-10).join("\n") : "Waiting for output…",
+              ].filter(Boolean).join("\n")}
         </pre>
       )}
       {job.status !== "running" && job.log && (() => {
