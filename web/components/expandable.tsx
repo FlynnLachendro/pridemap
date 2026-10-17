@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /** Long text with a clamped preview and a show more / less toggle. */
 export function Expandable({ text, lines = 3, className = "" }: { text: string | null | undefined; lines?: number; className?: string }) {
@@ -15,8 +15,16 @@ export function Expandable({ text, lines = 3, className = "" }: { text: string |
 }
 
 /** A section whose body is hidden until opened; header shows a one-line summary. */
-export function Collapsible({ title, summary, defaultOpen = false, children, id }: { title: string; summary?: React.ReactNode; defaultOpen?: boolean; children: React.ReactNode; id?: string }) {
+export function Collapsible({ title, summary, defaultOpen = false, children, id, openOnHash }: { title: string; summary?: React.ReactNode; defaultOpen?: boolean; children: React.ReactNode; id?: string; openOnHash?: string }) {
   const [open, setOpen] = useState(defaultOpen);
+  // open when the page is reached via #hash (set-up sheet links, the tour), without flashing closed first
+  useEffect(() => {
+    if (!openOnHash) return;
+    const check = () => { if (window.location.hash === `#${openOnHash}` || new URLSearchParams(window.location.search).has("tour")) setOpen(true); };
+    check();
+    window.addEventListener("hashchange", check);
+    return () => window.removeEventListener("hashchange", check);
+  }, [openOnHash]);
   return (
     <section className="card overflow-hidden" id={id}>
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-surface-2">

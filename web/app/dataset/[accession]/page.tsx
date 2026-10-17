@@ -79,7 +79,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
         )}
 
         <div id="reanalyse" data-tour="reanalyse">
-          <Collapsible title="Reanalyse this dataset" summary="files on PRIDE and the search parameters to use" defaultOpen={false}>
+          <Collapsible title="Reanalyse this dataset" summary="files on PRIDE and the search parameters to use" defaultOpen={false} openOnHash="reanalyse">
             <Reanalyse accession={p.accession} />
           </Collapsible>
         </div>
