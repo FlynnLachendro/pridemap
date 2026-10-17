@@ -128,15 +128,18 @@ function scrollTo(el: HTMLElement | undefined, want?: "center" | "start", onlyIf
   if (!el) return;
   const sc = scroller(el);
   const box = sc ? sc.getBoundingClientRect() : { top: 0, height: window.innerHeight };
+  // sticky things inside the scroller (the workflow rail) cover its top edge: scroll past them
+  const rail = sc?.querySelector(".rail") as HTMLElement | null;
+  const covered = rail && !el.closest(".rail") ? rail.offsetHeight : 0;
   const r = el.getBoundingClientRect();
-  const vh = box.height;
+  const vh = box.height - covered;
   const fits = r.height < vh * 0.72;
-  const top = r.top - box.top;                          // element top relative to the scroller's viewport
+  const top = r.top - box.top - covered;                // element top relative to the usable viewport
   if (onlyIfOff) {
     const visible = top >= 0 && (fits ? top + r.height <= vh : top <= vh * 0.3);
     if (visible) return;
   }
-  const delta = top - (fits && want !== "start" ? (vh - r.height) / 2 : 24);
+  const delta = top - (fits && want !== "start" ? (vh - r.height) / 2 : 20);
   if (sc) sc.scrollTop = Math.max(0, sc.scrollTop + delta);
   else window.scrollTo({ top: Math.max(0, window.scrollY + delta), behavior: "instant" as ScrollBehavior });
 }
@@ -172,6 +175,8 @@ export function Tour() {
       smoothScroll: false,
       onHighlightStarted: (el) => {
         const idx = d.getActiveIndex() ?? 0;
+        // the shortlist bar would sit on top of most highlights; show it only on its own step
+        document.body.classList.toggle("tour-hide-bar", steps[idx]?.el !== '[data-tour="compare-bar"]');
         scrollTo(el as HTMLElement | undefined, steps[idx]?.scroll);
       },
       onHighlighted: (el) => {
@@ -182,7 +187,7 @@ export function Tour() {
       nextBtnText: "Next →",
       prevBtnText: "← Back",
       doneBtnText: "Finish",
-      onDestroyStarted: () => { if (!cancelled) { cancelled = true; d.destroy(); router.replace(path); } },
+      onDestroyStarted: () => { document.body.classList.remove("tour-hide-bar"); if (!cancelled) { cancelled = true; d.destroy(); router.replace(path); } },
       onNextClick: async () => {
         const idx = d.getActiveIndex() ?? 0;
         const step = steps[idx];
@@ -219,7 +224,7 @@ export function Tour() {
       if (!cancelled) d.drive(0);
     })();
 
-    return () => { cancelled = true; window.removeEventListener("resize", onResize); d.destroy(); status(null); };
+    return () => { cancelled = true; window.removeEventListener("resize", onResize); document.body.classList.remove("tour-hide-bar"); d.destroy(); status(null); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 

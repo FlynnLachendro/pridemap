@@ -414,8 +414,9 @@ b, strong, .font-bold, .font-semibold { font-weight: 600; }
 }
 @media (prefers-reduced-motion: reduce) { main > div, .driver-popover { animation: none; } }
 
-/* tour: hide the popover while the tour is doing something on the page (status pill explains) */
+/* tour: hide the popover while the tour is doing something on the page (status pill explains); keep the shortlist bar out of the way */
 .tour-busy .driver-popover { opacity: 0 !important; pointer-events: none; }
+.tour-hide-bar .shortlist-bar { display: none; }
 
 /* ---------------------------------------------------------------------------
    UX pass 3: workflow rail, grouped sidebar, draft-collection bar, hero band, empty states.
