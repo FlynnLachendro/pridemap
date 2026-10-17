@@ -744,6 +744,9 @@ TOOL = {"DDA": ("MaxQuant or FragPipe", "DDA: spectrum-centric search against a 
         "MALDI": ("the vendor software, or FlexAnalysis + Mascot", "MALDI data needs vendor conversion first")}
 
 
+PRIDE_FILE_PAGES = 60  # 100 files a page; enough for the largest PRIDE depositions
+
+
 def ensure_files_table(con):
     con.execute("CREATE TABLE IF NOT EXISTS files (accession TEXT, file_name TEXT, category TEXT, size_bytes INTEGER, ftp TEXT, fetched_at TEXT)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_files_acc ON files(accession)")
@@ -754,16 +757,31 @@ def pride_files(con, accession):
     rows = con.execute("SELECT file_name, category, size_bytes, ftp FROM files WHERE accession=?", (accession,)).fetchall()
     if rows:
         return [dict(r) for r in rows]
-    try:
-        with urllib.request.urlopen(f"https://www.ebi.ac.uk/pride/ws/archive/v3/projects/{accession}/files", timeout=60) as r:
-            data = json.load(r)
-    except Exception as e:
-        print("pride files failed:", e, file=sys.stderr)
+    # PRIDE v3 caps a page at 100 files; page through or large datasets silently lose most of their runs.
+    out, seen = [], set()
+    for page in range(PRIDE_FILE_PAGES):
+        try:
+            url = f"https://www.ebi.ac.uk/pride/ws/archive/v3/projects/{accession}/files?pageSize=100&page={page}"
+            with urllib.request.urlopen(url, timeout=60) as r:
+                data = json.load(r)
+        except Exception as e:
+            print(f"pride files failed ({accession} page {page}):", e, file=sys.stderr)
+            break
+        if not isinstance(data, list):
+            data = (data.get("_embedded") or {}).get("files") or []
+        fresh = 0
+        for f in data:
+            name = f.get("fileName")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            fresh += 1
+            ftp = next((l["value"] for l in f.get("publicFileLocations", []) if l.get("name") == "FTP Protocol"), None)
+            out.append({"file_name": name, "category": (f.get("fileCategory") or {}).get("value"), "size_bytes": f.get("fileSizeBytes"), "ftp": ftp})
+        if fresh == 0 or len(data) < 100:
+            break
+    if not out:
         return []
-    out = []
-    for f in data:
-        ftp = next((l["value"] for l in f.get("publicFileLocations", []) if l.get("name") == "FTP Protocol"), None)
-        out.append({"file_name": f.get("fileName"), "category": (f.get("fileCategory") or {}).get("value"), "size_bytes": f.get("fileSizeBytes"), "ftp": ftp})
     con.executemany("INSERT INTO files VALUES (?,?,?,?,?,?)", [(accession, o["file_name"], o["category"], o["size_bytes"], o["ftp"], dt.datetime.now(dt.UTC).isoformat()) for o in out])
     con.commit()
     return out
