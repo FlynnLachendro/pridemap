@@ -2,6 +2,7 @@ import Link from "next/link";
 import { dataset, METHOD_TAGS, pretty, TAG_LABEL } from "@/lib/api";
 import { Correct } from "@/components/correct";
 import { CompareToggle } from "@/components/compare-toggle";
+import { Reanalyse } from "@/components/reanalyse";
 
 
 const ORDER = ["organism", "sample_type", "tissue", "cell_line", "disease", ...METHOD_TAGS, "depth_proteins"];
@@ -74,6 +75,8 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
             </div>
           </section>
         )}
+
+        <Reanalyse accession={p.accession} />
 
         <section className="grid gap-3">
           <h2 className="font-bold">What PRIDE says</h2>

@@ -541,6 +541,130 @@ def compare(accessions: str):
             "verdict": verdict, "summary": summary, "issues": issues, "table": table}
 
 
+# ----------------------------------------------------------------------------- reanalyse
+import urllib.request
+
+PROTEOMES = {9606: ("UP000005640", "Homo sapiens"), 10090: ("UP000000589", "Mus musculus"), 10116: ("UP000002494", "Rattus norvegicus"),
+             4932: ("UP000002311", "Saccharomyces cerevisiae"), 3702: ("UP000006548", "Arabidopsis thaliana"), 562: ("UP000000625", "Escherichia coli K-12"),
+             7227: ("UP000000803", "Drosophila melanogaster"), 6239: ("UP000001940", "Caenorhabditis elegans"), 7955: ("UP000000437", "Danio rerio")}
+MQ_ENZYME = {"trypsin": ["Trypsin/P"], "trypsin_lysc": ["Trypsin/P", "LysC"], "lysc": ["LysC"], "chymotrypsin": ["Chymotrypsin+"],
+             "gluc": ["GluC"], "aspn": ["AspN"], "none": ["unspecific"], "other": ["(check protocol)"]}
+TOOL = {"DDA": ("MaxQuant or FragPipe", "DDA: spectrum-centric search against a FASTA"),
+        "DIA": ("DIA-NN or Spectronaut", "DIA: library-free search (predicted library from FASTA) or a spectral library"),
+        "PRM_SRM": ("Skyline", "targeted: you need the original transition/target list"),
+        "top_down": ("ProSight or TopPIC", "intact proteins: bottom-up tools don't apply"),
+        "MALDI": ("the vendor software, or FlexAnalysis + Mascot", "MALDI data needs vendor conversion first")}
+
+
+def ensure_files_table(con):
+    con.execute("CREATE TABLE IF NOT EXISTS files (accession TEXT, file_name TEXT, category TEXT, size_bytes INTEGER, ftp TEXT, fetched_at TEXT)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_files_acc ON files(accession)")
+
+
+def pride_files(con, accession):
+    ensure_files_table(con)
+    rows = con.execute("SELECT file_name, category, size_bytes, ftp FROM files WHERE accession=?", (accession,)).fetchall()
+    if rows:
+        return [dict(r) for r in rows]
+    try:
+        with urllib.request.urlopen(f"https://www.ebi.ac.uk/pride/ws/archive/v3/projects/{accession}/files", timeout=60) as r:
+            data = json.load(r)
+    except Exception as e:
+        print("pride files failed:", e, file=sys.stderr)
+        return []
+    out = []
+    for f in data:
+        ftp = next((l["value"] for l in f.get("publicFileLocations", []) if l.get("name") == "FTP Protocol"), None)
+        out.append({"file_name": f.get("fileName"), "category": (f.get("fileCategory") or {}).get("value"), "size_bytes": f.get("fileSizeBytes"), "ftp": ftp})
+    con.executemany("INSERT INTO files VALUES (?,?,?,?,?,?)", [(accession, o["file_name"], o["category"], o["size_bytes"], o["ftp"], dt.datetime.now(dt.UTC).isoformat()) for o in out])
+    con.commit()
+    return out
+
+
+def recipe(t: dict, ptms: list[str], ev: dict):
+    """Search parameters derived from the tags. Each param carries which tag it came from so the UI can show evidence."""
+    def src(tag):
+        e = ev.get(tag) or {}
+        return {"tag": tag, "confidence": e.get("confidence"), "evidence": e.get("evidence")}
+    acq = t.get("acquisition") or "DDA"
+    tool, tool_note = TOOL.get(acq, TOOL["DDA"])
+    enz = t.get("enzyme") or "trypsin"
+    fixed = [] if enz == "none" or acq == "top_down" else ["Carbamidomethyl (C)"]
+    variable = ["Oxidation (M)", "Acetyl (Protein N-term)"]
+    notes = []
+    enr = t.get("enrichment")
+    pt = " ".join(ptms).lower()
+    if enr == "phospho" or "phospho" in pt:
+        variable.append("Phospho (STY)")
+    if enr == "ubiquitin" or "glycyl" in pt or "gg" in pt:
+        variable.append("GlyGly (K)")
+    if enr == "acetyl":
+        variable.append("Acetyl (K)")
+    if enr == "glyco":
+        variable.append("Deamidation (N)")
+        notes.append("Glyco: for intact glycopeptides use a glyco-aware tool (pGlyco, MSFragger-Glyco) instead of plain deamidation.")
+    if "dimethyl" in pt or t.get("labelling") == "dimethyl":
+        notes.append("Dimethyl labelling: set light/medium/heavy labels rather than variable mods.")
+    lab = t.get("labelling") or "label_free"
+    quant = {"label_free": "LFQ on, match between runs on",
+             "TMT": "Reporter ion MS2 (or MS3 if the instrument did SPS-MS3); pick the plex (10/11/16/18) from the protocol",
+             "iTRAQ": "Reporter ion MS2, iTRAQ 4-plex or 8-plex from the protocol",
+             "SILAC": "Multiplicity 2 or 3; heavy labels Lys8 / Arg10 unless the protocol says otherwise",
+             "dimethyl": "Dimethyl light/medium/heavy", "other": "check protocol"}[lab if lab in ("label_free", "TMT", "iTRAQ", "SILAC", "dimethyl") else "other"]
+    if lab in ("TMT", "iTRAQ"):
+        fixed.append(f"{lab} on K and peptide N-term (set via the reporter-ion option, not as a mod)")
+    taxon = t.get("taxon_id")
+    prot = PROTEOMES.get(taxon) if taxon else None
+    fasta = {"uniprot_proteome": prot[0] if prot else None, "organism": prot[1] if prot else t.get("organism"),
+             "url": f"https://rest.uniprot.org/uniprotkb/stream?query=proteome:{prot[0]}+AND+reviewed:true&format=fasta&compressed=true" if prot else None,
+             "note": "reviewed (Swiss-Prot) entries; add contaminants (MaxQuant ships them)"}
+    if enr == "ap_ms":
+        notes.append("AP-MS: include the bait/tag sequence in the FASTA and plan a mock/control IP comparison (CRAPome).")
+    if acq == "DIA":
+        notes.append("DIA-NN: library-free with 'deep learning predictor' on, MBR on, precursor FDR 1%.")
+    return {
+        "tool": {"value": tool, "why": tool_note, **src("acquisition")},
+        "enzyme": {"value": MQ_ENZYME.get(enz, [enz]), "missed_cleavages": 2, **src("enzyme")},
+        "fixed_modifications": {"value": fixed, **src("labelling")},
+        "variable_modifications": {"value": variable, "from_pride_ptms": ptms, **src("enrichment")},
+        "quantification": {"value": quant, **src("labelling")},
+        "fdr": {"value": "PSM 1%, protein 1% (target-decoy, reversed sequences)"},
+        "fasta": fasta,
+        "instrument_preset": {"value": {"orbitrap": "Orbitrap (MS1 4.5 ppm, MS2 20 ppm)", "timstof": "Bruker TIMS-DDA / diaPASEF", "qtof": "Q-TOF (MS2 40 ppm)", "triple_quad": "n/a (targeted)"}.get(t.get("instrument_family") or "", "check instrument"), **src("instrument_family")},
+        "notes": notes,
+    }
+
+
+@app.get("/dataset/{accession}/reanalyse")
+def reanalyse(accession: str):
+    con = db()
+    p = con.execute("SELECT ptms FROM projects WHERE accession=?", (accession,)).fetchone()
+    if not p:
+        raise HTTPException(404, "unknown accession")
+    t = con.execute("SELECT * FROM tags WHERE accession=?", (accession,)).fetchone()
+    files = pride_files(con, accession)
+    groups = {}
+    for f in files:
+        g = groups.setdefault(f["category"] or "OTHER", {"count": 0, "bytes": 0, "examples": []})
+        g["count"] += 1
+        g["bytes"] += f["size_bytes"] or 0
+        if len(g["examples"]) < 3:
+            g["examples"].append({"file_name": f["file_name"], "size_bytes": f["size_bytes"], "ftp": f["ftp"]})
+    ev = {e["tag"]: dict(e) for e in con.execute("SELECT tag, confidence, evidence FROM tag_evidence WHERE accession=?", (accession,))}
+    return {
+        "accession": accession, "tagged": bool(t),
+        "files": {"groups": groups, "total": len(files), "all_ftp_url": f"/dataset/{accession}/files.txt"},
+        "recipe": recipe(dict(t), jl(p["ptms"]), ev) if t else None,
+        "has_submitter_results": any(f["category"] in ("RESULT", "SEARCH") for f in files),
+    }
+
+
+@app.get("/dataset/{accession}/files.txt", response_class=PlainTextResponse)
+def files_txt(accession: str, category: Optional[str] = None):
+    files = pride_files(db(), accession)
+    return "\n".join(f["ftp"] for f in files if f["ftp"] and (not category or f["category"] == category)) + "\n"
+
+
 @app.get("/")
 def root():
     return {"name": "PRIDE Map API", "docs": "/docs", "stats": "/stats", "search": "/search?organism=mouse&enrichment=phospho"}
