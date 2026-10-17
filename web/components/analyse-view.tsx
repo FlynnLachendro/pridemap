@@ -57,6 +57,7 @@ export function AnalyseView() {
   const [prefix, setPrefix] = useState("Set1_Brain");
   const [name, setName] = useState("batch");
   const [result, setResult] = useState<RunOut | null>(null);
+  const [lastBody, setLastBody] = useState<Record<string, unknown> | null>(null);
   const [odetta, setOdetta] = useState<OdettaOut | null>(null);
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -117,6 +118,7 @@ export function AnalyseView() {
       } else {
         setBusy("Welch t-test per protein + Benjamini–Hochberg…");
         const body = { upload_id: inspect.upload_id, id_column: idCol, group_a: colsA, group_b: colsB, log_transform: logT, min_valid: minValid, contaminant_column: contam || null };
+        setLastBody({ ...body, label_a: stemA || "A", label_b: stemB || "B" });
         setResult(await jfetch<RunOut>(fetch(`${API}/analyse/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })));
       }
     } catch (e) { setErr(String(e)); } finally { setBusy(null); }
@@ -226,7 +228,7 @@ export function AnalyseView() {
       )}
 
       {/* (d) results */}
-      {result && <WelchResults out={result} uploadId={inspect?.upload_id ?? "table"} />}
+      {result && <WelchResults out={result} uploadId={inspect?.upload_id ?? "table"} reportBody={lastBody} />}
       {odetta && <OdettaResults out={odetta} />}
     </div>
   );
@@ -288,10 +290,29 @@ function Tile({ label, value, cls }: { label: string; value: number; cls?: strin
   );
 }
 
-function WelchResults({ out, uploadId }: { out: RunOut; uploadId: string }) {
+function WelchResults({ out, uploadId, reportBody }: { out: RunOut; uploadId: string; reportBody: Record<string, unknown> | null }) {
   const s = out.summary;
+  const [reporting, setReporting] = useState(false);
+  const downloadReport = async () => {
+    if (!reportBody) return;
+    setReporting(true);
+    try {
+      const r = await fetch(`${API}/analyse/report`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(reportBody) });
+      if (!r.ok) throw new Error(await r.text());
+      const blob = await r.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = (r.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1]) ?? "pridemap_analysis.zip";
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    } catch (e) { alert(String(e)); } finally { setReporting(false); }
+  };
   return (
     <div className="grid gap-4">
+      <div className="card p-3 flex flex-wrap items-center gap-3 text-sm">
+        <div><b>Report bundle for publication.</b> <span className="text-muted-foreground">A zip with a Methods paragraph written from these exact parameters, every tested protein as CSV, the parameters, a standalone <code>reproduce.py</code> that regenerates the result, and software versions. Upload it next to the paper.</span></div>
+        <button type="button" onClick={downloadReport} disabled={!reportBody || reporting} className="btn btn-primary ml-auto">{reporting ? "Building…" : "Download report bundle"}</button>
+      </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <Tile label="proteins tested" value={s.n_tested} />
         <Tile label="significant (q < 0.05)" value={s.n_sig_q05} />
