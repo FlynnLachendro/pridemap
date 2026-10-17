@@ -18,7 +18,7 @@ git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
 
 ### Option A — demo in 2 minutes (no API key, no crawl)
 
-Uses the bundled 296‑dataset slice already tagged and shipped in `data/demo/`.
+Uses the bundled data in `data/demo/` (every tagged dataset, 41k, gzipped shards; loaded on first run in ~8 s).
 
 ```bash
 ./dev.sh
@@ -96,6 +96,13 @@ uv run api/mcp_server.py --http    # streamable HTTP on :8010
 The `/mcp` page in the running web UI explains the available tools and has a live console.
 
 ---
+
+## Handover (Mani, Sat 17 Oct 17:00 → Sun pitch)
+
+- **[HANDOVER.html](HANDOVER.html)** — everything: run it in 15 minutes, repo map, pipeline, API, UI, MCP, the tour, gotchas, numbers, the pitch script and judge Q&A, submission checklist.
+- **[mani-claude-handover.md](mani-claude-handover.md)** — the same for an AI assistant; point Claude Code at it first.
+- Data: `data/demo/*.jsonl.gz` in the repo (every tagged dataset, loaded by `./dev.sh`) and the full `pride.db.zst` plus the backup tour video on the [v1.0-hackathon release](https://github.com/FlynnLachendro/pridemap/releases/tag/v1.0-hackathon).
+- `.env` (API keys) comes from Flynn directly, never via the repo.
 
 ## What it does
 
