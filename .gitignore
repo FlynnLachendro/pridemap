@@ -25,3 +25,15 @@ data/uploads/
 demo/node_modules/
 demo/videos/
 .omc
+
+# Search-kit pipeline artefacts, in case a kit is unpacked and run inside the repo.
+# The kit ships its own .gitignore too; this is the backstop.
+.pipeline/
+progress.jsonl
+mzml/
+combined/
+out_dda/
+out_dia/
+fasta/
+# Pipeline runs started from the UI land here (api/omics.py RUNS_DIR).
+reanalysis/

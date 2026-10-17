@@ -1,16 +1,21 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useCompare } from "@/lib/compare-store";
 import { API } from "@/lib/api";
 import { markAnalysed } from "@/lib/progress-store";
+import { RunRemote } from "@/components/run-remote";
 
 type Group = { stem: string; columns: string[]; fill: number };
+type MzTab = {
+  rows: number; runs: number; per_run_columns: number; per_run_values: number;
+  intensity_based: boolean; comparable: boolean; quant_kind: string | null;
+};
 type Inspect = {
   upload_id: string; file: string; n_rows: number; n_cols: number;
   id_columns: string[]; numeric_columns: string[]; suggested_groups: Group[]; contaminant_columns: string[];
-  odetta_compatible: boolean; odetta_prefixes: string[];
+  mztab?: MzTab | null;
 };
 type Row = { id: string; log2fc: number | null; t: number | null; p: number | null; q: number | null; mean_a: number | null; mean_b: number | null; n_a: number; n_b: number };
 type Pt = { id: string; log2fc: number | null; neglog10p: number | null; sig: "up" | "down" | "ns" };
@@ -18,11 +23,8 @@ type RunOut = {
   summary: { n_proteins: number; n_dropped_contaminants: number; n_tested: number; n_sig_q05: number; n_up: number; n_down: number; log_transform: string; p99_raw: number | null; min_valid: number; sign: string; test: string };
   columns: string[]; rows: Row[]; volcano: Pt[];
 };
-type OdettaOut = {
-  ok: boolean; error: string | null; stdout: string; stderr: string; command?: string; outdir?: string;
-  outputs: { name: string; rows: number; columns: string[]; head: Record<string, unknown>[]; error?: string }[];
-};
-type Mode = "welch" | "odetta";
+type SampleRow = { file_name: string; run: string; size_bytes: number | null; ftp: string | null; annotations: Record<string, { value: string; source: string; source_kind: string }>; label: string; local: boolean };
+type SampleData = { accession: string; runs: number; sources: Array<{ kind: string; file_name: string; runs_annotated: number; note: string }>; fields: Array<{ field: string; distinct: number; varies: boolean; identifier: boolean; values: string[] }>; varying_fields: string[]; rows: SampleRow[]; conflicts: Array<{ field: string; annotation_says: string; tag: string; tag_says: string; note: string }>; note: string | null; cached: boolean };
 type SortKey = keyof Row;
 
 const CUSTOM = "__custom__";
@@ -43,51 +45,433 @@ const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" :
 type PrideTable = { file_name: string; category: string; size_bytes: number | null; kind: string; openable: boolean };
 /** Which search engine can actually run on this dataset's raw files — decided by the API from vendor + acquisition. */
 type Track = { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string; why: string };
+type Substage = { name: string; detail: string };
+type Stage = {
+  id: string; label: string; detail: string; where: string;
+  engine?: string; engine_label?: string; output_table?: string; substages?: Substage[];
+};
 type SearchPlan = {
   vendor: string | null; vendor_label: string; acquisition: string; tag_acquisition: string | null; raw_count: number;
   engine: string | null; engine_label: string | null; why: string | null; output_table: string | null;
   maxquant_offered: boolean; maxquant_reason: string | null; caveat: string | null; conflict: string | null;
-  mixed: boolean; runs_dda: number; runs_dia: number; runs_unclassified: number; sidecars: number; tracks: Track[];
+  mixed: boolean; runs_dda: number; runs_dia: number; runs_unclassified: number; sidecars: number;
+  tracks: Track[]; stages: Stage[];
   convert: { from: string; to: string; tool: string; url: string; why: string } | null; kit_url?: string;
+  raw_names?: string[];
 };
 type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTable[]; raw_files: number; has_results: boolean; note: string | null; plan: SearchPlan | null };
 
+// The origin is client-only. Reading it through useSyncExternalStore keeps the server render ("") and the
+// client render consistent, with no state written from an effect.
+const NO_SUB = () => () => {};
+const getOrigin = () => window.location.origin;
+const getOriginServer = () => "";
+
+type RunStage = Stage & { state: "pending" | "running" | "done" | "failed"; seconds: number | null; steps: string[]; message: string | null };
+type RunStatus = {
+  accession: string; can_run: boolean; exists: boolean; running: boolean; finished: boolean; failed: boolean;
+  stages: RunStage[]; log: string[]; uploads: string[]; dir: string | null;
+};
+const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
+
+/** Lets the user pick up to 2 runs for A vs B comparison. Raw file names show immediately;
+ *  clicking "Load sample annotations" fetches SDRF / Samplelist.xlsx and maps metadata columns. */
+function SamplePicker({ accession, rawNames, onSelect }: { accession: string; rawNames: string[]; onSelect: (runs: string[], labelA: string, labelB: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<SampleData | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [checked, setChecked] = useState<string[]>([]);
+
+  // Auto-fetch annotations whenever the picker is opened
+  useEffect(() => {
+    if (!open || data || loading) return;
+    let live = true;
+    setLoading(true); setErr(null);
+    fetch(`${API}/dataset/${encodeURIComponent(accession)}/samples`)
+      .then((r) => r.ok ? r.json() : r.text().then((t) => { throw new Error(t); }))
+      .then((d: SampleData) => { if (live) setData(d); })
+      .catch((e) => { if (live) setErr(String(e)); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [open, accession]);
+
+  // Merge rawNames with loaded annotation rows so the table is always complete
+  const rows = useMemo<SampleRow[]>(() => {
+    if (data) {
+      const inData = new Set(data.rows.map((r) => r.file_name));
+      const extras = rawNames
+        .filter((n) => !inData.has(n))
+        .map((n): SampleRow => ({ file_name: n, run: n, size_bytes: null, ftp: null, annotations: {}, label: n, local: false }));
+      return [...data.rows, ...extras];
+    }
+    return rawNames.map((n): SampleRow => ({ file_name: n, run: n, size_bytes: null, ftp: null, annotations: {}, label: n, local: false }));
+  }, [rawNames, data]);
+
+  const annotFields = data?.varying_fields.slice(0, 3) ?? [];
+
+  const toggle = (name: string) => {
+    setChecked((prev) => {
+      if (prev.includes(name)) return prev.filter((n) => n !== name);
+      if (prev.length >= 2) return prev;
+      return [...prev, name];
+    });
+  };
+
+  const labelFor = (fileName: string) => {
+    const row = data?.rows.find((r) => r.file_name === fileName);
+    if (row?.label) return row.label;
+    const f = annotFields[0];
+    if (f && row?.annotations[f]?.value) return row.annotations[f].value;
+    return fileName.replace(/\.[^.]+$/, "");
+  };
+
+  const apply = () => {
+    if (checked.length === 0) return;
+    onSelect(checked, labelFor(checked[0]), checked[1] ? labelFor(checked[1]) : "");
+    setOpen(false);
+  };
+  const reset = () => { onSelect([], "", ""); setChecked([]); };
+
+  return (
+    <div className="rounded-md border bg-card p-3 grid gap-2">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm font-semibold">Pick samples</span>
+        <span className="text-xs text-faint">select up to 2 files to search (A then B) — leave empty to search all</span>
+        {checked.length > 0 && (
+          <span className="pill bg-ok-soft text-ok">
+            {checked.length === 2 ? `A: ${labelFor(checked[0])} · B: ${labelFor(checked[1])}` : `A: ${labelFor(checked[0])}`}
+          </span>
+        )}
+        <button type="button" className="btn btn-sm ml-auto" onClick={() => setOpen((v) => !v)}>
+          {open ? "Collapse" : "Open sample list"}
+        </button>
+      </div>
+      {open && (
+        <div className="grid gap-3">
+          {loading && <p className="text-xs text-faint flex items-center gap-1"><span className="spinner" />Loading sample annotations…</p>}
+          {err && <p className="text-xs text-warn">{err}</p>}
+          {/* Run table: always shown, annotation columns appear after loading */}
+          {rows.length > 0 && (
+            <div className="overflow-x-auto rounded border text-xs max-h-64">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b bg-muted/40">
+                    <th className="px-2 py-1 w-10 text-center label">A / B</th>
+                    <th className="px-2 py-1 text-left label">file name</th>
+                    {annotFields.map((f) => <th key={f} className="px-2 py-1 text-left label">{f}</th>)}
+                    {data && <th className="px-2 py-1 label text-center">cached</th>}
+                    {data && <th className="px-2 py-1 label text-right">size</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => {
+                    const isChecked = checked.includes(r.file_name);
+                    const checkIdx = checked.indexOf(r.file_name);
+                    const disabled = !isChecked && checked.length >= 2;
+                    return (
+                      <tr
+                        key={r.file_name}
+                        className={`border-b last:border-0 cursor-pointer ${isChecked ? "bg-ok-soft/30" : disabled ? "opacity-40" : "hover:bg-muted/30"}`}
+                        onClick={() => !disabled && toggle(r.file_name)}
+                      >
+                        <td className="px-2 py-1 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={disabled}
+                            onChange={() => toggle(r.file_name)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="accent-ok"
+                          />
+                          {isChecked && (
+                            <span className={`ml-1 text-[10px] font-bold ${checkIdx === 0 ? "text-teal" : "text-peak"}`}>
+                              {checkIdx === 0 ? "A" : "B"}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1 font-mono text-[11px] truncate max-w-[220px]" title={r.file_name}>
+                          {r.label !== r.file_name && r.label ? <><span>{r.label}</span><span className="text-faint ml-1">({r.file_name})</span></> : r.file_name}
+                        </td>
+                        {annotFields.map((f) => <td key={f} className="px-2 py-1">{r.annotations[f]?.value ?? "—"}</td>)}
+                        {data && <td className="px-2 py-1 text-center">{r.local ? "✓" : ""}</td>}
+                        {data && <td className="px-2 py-1 text-right text-faint tabular">{r.size_bytes ? `${(r.size_bytes / 1e9).toFixed(1)} GB` : "—"}</td>}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {/* Action buttons */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn btn-sm btn-primary" disabled={checked.length === 0} onClick={apply}>
+              {checked.length === 2
+                ? `Search these 2 files (A: ${labelFor(checked[0])} · B: ${labelFor(checked[1])})`
+                : checked.length === 1
+                  ? `Search this 1 file — add a second for A vs B comparison`
+                  : "Tick files above to select"}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={reset}>Search all files</button>
+            {checked.length === 2 && <span className="text-xs text-faint">· first tick = A, second tick = B — labels carry through to Analyse</span>}
+          </div>
+          {data?.conflicts && data.conflicts.length > 0 && (
+            <p className="text-xs text-warn rounded bg-warn-soft/30 p-2">
+              ⚠ Annotation vs tag conflict: {data.conflicts.map((c) => `${c.field} says "${c.annotation_says}" but tags say "${c.tag_says}"`).join("; ")}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
+function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: string[]; hintA?: string; hintB?: string }) {
+  const router = useRouter();
+  const [status, setStatus] = useState<RunStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const seen = useRef<string | null>(null);
+
+  const poll = useCallback(async () => {
+    try { return await jfetch<RunStatus>(fetch(`${API}/dataset/${accession}/pipeline/status`)); } catch { return null; }
+  }, [accession]);
+
+  // One timer owns the polling: a quick beat while a run is live, a slow one otherwise so an idle page is cheap.
+  const running = status?.running ?? false;
+  useEffect(() => {
+    let live = true;
+    const tick = async () => {
+      const s = await poll();
+      if (live && s) setStatus(s);
+    };
+    const first = window.setTimeout(tick, 0);
+    const id = window.setInterval(tick, running ? 2000 : 15000);
+    return () => { live = false; window.clearTimeout(first); window.clearInterval(id); };
+  }, [poll, running]);
+  // When the run hands a table back, open it: the point of the whole exercise is the table, not the run.
+  useEffect(() => {
+    const last = status?.uploads?.[status.uploads.length - 1];
+    if (last && seen.current !== last) {
+      seen.current = last;
+      const hints = hintA ? `&hint_a=${encodeURIComponent(hintA)}${hintB ? `&hint_b=${encodeURIComponent(hintB)}` : ""}` : "";
+      router.push(`/analyse?upload=${encodeURIComponent(last)}${hints}`);
+    }
+  }, [status?.uploads, router]);
+
+  if (status && !status.can_run) return null;  // a hosted PRIDE Map cannot run searches; the one-liner still can
+
+  const start = async () => {
+    setStarting(true); setErr(null);
+    try {
+      const runsParam = runs?.length ? `&runs=${encodeURIComponent(runs.join(","))}` : "";
+      await jfetch(fetch(`${API}/dataset/${accession}/pipeline/start?web=${encodeURIComponent(window.location.origin)}${runsParam}`, { method: "POST" }));
+      const s = await poll();
+      if (s) setStatus(s);
+    } catch (e) { setErr(String(e)); } finally { setStarting(false); }
+  };
+
+  const stop = async () => {
+    setStopping(true); setErr(null);
+    try {
+      await fetch(`${API}/dataset/${accession}/pipeline`, { method: "DELETE" });
+      const s = await poll();
+      if (s) setStatus(s);
+    } catch (e) { setErr(String(e)); } finally { setStopping(false); }
+  };
+
+  const stages = status?.stages ?? [];
+  const active = stages.find((s) => s.state === "running");
+  const done = stages.filter((s) => s.state === "done").length;
+  return (
+    <div className="rounded-md border bg-card p-3 grid gap-2" data-tour="run-here">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm font-semibold">Run on this machine</span>
+        {status?.running
+          ? <span className="pill">running · {done}/{stages.length - 1} stages</span>
+          : status?.finished ? <span className="pill bg-ok-soft text-ok">finished</span>
+          : status?.failed ? <span className="pill text-warn">stopped</span> : null}
+        {status?.running && (
+          <button type="button" className="btn btn-sm btn-warn ml-auto" disabled={stopping} onClick={stop}>
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        )}
+        {!status?.running && (
+          <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={starting} onClick={start}>
+            {starting ? "Starting…" : status?.exists ? "Resume" : "Run the whole pipeline"}
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-faint">
+        PRIDE Map runs every stage for you on this machine — nothing to paste into a terminal. Safe to close this
+        page; the run keeps going and resumes where it stopped.
+      </p>
+      {starting && <p className="text-xs text-teal">Initialising pipeline…</p>}
+      {err && <p className="text-xs text-warn">{err}</p>}
+      {stages.length > 0 && (status?.running || status?.finished || status?.failed) && (
+        <ol className="grid gap-0.5 text-xs">
+          {stages.map((s) => (
+            <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
+              <span aria-hidden className="inline-block w-4">{STATE_MARK[s.state]}</span>
+              {s.label}
+              {s.seconds != null && <span className="text-faint"> · {Math.floor(s.seconds / 60)}m {s.seconds % 60}s</span>}
+              {s.message && <span className="text-faint"> · {s.message}</span>}
+              {s.state === "running" && s.steps.length > 0 && (
+                <div className="pl-6 text-faint">{s.steps[s.steps.length - 1]}</div>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      {status?.log && status.log.length > 0 && (
+        status?.running
+          ? <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">{status.log.slice(-10).join("\n")}</pre>
+          : (
+            <details className="text-xs">
+              <summary className="cursor-pointer text-faint hover:text-foreground">output ({status.log.length} lines)</summary>
+              <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{status.log.join("\n")}</pre>
+            </details>
+          )
+      )}
+    </div>
+  );
+}
+
+/** The whole pipeline as one command. Carries this page's origin so the script can link results straight back. */
+function OneLiner({ accession }: { accession: string }) {
+  const origin = useSyncExternalStore(NO_SUB, getOrigin, getOriginServer);
+  const [copied, setCopied] = useState(false);
+  const cmd = `curl -fsSL ${API}/dataset/${accession}/pipeline.sh${origin ? `?web=${encodeURIComponent(origin)}` : ""} | bash`;
+  return (
+    <div className="rounded-md border bg-card p-3 grid gap-2">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-semibold">Paste this into a terminal</span>
+        <button
+          type="button"
+          className="btn btn-sm btn-primary ml-auto"
+          onClick={() => { navigator.clipboard?.writeText(cmd).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {}); }}
+        >{copied ? "Copied ✓" : "Copy command"}</button>
+      </div>
+      <code className="text-xs break-all select-all rounded bg-muted/50 px-2 py-1.5 block">{cmd}</code>
+      <div className="text-xs text-faint">
+        Nothing to download or unzip, and it checks your tools and free space <em>before</em> fetching anything.
+        Re-run the same command to resume.
+      </div>
+    </div>
+  );
+}
+
 /** Raw-only dataset: name the engine that can actually run, say why, and hand over a kit for it. */
-function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string }) {
+function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; accession: string; remoteAvailable: boolean }) {
+  const router = useRouter();
   const tracks = plan.tracks ?? [];
+  const stages = plan.stages ?? [];
   const label = tracks.length > 1 ? "search kit" : `${plan.engine_label} kit`;
-  const prep = [
-    `Download the raw files from PRIDE (${plan.raw_count} runs${plan.sidecars ? ` plus ${plan.sidecars} index sidecars the readers need`: ""})`,
-    "Fetch the protein database with the included script",
-    ...(plan.convert ? [`Convert ${plan.convert.from} → ${plan.convert.to} with ${plan.convert.tool}`] : []),
-  ];
+  const auto = stages.filter((s) => s.where !== "you decide").length;
+  const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
+  const [labelA, setLabelA] = useState("");
+  const [labelB, setLabelB] = useState("");
+  const handleSelect = (runs: string[], a: string, b: string) => { setSelectedRuns(runs); setLabelA(a); setLabelB(b); };
+
+  const showRemote = remoteAvailable && plan.maxquant_offered;
+  type RunMethod = "local" | "remote";
+  const [runMethod, setRunMethod] = useState<RunMethod>("local");
+
+  const handleRemoteDone = (jobId: string) => {
+    const hints = labelA ? `&hint_a=${encodeURIComponent(labelA)}${labelB ? `&hint_b=${encodeURIComponent(labelB)}` : ""}` : "";
+    router.push(`/analyse?upload=${encodeURIComponent(jobId)}${hints}`);
+  };
+
   return (
     <div className="rounded-lg border bg-muted/30 p-4 grid gap-3" data-tour="searchkit">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="font-semibold text-sm">Run the search yourself</span>
+        <span className="font-semibold text-sm">Run the search</span>
         {tracks.map((t) => <span key={t.kind} className="pill">{t.kind} → {t.engine_label}</span>)}
         <span className="text-xs text-faint">{plan.raw_count} × {plan.vendor_label}</span>
-        <a className="btn btn-sm btn-primary ml-auto" href={`${API}${plan.kit_url ?? `/dataset/${accession}/searchkit.zip`}`} download>
-          Download {label} (zip)
-        </a>
+        {selectedRuns.length > 0 && <span className="pill bg-ok-soft text-ok">{selectedRuns.length} files selected · {labelA}{labelB ? ` vs ${labelB}` : ""}</span>}
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
-      {plan.caveat && <p className="text-xs text-muted-foreground">{plan.caveat}</p>}
-      <ol className="grid gap-1 text-xs text-muted-foreground">
-        {prep.map((s, i) => <li key={s}>{i + 1}. {s}</li>)}
-      </ol>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {tracks.map((t) => (
-          <div key={t.kind} className="rounded-md border bg-card px-3 py-2 text-xs grid gap-0.5">
-            <div className="font-semibold">{t.engine_label} <span className="text-faint font-normal">· {t.run_count} {t.kind} runs</span></div>
-            <div className="text-muted-foreground">config <code>{t.config}</code></div>
-            <div className="text-muted-foreground">upload <code>{t.output_table}</code> here when it finishes</div>
-          </div>
-        ))}
-      </div>
-      {!plan.maxquant_offered && plan.maxquant_reason && (
-        <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {plan.maxquant_reason}</p>
+
+      <SamplePicker accession={accession} rawNames={plan.raw_names ?? []} onSelect={handleSelect} />
+
+      {selectedRuns.length > 0 && showRemote && (
+        <div className="flex gap-4 text-sm">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="run-method" value="local" checked={runMethod === "local"} onChange={() => setRunMethod("local")} className="accent-teal" />
+            Run on this machine
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="run-method" value="remote" checked={runMethod === "remote"} onChange={() => setRunMethod("remote")} className="accent-teal" />
+            Run on cloud (Devin)
+          </label>
+        </div>
       )}
+
+      {selectedRuns.length > 0 && (!showRemote || runMethod === "local") && (
+        <RunHere accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} hintA={labelA} hintB={labelB} />
+      )}
+      {selectedRuns.length > 0 && showRemote && runMethod === "remote" && (
+        <RunRemote accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} engineLabel={plan.engine_label ?? "search engine"} outputTable={plan.output_table ?? "results.txt"} onDone={handleRemoteDone} />
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        All {auto} stages — tool and disk check, download, {plan.convert ? "conversion, " : ""}
+        {tracks.map((t) => t.engine_label).join(" and ")}, then the finished
+        table{tracks.length > 1 ? "s are" : " is"} loaded straight into Analyse. The only thing left for you is
+        picking group A and group B.
+      </p>
+
+      <details className="text-xs">
+        <summary className="cursor-pointer text-faint hover:text-foreground">
+          Rather drive it yourself? A one-line command, the kit as a zip, and every step spelled out
+        </summary>
+        <div className="mt-2"><OneLiner accession={accession} /></div>
+        <div className="grid gap-3 mt-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <a className="btn btn-sm" href={`${API}${plan.kit_url ?? `/dataset/${accession}/searchkit.zip`}`} download>
+              Download {label} (zip)
+            </a>
+            <span className="text-faint">then <code>bash run_all.sh</code>, or run each script yourself</span>
+          </div>
+          {plan.caveat && <p className="text-muted-foreground">{plan.caveat}</p>}
+          <ol className="grid gap-1.5">
+            {stages.map((s, i) => (
+              <li key={s.id}>
+                <div className="flex items-baseline gap-2">
+                  <span className="tabular text-faint shrink-0">{i + 1}.</span>
+                  <span className="font-semibold">{s.label}</span>
+                  <span className={`pill shrink-0 ${s.where === "automatic" ? "" : "text-faint"}`}>{s.where}</span>
+                </div>
+                <div className="text-muted-foreground pl-6">{s.detail}</div>
+                {s.substages && s.substages.length > 0 && (
+                  <details className="pl-6 mt-0.5">
+                    <summary className="cursor-pointer text-faint hover:text-foreground">
+                      what {s.engine_label} does inside — {s.substages.length} steps
+                    </summary>
+                    <ol className="grid gap-0.5 mt-1 border-l pl-3">
+                      {s.substages.map((sub) => (
+                        <li key={sub.name} className="text-muted-foreground">
+                          <span className="font-medium">{sub.name}</span> — {sub.detail}
+                        </li>
+                      ))}
+                    </ol>
+                    <p className="text-faint mt-1">
+                      {s.engine === "maxquant"
+                        ? "Reported live: the run tails combined/proc/ and echoes each as MaxQuant finishes it."
+                        : "Reported as DIA-NN progresses."}
+                    </p>
+                  </details>
+                )}
+              </li>
+            ))}
+          </ol>
+          {!plan.maxquant_offered && plan.maxquant_reason && (
+            <p className="text-faint"><span className="font-semibold">Why not MaxQuant:</span> {plan.maxquant_reason}</p>
+          )}
+        </div>
+      </details>
     </div>
   );
 }
@@ -99,13 +483,26 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
   const [res, setRes] = useState<PrideResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const look = async (a: string) => {
+  const [remoteAvailable, setRemoteAvailable] = useState(false);
+  useEffect(() => {
+    fetch(`${API}/remote-mq`).then((r) => r.ok ? r.json() : null).then((d) => { if (d) setRemoteAvailable(d.available); }).catch(() => {});
+  }, []);
+  const look = async (a: string, autoOpen = false) => {
     const x = a.trim().toUpperCase();
     if (!x) return;
     setLoading(true); setErr(null); setRes(null);
-    try { setRes(await jfetch<PrideResults>(fetch(`${API}/dataset/${encodeURIComponent(x)}/results`))); } catch (e) { setErr(String(e)); } finally { setLoading(false); }
+    try {
+      const r = await jfetch<PrideResults>(fetch(`${API}/dataset/${encodeURIComponent(x)}/results`));
+      setRes(r);
+      // When arriving from the workflow's "Analyse" CTA and there's exactly one openable file, skip the click.
+      if (autoOpen && !r.plan?.engine) {
+        const all = [...r.tables, ...r.archives];
+        const openable = all.filter((t) => t.openable);
+        if (openable.length === 1) onOpen(r.accession, openable[0].file_name);
+      }
+    } catch (e) { setErr(String(e)); } finally { setLoading(false); }
   };
-  useEffect(() => { if (initial) { const id = window.setTimeout(() => { setAcc(initial); look(initial); }, 0); return () => window.clearTimeout(id); } }, [initial]);
+  useEffect(() => { if (initial) { const id = window.setTimeout(() => { setAcc(initial); look(initial, true); }, 0); return () => window.clearTimeout(id); } }, [initial]);
   const all = res ? [...res.tables, ...res.archives] : [];
   return (
     <div className="rounded-xl border bg-card p-5 grid gap-3" data-tour="from-pride">
@@ -119,21 +516,44 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
       </div>
       {err && <p className="text-warn text-sm">{err}</p>}
       {res && res.note && <p className="note text-sm"><span aria-hidden>ⓘ</span><span>{res.note} {res.raw_files > 0 && <Link href={`/dataset/${res.accession}#reanalyse`} className="underline">Open the set‑up sheet →</Link>}</span></p>}
-      {res && res.plan && res.plan.engine && <SearchKit plan={res.plan} accession={res.accession} />}
-      {res && all.length > 0 && (
-        <ul className="grid gap-1">
-          {all.slice(0, 8).map((t) => (
-            <li key={t.file_name} className="flex flex-wrap items-center gap-3 text-sm rounded-md border px-3 py-2">
-              <span className="font-mono text-xs truncate max-w-md" title={t.file_name}>{t.file_name}</span>
-              <span className="pill">{t.kind}</span>
-              {t.size_bytes ? <span className="text-faint tabular text-xs">{(t.size_bytes / 1e6).toFixed(1)} MB</span> : null}
-              <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={busy || !t.openable} onClick={() => onOpen(res.accession, t.file_name)} title={t.openable ? "" : "too large to fetch here; download from PRIDE and upload"}>Open in Analyse</button>
-            </li>
-          ))}
-          {all.length > 8 && <li className="text-xs text-faint">…and {all.length - 8} more on PRIDE</li>}
-        </ul>
+      {res && res.plan?.engine && all.length > 0 && (
+        <p className="note text-sm"><span aria-hidden>ⓘ</span><span>This dataset has both a submitter result table and raw files. <b>Quick path:</b> open the submitter&apos;s table below — it&apos;s ready now. <b>Thorough path:</b> re-run the search from the raw files with your own parameters using the kit below.</span></p>
       )}
-      <p className="text-xs text-muted-foreground">Uses the submitter&apos;s own search output on PRIDE (MaxQuant proteinGroups, DIA‑NN report, FragPipe tables, any CSV/TSV/XLSX). PRIDE Map can&apos;t run MaxQuant or DIA‑NN itself; if a dataset only has raw files, it works out which engine fits and hands you a ready‑made kit to run on your own machine.</p>
+
+      {/* Search kit: always rendered after a lookup; absent-with-reason when there are no raw files */}
+      {res && (res.plan?.engine
+        ? <SearchKit plan={res.plan} accession={res.accession} remoteAvailable={remoteAvailable} />
+        : res.raw_files === 0 && all.length > 0
+          ? <div className="rounded-lg border bg-muted/20 p-4 text-sm grid gap-1">
+              <span className="font-semibold">Re-run the search</span>
+              <span className="text-faint">No raw files are deposited for this dataset on PRIDE, so a re-search is not possible here. You can open the submitter&apos;s result table directly below.</span>
+            </div>
+          : null
+      )}
+
+      {/* Submitter result tables: always rendered after a lookup; absent-with-reason when there are no tables */}
+      {res && (all.length > 0
+        ? <div className="grid gap-1">
+            <p className="text-xs font-semibold text-faint uppercase tracking-wide px-1">Submitter results on PRIDE</p>
+            <ul className="grid gap-1">
+              {all.slice(0, 8).map((t) => (
+                <li key={t.file_name} className="flex flex-wrap items-center gap-3 text-sm rounded-md border px-3 py-2">
+                  <span className="font-mono text-xs truncate max-w-md" title={t.file_name}>{t.file_name}</span>
+                  <span className="pill">{t.kind}</span>
+                  {t.size_bytes ? <span className="text-faint tabular text-xs">{(t.size_bytes / 1e6).toFixed(1)} MB</span> : null}
+                  <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={busy || !t.openable} onClick={() => onOpen(res.accession, t.file_name)} title={t.openable ? "" : "too large to fetch here; download from PRIDE and upload"}>Open in Analyse</button>
+                </li>
+              ))}
+              {all.length > 8 && <li className="text-xs text-faint px-1">…and {all.length - 8} more on PRIDE</li>}
+            </ul>
+          </div>
+        : res.raw_files > 0
+          ? <div className="rounded-lg border bg-muted/20 p-4 text-sm grid gap-1">
+              <span className="font-semibold">Submitter results on PRIDE</span>
+              <span className="text-faint">No result table was deposited for this dataset. Run the search above from the {res.raw_files} raw file{res.raw_files !== 1 ? "s" : ""} to generate one.</span>
+            </div>
+          : null
+      )}
     </div>
   );
 }
@@ -143,6 +563,8 @@ export function AnalyseView() {
   const router = useRouter();
   const uploadParam = params.get("upload");
   const accParam = params.get("acc");
+  const hintA = params.get("hint_a") ?? "";
+  const hintB = params.get("hint_b") ?? "";
 
   const [inspect, setInspect] = useState<Inspect | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -155,12 +577,8 @@ export function AnalyseView() {
   const [logT, setLogT] = useState<"auto" | "log2" | "none">("auto");
   const [minValid, setMinValid] = useState(2);
   const [contam, setContam] = useState("");
-  const [mode, setMode] = useState<Mode>("welch");
-  const [prefix, setPrefix] = useState("Set1_Brain");
-  const [name, setName] = useState("batch");
   const [result, setResult] = useState<RunOut | null>(null);
   const [lastBody, setLastBody] = useState<Record<string, unknown> | null>(null);
-  const [odetta, setOdetta] = useState<OdettaOut | null>(null);
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const loadedId = inspect?.upload_id ?? null;
@@ -172,17 +590,15 @@ export function AnalyseView() {
     setStemA(g[0]?.stem ?? CUSTOM); setColsA(g[0]?.columns ?? []);
     setStemB(g[1]?.stem ?? CUSTOM); setColsB(g[1]?.columns ?? []);
     setContam("");
-    setMode("welch");
-    setPrefix(d.odetta_prefixes[0] ?? "Set1_Brain");
-    setResult(null); setOdetta(null); setErr(null);
+    setResult(null); setErr(null);
   };
 
-  // ?upload=<id> re-opens an existing upload
+  // ?upload=<id> re-opens an existing upload; ?hint_a / ?hint_b pre-select groups from the search step
   useEffect(() => {
     if (!uploadParam || uploadParam === loadedId) return;
     let live = true;
     jfetch<Inspect>(fetch(`${API}/analyse/${encodeURIComponent(uploadParam)}`))
-      .then((d) => { if (live) applyInspect(d); })
+      .then((d) => { if (!live) return; applyInspect(d); applyHints(d.suggested_groups, hintA, hintB); })
       .catch((e) => { if (live) setErr(String(e)); });
     return () => { live = false; };
   }, [uploadParam, loadedId]);
@@ -216,24 +632,28 @@ export function AnalyseView() {
     if (which === "a") { setStemA(stem); if (g) setColsA(g.columns); } else { setStemB(stem); if (g) setColsB(g.columns); }
   };
 
+  const applyHints = (groups: Group[], a: string, b: string) => {
+    if (!a && !b) return;
+    const find = (hint: string) => groups.find((g) => g.stem.toLowerCase().includes(hint.toLowerCase()) || hint.toLowerCase().includes(g.stem.toLowerCase()));
+    const ga = a ? find(a) : undefined;
+    const gb = b ? find(b) : undefined;
+    if (ga) { setStemA(ga.stem); setColsA(ga.columns); }
+    if (gb) { setStemB(gb.stem); setColsB(gb.columns); }
+  };
+
   const run = async () => {
     if (!inspect) return;
-    setErr(null); setResult(null); setOdetta(null);
+    setErr(null); setResult(null);
     try {
-      if (mode === "odetta") {
-        setBusy("Running Odetta's TESE pipeline (tag effect, input-normalised enrichment, mock-controlled dod)…");
-        setOdetta(await jfetch<OdettaOut>(fetch(`${API}/analyse/odetta`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ upload_id: inspect.upload_id, prefix, name }) })));
-      } else {
-        setBusy("Welch t-test per protein + Benjamini–Hochberg…");
-        const body = { upload_id: inspect.upload_id, id_column: idCol, group_a: colsA, group_b: colsB, log_transform: logT, min_valid: minValid, contaminant_column: contam || null };
-        setLastBody({ ...body, label_a: stemA || "A", label_b: stemB || "B" });
-        setResult(await jfetch<RunOut>(fetch(`${API}/analyse/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })));
-        markAnalysed();
-      }
+      setBusy("Welch t-test per protein + Benjamini–Hochberg…");
+      const body = { upload_id: inspect.upload_id, id_column: idCol, group_a: colsA, group_b: colsB, log_transform: logT, min_valid: minValid, contaminant_column: contam || null };
+      setLastBody({ ...body, label_a: stemA || "A", label_b: stemB || "B" });
+      setResult(await jfetch<RunOut>(fetch(`${API}/analyse/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })));
+      markAnalysed();
     } catch (e) { setErr(String(e)); } finally { setBusy(null); }
   };
 
-  const canRun = !!inspect && !busy && (mode === "odetta" ? !!prefix && !!name : !!idCol && colsA.length >= 2 && colsB.length >= 2);
+  const canRun = !!inspect && !busy && !!idCol && colsA.length >= 2 && colsB.length >= 2;
 
   return (
     <div className="grid gap-5">
@@ -260,7 +680,27 @@ export function AnalyseView() {
         {inspect && (
           <p className="text-sm" data-tour="loaded">
             <span className="font-semibold">{inspect.file}</span> · <span className="tabular">{inspect.n_rows.toLocaleString()}</span> rows × <span className="tabular">{inspect.n_cols.toLocaleString()}</span> columns · {inspect.suggested_groups.length} sample groups detected
-            {inspect.odetta_compatible && <span className="ml-2 pill bg-ok-soft text-ok">lyso‑IP layout: Odetta&apos;s pipeline available</span>}
+            </p>
+        )}
+        {inspect?.mztab && !inspect.mztab.comparable && (
+          <p className="note text-sm text-warn" data-tour="mztab-warning">
+            <span aria-hidden>⚠</span>
+            <span>
+              This mzTab identifies {inspect.mztab.rows.toLocaleString()} proteins, but every one of its{" "}
+              {inspect.mztab.per_run_columns} per‑run columns is empty — a flat identification list for the whole
+              study, with no per‑sample numbers. There is nothing here to compare, so A vs B and a volcano plot are
+              not possible from this file. Getting them means running the search over the raw files.
+            </span>
+          </p>
+        )}
+        {inspect?.mztab?.comparable && (
+          <p className="note text-sm">
+            <span aria-hidden>ⓘ</span>
+            <span>
+              mzTab: {inspect.mztab.rows.toLocaleString()} proteins across {inspect.mztab.runs} runs, quantified by{" "}
+              {inspect.mztab.quant_kind}.
+              {!inspect.mztab.intensity_based && " Spectral counts are semi-quantitative — noisier than LFQ intensities, and a t-test on counts is approximate."}
+            </span>
           </p>
         )}
         {busy && <p className="text-sm text-teal">{busy}</p>}
@@ -271,81 +711,49 @@ export function AnalyseView() {
       {/* (b) choose groups */}
       {inspect && (
         <div className="rounded-xl border bg-card p-5 grid gap-4">
-          <div className="flex flex-wrap gap-2">
-            <ModeButton active={mode === "welch"} onClick={() => setMode("welch")}>Group A vs group B</ModeButton>
-            <ModeButton active={mode === "odetta"} onClick={() => setMode("odetta")} disabled={!inspect.odetta_compatible} title={inspect.odetta_compatible ? "" : "needs <prefix>_IP_LTKI.N and <prefix>_IP_LTWT.N columns"}>Odetta&apos;s TESE pipeline</ModeButton>
+          <div className="grid sm:grid-cols-2 gap-4" data-tour="groups">
+            <GroupPicker label="Group A" tourId="group-a" hint="the baseline (e.g. WT, control)" stem={stemA} cols={colsA} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("a", s)} onCols={(c) => { setColsA(c); setStemA(CUSTOM); }} />
+            <GroupPicker label="Group B" tourId="group-b" hint="the condition (e.g. KO, treated)" stem={stemB} cols={colsB} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("b", s)} onCols={(c) => { setColsB(c); setStemB(CUSTOM); }} />
           </div>
-
-          {mode === "welch" ? (
-            <>
-              <div className="grid sm:grid-cols-2 gap-4" data-tour="groups">
-                <GroupPicker label="Group A" tourId="group-a" hint="the baseline (e.g. WT, control)" stem={stemA} cols={colsA} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("a", s)} onCols={(c) => { setColsA(c); setStemA(CUSTOM); }} />
-                <GroupPicker label="Group B" tourId="group-b" hint="the condition (e.g. KO, treated)" stem={stemB} cols={colsB} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("b", s)} onCols={(c) => { setColsB(c); setStemB(CUSTOM); }} />
-              </div>
-              <div className="grid sm:grid-cols-4 gap-3 text-sm">
-                <label className="grid gap-1">
-                  <span className="label">protein id column</span>
-                  <select value={idCol} onChange={(e) => setIdCol(e.target.value)} className="input h-10">
-                    {inspect.id_columns.map((c) => <option key={c} value={c}>{c}</option>)}
-                    {!inspect.id_columns.length && <option value="">(no text id column found)</option>}
-                  </select>
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">intensities are</span>
-                  <select value={logT} onChange={(e) => setLogT(e.target.value as typeof logT)} className="input h-10">
-                    <option value="auto">auto-detect (log2 if raw)</option>
-                    <option value="log2">raw → take log2</option>
-                    <option value="none">already log-scale</option>
-                  </select>
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">min values per group</span>
-                  <input type="number" min={2} max={50} value={minValid} onChange={(e) => setMinValid(Math.max(2, Number(e.target.value) || 2))} className="input h-10 tabular" />
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">drop contaminants by</span>
-                  <select value={contam} onChange={(e) => setContam(e.target.value)} className="input h-10">
-                    <option value="">(don&apos;t filter)</option>
-                    {inspect.contaminant_columns.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </label>
-              </div>
-            </>
-          ) : (
-            <div className="grid sm:grid-cols-[1fr_1fr_2fr] gap-3 text-sm">
-              <label className="grid gap-1">
-                <span className="label">column prefix</span>
-                <select value={prefix} onChange={(e) => setPrefix(e.target.value)} className="input h-10">
-                  {inspect.odetta_prefixes.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </label>
-              <label className="grid gap-1">
-                <span className="label">batch name</span>
-                <input value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9_-]/g, "_"))} className="input h-10 font-mono" />
-              </label>
-              <p className="text-muted-foreground self-end">
-                Runs <code>analysis/tese_lysoip_analysis.py</code>: tag‑vs‑tag TESE effect, input‑normalised enrichment and the mock‑controlled dod, using the <code>{prefix}_IP_*</code> and <code>{prefix}_WC_*</code> columns. Positive = TESE‑high.
-              </p>
-            </div>
-          )}
+          <div className="grid sm:grid-cols-4 gap-3 text-sm">
+            <label className="grid gap-1">
+              <span className="label">protein id column</span>
+              <select value={idCol} onChange={(e) => setIdCol(e.target.value)} className="input h-10">
+                {inspect.id_columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                {!inspect.id_columns.length && <option value="">(no text id column found)</option>}
+              </select>
+            </label>
+            <label className="grid gap-1">
+              <span className="label">intensities are</span>
+              <select value={logT} onChange={(e) => setLogT(e.target.value as typeof logT)} className="input h-10">
+                <option value="auto">auto-detect (log2 if raw)</option>
+                <option value="log2">raw → take log2</option>
+                <option value="none">already log-scale</option>
+              </select>
+            </label>
+            <label className="grid gap-1">
+              <span className="label">min values per group</span>
+              <input type="number" min={2} max={50} value={minValid} onChange={(e) => setMinValid(Math.max(2, Number(e.target.value) || 2))} className="input h-10 tabular" />
+            </label>
+            <label className="grid gap-1">
+              <span className="label">drop contaminants by</span>
+              <select value={contam} onChange={(e) => setContam(e.target.value)} className="input h-10">
+                <option value="">(don&apos;t filter)</option>
+                {inspect.contaminant_columns.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+          </div>
 
           <div className="flex items-center gap-3">
             <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6" data-tour="run">{busy ? <><span className="spinner mr-2" />Running…</> : "Run"}</button>
-            {mode === "welch" && <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>}
+            <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>
           </div>
         </div>
       )}
 
       {/* (d) results */}
       {result && <div data-tour="results"><WelchResults out={result} uploadId={inspect?.upload_id ?? "table"} reportBody={lastBody} /></div>}
-      {odetta && <OdettaResults out={odetta} />}
     </div>
-  );
-}
-
-function ModeButton({ active, disabled, title, onClick, children }: { active: boolean; disabled?: boolean; title?: string; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button type="button" onClick={onClick} disabled={disabled} title={title} className={`btn rounded-full ${active ? "btn-primary" : ""}`}>{children}</button>
   );
 }
 
@@ -580,33 +988,3 @@ function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: strin
   );
 }
 
-const cell = (v: unknown) => (v === null || v === undefined ? "—" : typeof v === "number" ? (Number.isInteger(v) ? v : fmt(v)) : typeof v === "boolean" ? String(v) : String(v));
-
-function OdettaResults({ out }: { out: OdettaOut }) {
-  return (
-    <div className="grid gap-4">
-      <div className={`rounded-xl border p-4 ${out.ok ? "border-ok bg-ok-soft/40" : "border-warn bg-warn-soft/40"}`}>
-        <div className="font-heading font-semibold text-lg">{out.ok ? "Odetta's pipeline finished" : "Odetta's pipeline failed"}</div>
-        {out.error && <p className="mt-1 text-sm text-warn">{out.error}</p>}
-        {out.stdout && <pre className="mt-2 text-xs whitespace-pre-wrap">{out.stdout}</pre>}
-        {!out.ok && out.stderr && <pre className="mt-2 text-xs whitespace-pre-wrap text-warn">{out.stderr}</pre>}
-        {out.outdir && <p className="mt-2 text-xs text-muted-foreground">Full CSVs are in <code>{out.outdir}/</code>. Sign convention: positive = TESE‑high.</p>}
-      </div>
-      {out.outputs.map((o) => (
-        <div key={o.name} className="rounded-xl border bg-card">
-          <div className="p-3 border-b text-sm"><span className="font-mono font-semibold">{o.name}</span> <span className="text-muted-foreground">· {o.rows.toLocaleString()} rows · showing first {o.head.length}</span>{o.error && <span className="text-warn"> · {o.error}</span>}</div>
-          <div className="overflow-x-auto">
-            <table className="text-xs">
-              <thead><tr className="border-b">{o.columns.map((c) => <th key={c} className="p-2 text-left whitespace-nowrap label">{c}</th>)}</tr></thead>
-              <tbody>
-                {o.head.map((r, i) => (
-                  <tr key={i} className="border-b last:border-0">{o.columns.map((c) => <td key={c} className="p-2 tabular whitespace-nowrap">{cell(r[c])}</td>)}</tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}

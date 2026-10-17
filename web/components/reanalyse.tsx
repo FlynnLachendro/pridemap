@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import { markSetupSeen } from "@/lib/progress-store";
+import { SamplePicker } from "@/components/sample-picker";
 import { API } from "@/lib/api";
+import { RunRemote } from "@/components/run-remote";
 
 type Param = { value: unknown; why?: string; tag?: string; confidence?: number | null; evidence?: string | null; missed_cleavages?: number; from_pride_ptms?: string[] };
 type Out = {
@@ -14,6 +16,7 @@ type Out = {
     maxquant_offered: boolean; maxquant_reason: string | null; caveat: string | null; conflict: string | null;
     convert: { from: string; to: string; tool: string; url: string } | null; kit_url: string;
     mixed: boolean; runs_dda: number; runs_dia: number;
+    stages: { id: string; label: string; detail: string; where: string; substages?: { name: string; detail: string }[] }[];
     tracks: { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string }[];
   };
 };
@@ -22,14 +25,17 @@ const CAT: Record<string, string> = { RAW: "Raw instrument files", PEAK: "Peak l
 const gb = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${(b / 1e6).toFixed(0)} MB`);
 const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : String(v));
 
+
 export function Reanalyse({ accession }: { accession: string }) {
   const [out, setOut] = useState<Out | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [remoteAvailable, setRemoteAvailable] = useState(false);
   useEffect(() => { markSetupSeen(accession); }, [accession]);
   useEffect(() => {
     let live = true;
     fetch(`${API}/dataset/${accession}/reanalyse`).then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
       .then((d) => { if (live) setOut(d); }).catch((e) => { if (live) setErr(String(e)); });
+    fetch(`${API}/remote-mq`).then((r) => r.json()).then((d) => { if (live) setRemoteAvailable(d.available); }).catch(() => {});
     return () => { live = false; };
   }, [accession]);
   if (err) return <p className="text-warn text-sm">{err}</p>;
@@ -40,7 +46,15 @@ export function Reanalyse({ accession }: { accession: string }) {
   return (
     <section className="grid gap-4">
       <div>
-        <h2 className="text-lg">Reanalyse this dataset</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-lg">Reanalyse this dataset</h2>
+          {remoteAvailable && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2.5 py-0.5 text-xs font-medium text-ok">
+              <span className="size-1.5 rounded-full bg-ok animate-pulse" />
+              Remote MaxQuant connected
+            </span>
+          )}
+        </div>
         <p className="text-sm text-muted-foreground">
           {out.has_submitter_results ? "Submitter results are on PRIDE; you may not need to re-search." : "No submitter results on PRIDE; search the raw files with the parameters below."}
         </p>
@@ -106,20 +120,44 @@ export function Reanalyse({ accession }: { accession: string }) {
         </div>
       )}
 
+      {out.plan && out.plan.raw_count > 1 && <SamplePicker accession={accession} />}
+
       {out.plan && out.plan.engine && out.plan.engine !== "quantms" && (
         <div className="rounded-xl border bg-card overflow-hidden" data-tour="searchkit">
           <div className="px-4 py-3 border-b flex items-center justify-between gap-3 flex-wrap">
-            <h3 className="text-base">
-              Run the search on your machine with {out.plan.tracks.map((t) => t.engine_label).join(" + ")}
-            </h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-base">
+                {remoteAvailable && out.plan.maxquant_offered
+                  ? <>Run with {out.plan.tracks.map((t) => t.engine_label).join(" + ")} — local or cloud</>
+                  : <>Run the search on your machine with {out.plan.tracks.map((t) => t.engine_label).join(" + ")}</>}
+              </h3>
+              {remoteAvailable && out.plan.maxquant_offered && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2 py-0.5 text-xs text-ok">
+                  <span className="size-1.5 rounded-full bg-ok animate-pulse" />
+                  cloud ready
+                </span>
+              )}
+            </div>
             <a className="btn btn-primary btn-sm" href={`${API}${out.plan.kit_url}`} download>Download kit (zip)</a>
           </div>
           <div className="px-4 py-3 grid gap-2 text-sm">
             <p className="text-xs text-muted-foreground">{out.plan.why}</p>
             {out.plan.conflict && <p className="text-warn text-xs">⚠ {out.plan.conflict}</p>}
             {out.plan.caveat && <p className="text-xs text-muted-foreground">{out.plan.caveat}</p>}
+            <div className="rounded-md border bg-muted/30 px-3 py-2 grid gap-0.5">
+              <code className="text-xs break-all select-all">
+                curl -fsSL {API}/dataset/{accession}/pipeline.sh | bash
+              </code>
+              <span className="text-xs text-muted-foreground">
+                Checks your tools and free space first, then runs every stage end to end and uploads the finished
+                table back into Analyse. Resumes where it stopped; MaxQuant&apos;s own internal steps are tailed from
+                <code> combined/proc/</code> so the long middle is not a black box. Full record in
+                <code> progress.jsonl</code>.
+              </span>
+            </div>
             <div className="label">What you get</div>
             <ul className="grid gap-0.5 text-xs text-muted-foreground">
+              <li>• <code>run_all.sh</code>: the whole pipeline in one command, with per-stage progress</li>
               <li>• <code>download_raw.sh</code>: pulls the {out.plan.raw_count} raw files ({out.plan.vendor_label}) from PRIDE&apos;s FTP</li>
               {out.plan.convert && <li>• <code>convert_to_mzml.sh</code>: {out.plan.convert.from} → {out.plan.convert.to} via <a className="underline" href={out.plan.convert.url} target="_blank" rel="noreferrer">{out.plan.convert.tool}</a></li>}
               <li>• <code>download_fasta.sh</code>: the reference proteome, saved where the configs expect it</li>
@@ -131,6 +169,7 @@ export function Reanalyse({ accession }: { accession: string }) {
               <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {out.plan.maxquant_reason}</p>
             )}
           </div>
+          {remoteAvailable && out.plan.maxquant_offered && <RunRemote accession={accession} />}
         </div>
       )}
 
