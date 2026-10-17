@@ -3,6 +3,8 @@ import { dataset, METHOD_TAGS, pretty, TAG_LABEL } from "@/lib/api";
 import { Correct } from "@/components/correct";
 import { CompareToggle } from "@/components/compare-toggle";
 import { Reanalyse } from "@/components/reanalyse";
+import { Collapsible, Expandable } from "@/components/expandable";
+import { CompareFromHere } from "@/components/compare-from-here";
 
 
 const ORDER = ["organism", "sample_type", "tissue", "cell_line", "disease", ...METHOD_TAGS, "depth_proteins"];
@@ -67,7 +69,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
                         {e && <span className="pill">{e.source}</span>}
                         <Correct accession={p.accession} tag={k} current={v === null || v === undefined ? "" : String(v)} />
                       </div>
-                      {e?.evidence && <p className="text-sm text-muted-foreground italic mt-1 border-l-2 pl-3">“{e.evidence}”</p>}
+                      {e?.evidence && <div className="text-sm text-muted-foreground italic mt-1 border-l-2 pl-3"><Expandable text={`“${e.evidence}”`} lines={1} /></div>}
                     </div>
                   </div>
                 );
@@ -76,11 +78,14 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
           </section>
         )}
 
-        <div id="reanalyse" data-tour="reanalyse"><Reanalyse accession={p.accession} /></div>
+        <div id="reanalyse" data-tour="reanalyse">
+          <Collapsible title="Reanalyse this dataset" summary="files on PRIDE and the search parameters to use" defaultOpen={false}>
+            <Reanalyse accession={p.accession} />
+          </Collapsible>
+        </div>
 
-        <section className="grid gap-3">
-          <h2 className="text-lg">What PRIDE says</h2>
-          <div className="rounded-xl border bg-card p-4 grid gap-3 text-sm">
+        <Collapsible title="What PRIDE says" summary="the submitter's own description, protocols and fields">
+          <div className="grid gap-3 text-sm">
             <Field label="Description" text={p.description} />
             <Field label="Sample processing protocol" text={p.sample_protocol} />
             <Field label="Data processing protocol" text={p.data_protocol} />
@@ -95,7 +100,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
               ))}
             </div>
           </div>
-        </section>
+        </Collapsible>
       </div>
 
       <aside className="grid gap-4 content-start">
@@ -114,6 +119,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
             <p className="text-xs text-muted-foreground">No PubMed link on this dataset.</p>
           )}
         </div>
+        {d.tagged && <CompareFromHere accession={p.accession} />}
         <div className="rounded-xl border bg-card p-4 text-sm grid gap-2">
           <h2 className="text-lg">Find similar</h2>
           <div className="flex flex-wrap gap-1.5">
@@ -144,7 +150,7 @@ function Field({ label, text }: { label: string; text: string | null | undefined
   return (
     <div>
       <div className="label">{label}</div>
-      <p className="mt-1 whitespace-pre-wrap leading-relaxed">{text}</p>
+      <Expandable text={text} lines={3} className="mt-1" />
     </div>
   );
 }

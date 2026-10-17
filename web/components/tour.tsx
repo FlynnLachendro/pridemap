@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { driver, type Driver } from "driver.js";
 import "driver.js/dist/driver.css";
 import { STEPS, TOUR_A, TOUR_B, TOUR_Q } from "@/lib/tour";
@@ -26,7 +26,7 @@ const ACTIONS: Record<string, () => Promise<void>> = {
   "type-question": async () => {
     const input = (await waitFor('[data-tour="search"] input')) as HTMLInputElement | null;
     if (!input) return;
-    for (let i = 1; i <= TOUR_Q.length; i++) { setValue(input, TOUR_Q.slice(0, i)); await sleep(18); }
+    for (let i = 3; i <= TOUR_Q.length + 2; i += 3) { setValue(input, TOUR_Q.slice(0, i)); await sleep(40); }
     await sleep(300);
     input.closest("form")?.requestSubmit();
     await waitFor('[data-tour="ask"]', 20000);
@@ -68,12 +68,12 @@ const ACTIONS: Record<string, () => Promise<void>> = {
 
 export function Tour() {
   const path = usePathname();
-  const params = useSearchParams();
   const router = useRouter();
   const drv = useRef<Driver | null>(null);
 
+  // Re-run only when the route changes: same-page URL updates (filters, the question) must not restart the tour.
   useEffect(() => {
-    const raw = params.get("tour");
+    const raw = new URLSearchParams(window.location.search).get("tour");
     if (raw === null) return;
     const start = Number(raw) || 0;
     const steps = STEPS.map((s, i) => ({ ...s, i })).filter((s) => s.i >= start && s.route === path);
@@ -116,7 +116,7 @@ export function Tour() {
 
     return () => { cancelled = true; d.destroy(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, params]);
+  }, [path]);
 
   return null;
 }

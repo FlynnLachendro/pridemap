@@ -148,7 +148,7 @@ export function Browse() {
       )}
 
       <div className="grid lg:grid-cols-[240px_1fr] gap-6 items-start">
-        <aside className="grid gap-5 lg:sticky lg:top-4" data-tour="filters">
+        <aside className="grid gap-5 content-start lg:sticky lg:top-0 lg:max-h-[calc(100dvh-4rem)] lg:overflow-y-auto lg:pr-2 lg:-mr-2 lg:pb-8" data-tour="filters">
           <div className="flex items-center justify-between">
             <span className="label">Filters</span>
             {activeChips.length > 0 && <button type="button" className="text-xs underline text-muted-foreground" onClick={() => push({ q: filters.q, sort: filters.sort })}>clear all</button>}
