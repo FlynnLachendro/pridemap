@@ -485,6 +485,62 @@ def export_sdrf(request: Request):
     return "\n".join(lines) + "\n"
 
 
+# ----------------------------------------------------------------------------- compare
+COMPARE_RULES = [
+    # (tag, severity, why it matters for comparing quantities across datasets)
+    ("labelling", "blocker", "different quantification chemistry: intensities aren't on the same scale"),
+    ("acquisition", "blocker", "DDA and DIA sample different peptides; protein lists and quantities aren't comparable"),
+    ("enrichment", "blocker", "different enrichment means a different population of peptides was measured"),
+    ("organism", "blocker", "different organisms: different proteomes"),
+    ("enzyme", "major", "different digestion gives different peptides for the same protein"),
+    ("instrument_family", "major", "instrument sensitivity and dynamic range differ"),
+    ("sample_type", "major", "tissue vs cell line vs biofluid have very different backgrounds"),
+    ("fractionation", "minor", "depth differs; expect more missing values in the shallower set"),
+    ("search_engine", "minor", "different scoring and FDR; re-search both with one tool before comparing"),
+    ("tissue", "minor", "different tissues: biological, not technical, difference"),
+]
+
+
+@app.get("/compare")
+def compare(accessions: str):
+    accs = [a.strip() for a in accessions.split(",") if a.strip()][:6]
+    if len(accs) < 2:
+        raise HTTPException(400, "give at least two accessions")
+    con = db()
+    rows = {}
+    for a in accs:
+        r = con.execute("SELECT t.*, p.title, p.publication_date, p.pubmed_id FROM tags t JOIN projects p USING(accession) WHERE t.accession=?", (a,)).fetchone()
+        if not r:
+            raise HTTPException(404, f"{a} is not tagged (or unknown)")
+        rows[a] = dict(r)
+    ev = {}
+    for e in con.execute(f"SELECT accession, tag, confidence, evidence FROM tag_evidence WHERE accession IN ({','.join('?' * len(accs))})", accs):
+        ev.setdefault(e["accession"], {})[e["tag"]] = {"confidence": e["confidence"], "evidence": e["evidence"]}
+    issues = []
+    for tag, sev, why in COMPARE_RULES:
+        vals = {a: rows[a].get(tag) for a in accs}
+        distinct = {v for v in vals.values() if v is not None}
+        if len(distinct) > 1:
+            issues.append({"tag": tag, "severity": sev, "why": why, "values": {a: pretty(v) for a, v in vals.items()}})
+        elif any(v is None for v in vals.values()):
+            issues.append({"tag": tag, "severity": "unknown", "why": f"{tag.replace('_', ' ')} is unknown for some datasets; check the protocol", "values": {a: pretty(v) for a, v in vals.items()}})
+    blockers = [i for i in issues if i["severity"] == "blocker"]
+    majors = [i for i in issues if i["severity"] == "major"]
+    if blockers:
+        verdict, summary = "not_comparable", "Don't compare quantities directly: " + "; ".join(i["why"] for i in blockers) + "."
+    elif majors:
+        verdict, summary = "with_caution", "Comparable with caution: " + "; ".join(i["why"] for i in majors) + ". Normalise and batch-correct before any test."
+    else:
+        verdict, summary = "comparable", "Methods match on everything that matters. Treat remaining differences as batch effects."
+    table = {}
+    for tag in TAG_COLS + ["depth_proteins"]:
+        table[tag] = {a: {"value": pretty(rows[a].get(tag)) if tag != "depth_proteins" else rows[a].get(tag),
+                         "confidence": ev.get(a, {}).get(tag, {}).get("confidence"),
+                         "evidence": ev.get(a, {}).get(tag, {}).get("evidence")} for a in accs}
+    return {"accessions": accs, "datasets": {a: {"title": rows[a]["title"], "summary": rows[a]["summary_one_line"], "publication_date": rows[a]["publication_date"], "pride_url": PRIDE_URL + a} for a in accs},
+            "verdict": verdict, "summary": summary, "issues": issues, "table": table}
+
+
 @app.get("/")
 def root():
     return {"name": "PRIDE Map API", "docs": "/docs", "stats": "/stats", "search": "/search?organism=mouse&enrichment=phospho"}

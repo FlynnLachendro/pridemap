@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { dataset, METHOD_TAGS, pretty, TAG_LABEL } from "@/lib/api";
 import { Correct } from "@/components/correct";
+import { CompareToggle } from "@/components/compare-toggle";
 
 
 const ORDER = ["organism", "sample_type", "tissue", "cell_line", "disease", ...METHOD_TAGS, "depth_proteins"];
@@ -33,6 +34,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
             {p.organic_downloads ? <span className="text-muted-foreground tabular">{p.organic_downloads.toLocaleString()} downloads</span> : null}
             <a className="underline text-muted-foreground" href={d.pride_url} target="_blank" rel="noreferrer">PRIDE ↗</a>
             {d.paper_url && <a className="underline text-muted-foreground" href={d.paper_url} target="_blank" rel="noreferrer">paper ↗</a>}
+            {d.tagged && <CompareToggle accession={p.accession} />}
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold mt-1">{p.title}</h1>
           {d.tags.summary_one_line && <p className="mt-2 text-lg text-muted-foreground">{String(d.tags.summary_one_line)}</p>}
