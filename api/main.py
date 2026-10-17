@@ -734,7 +734,8 @@ import urllib.request
 
 PROTEOMES = {9606: ("UP000005640", "Homo sapiens"), 10090: ("UP000000589", "Mus musculus"), 10116: ("UP000002494", "Rattus norvegicus"),
              4932: ("UP000002311", "Saccharomyces cerevisiae"), 3702: ("UP000006548", "Arabidopsis thaliana"), 562: ("UP000000625", "Escherichia coli K-12"),
-             7227: ("UP000000803", "Drosophila melanogaster"), 6239: ("UP000001940", "Caenorhabditis elegans"), 7955: ("UP000000437", "Danio rerio")}
+             7227: ("UP000000803", "Drosophila melanogaster"), 6239: ("UP000001940", "Caenorhabditis elegans"), 7955: ("UP000000437", "Danio rerio"),
+             9913: ("UP000009136", "Bos taurus"), 9823: ("UP000008227", "Sus scrofa"), 9031: ("UP000000539", "Gallus gallus")}
 MQ_ENZYME = {"trypsin": ["Trypsin/P"], "trypsin_lysc": ["Trypsin/P", "LysC"], "lysc": ["LysC"], "chymotrypsin": ["Chymotrypsin+"],
              "gluc": ["GluC"], "aspn": ["AspN"], "none": ["unspecific"], "other": ["(check protocol)"]}
 TOOL = {"DDA": ("MaxQuant or FragPipe", "DDA: spectrum-centric search against a FASTA"),
@@ -742,6 +743,9 @@ TOOL = {"DDA": ("MaxQuant or FragPipe", "DDA: spectrum-centric search against a 
         "PRM_SRM": ("Skyline", "targeted: you need the original transition/target list"),
         "top_down": ("ProSight or TopPIC", "intact proteins: bottom-up tools don't apply"),
         "MALDI": ("the vendor software, or FlexAnalysis + Mascot", "MALDI data needs vendor conversion first")}
+
+
+PRIDE_FILE_PAGES = 60  # 100 files a page; enough for the largest PRIDE depositions
 
 
 def ensure_files_table(con):
@@ -754,16 +758,31 @@ def pride_files(con, accession):
     rows = con.execute("SELECT file_name, category, size_bytes, ftp FROM files WHERE accession=?", (accession,)).fetchall()
     if rows:
         return [dict(r) for r in rows]
-    try:
-        with urllib.request.urlopen(f"https://www.ebi.ac.uk/pride/ws/archive/v3/projects/{accession}/files", timeout=60) as r:
-            data = json.load(r)
-    except Exception as e:
-        print("pride files failed:", e, file=sys.stderr)
+    # PRIDE v3 caps a page at 100 files; page through or large datasets silently lose most of their runs.
+    out, seen = [], set()
+    for page in range(PRIDE_FILE_PAGES):
+        try:
+            url = f"https://www.ebi.ac.uk/pride/ws/archive/v3/projects/{accession}/files?pageSize=100&page={page}"
+            with urllib.request.urlopen(url, timeout=60) as r:
+                data = json.load(r)
+        except Exception as e:
+            print(f"pride files failed ({accession} page {page}):", e, file=sys.stderr)
+            break
+        if not isinstance(data, list):
+            data = (data.get("_embedded") or {}).get("files") or []
+        fresh = 0
+        for f in data:
+            name = f.get("fileName")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            fresh += 1
+            ftp = next((l["value"] for l in f.get("publicFileLocations", []) if l.get("name") == "FTP Protocol"), None)
+            out.append({"file_name": name, "category": (f.get("fileCategory") or {}).get("value"), "size_bytes": f.get("fileSizeBytes"), "ftp": ftp})
+        if fresh == 0 or len(data) < 100:
+            break
+    if not out:
         return []
-    out = []
-    for f in data:
-        ftp = next((l["value"] for l in f.get("publicFileLocations", []) if l.get("name") == "FTP Protocol"), None)
-        out.append({"file_name": f.get("fileName"), "category": (f.get("fileCategory") or {}).get("value"), "size_bytes": f.get("fileSizeBytes"), "ftp": ftp})
     con.executemany("INSERT INTO files VALUES (?,?,?,?,?,?)", [(accession, o["file_name"], o["category"], o["size_bytes"], o["ftp"], dt.datetime.now(dt.UTC).isoformat()) for o in out])
     con.commit()
     return out
@@ -839,11 +858,15 @@ def reanalyse(accession: str):
         if len(g["examples"]) < 3:
             g["examples"].append({"file_name": f["file_name"], "size_bytes": f["size_bytes"], "ftp": f["ftp"]})
     ev = {e["tag"]: dict(e) for e in con.execute("SELECT tag, confidence, evidence FROM tag_evidence WHERE accession=?", (accession,))}
+    from omics import search_plan
+    plan = search_plan(dict(t) if t else {}, [f["file_name"] or "" for f in files if (f["category"] or "").upper() == "RAW"])
+    plan["kit_url"] = f"/dataset/{accession}/searchkit.zip"
     return {
         "accession": accession, "tagged": bool(t),
         "files": {"groups": groups, "total": len(files), "all_ftp_url": f"/dataset/{accession}/files.txt"},
         "recipe": recipe(dict(t), jl(p["ptms"]), ev) if t else None,
         "has_submitter_results": any(f["category"] in ("RESULT", "SEARCH") for f in files),
+        "plan": plan,
     }
 
 
@@ -1116,8 +1139,25 @@ def dataset_results(accession: str):
                  "kind": "MaxQuant proteinGroups" if "proteingroups" in low else "DIA-NN protein matrix" if "pg_matrix" in low else "DIA-NN report" if "report" in low and low.endswith((".tsv", ".parquet")) else "FragPipe protein table" if "combined_protein" in low else "archive (will look inside)" if low.endswith((".zip", ".gz")) else "table"}
         (archives if low.endswith((".zip", ".gz")) else tables).append(entry)
     tables.sort(key=lambda e: (0 if "proteingroups" in e["file_name"].lower() or "pg_matrix" in e["file_name"].lower() or "combined_protein" in e["file_name"].lower() else 1, e["size_bytes"] or 0))
-    return {"accession": accession, "tables": tables, "archives": archives, "raw_files": raw, "has_results": bool(tables or archives),
-            "note": None if (tables or archives) else ("PRIDE holds only raw instrument files for this dataset. Run the database search from the set-up sheet (or the quantms kit), then upload the protein table it produces." if raw else "PRIDE lists no files for this dataset.")}
+    out = {"accession": accession, "tables": tables, "archives": archives, "raw_files": raw,
+           "has_results": bool(tables or archives), "note": None, "plan": None}
+    if tables or archives:
+        return out
+    if not raw:
+        out["note"] = "PRIDE lists no files for this dataset."
+        return out
+    # Raw only: say which engine can actually run on these files rather than naming one and hoping.
+    from omics import search_plan
+    plan = search_plan(dict(con.execute("SELECT * FROM tags WHERE accession=?", (accession,)).fetchone() or {}),
+                       [f.get("file_name") or "" for f in files if (f.get("category") or "").upper() == "RAW"])
+    plan["kit_url"] = f"/dataset/{accession}/searchkit.zip"
+    out["plan"] = plan
+    # "Only raw files" is often untrue: a Mascot .dat or an SDRF is not a table Analyse can read, but it is still there.
+    other = sorted({(f.get("category") or "OTHER").upper() for f in files if (f.get("category") or "").upper() != "RAW"})
+    held = f"no result table Analyse can open ({plan['raw_count']} × {plan['vendor_label']}"
+    held += f"; also {', '.join(c.lower() for c in other)} files PRIDE lists but this step can't parse)." if other else ")."
+    out["note"] = f"PRIDE holds {held} " + (plan.get("why") or "")
+    return out
 
 
 class FromPrideIn(BaseModel):

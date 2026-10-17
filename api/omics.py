@@ -205,8 +205,10 @@ def _tsv_cell(v) -> str:
     return re.sub(r"[\t\r\n]+", " ", str(v if v not in (None, "") else NA))
 
 
-def quantms_kit(accession: str) -> bytes:
-    from main import TAG_COLS, jl, pride_files, recipe
+def _kit_context(accession: str) -> dict:
+    """Everything a reanalysis kit needs about one dataset: project row, tags, derived recipe, raw files and the
+    SDRF-shaped values derived from them. Single owner — quantms_kit and search_kit both compose this."""
+    from main import jl, pride_files, recipe
     con = db()
     p = con.execute("SELECT * FROM projects WHERE accession=?", (accession,)).fetchone()
     if not p:
@@ -224,19 +226,33 @@ def quantms_kit(accession: str) -> bytes:
 
     organism = t.get("organism") or (jl(p.get("organisms")) or [NA])[0]
     instruments = jl(p.get("instruments"))
-    instrument = f"NT={instruments[0]}" if instruments else (f"NT={t['instrument_family']}" if t.get("instrument_family") else NA)
     enzyme = t.get("enzyme")
-    cleavage = CLEAVAGE.get(enzyme or "", [NA])
     mods = []
     if r:
         for m in r["fixed_modifications"]["value"] + r["variable_modifications"]["value"]:
             if m in MODS:
                 mods.append(MODS[m])
         mods += LABEL_MODS.get(t.get("labelling") or "", [])
-    if not mods:
-        mods = [NA]
     label, labelling_type = LABEL.get(t.get("labelling") or "", (NA, NA))
     prec_tol, frag_tol = TOLERANCE.get(t.get("instrument_family") or "", (NA, NA))
+    # raw = everything to download (sidecars included); runs = what the search engine is actually pointed at.
+    return {"accession": accession, "p": p, "t": t, "r": r, "raw": raw,
+            "runs": [f for f in raw if is_run(f.get("file_name") or "")], "organism": organism,
+            "instruments": instruments,
+            "instrument": f"NT={instruments[0]}" if instruments else (f"NT={t['instrument_family']}" if t.get("instrument_family") else NA),
+            "enzyme": enzyme, "cleavage": CLEAVAGE.get(enzyme or "", [NA]), "mods": mods or [NA],
+            "label": label, "labelling_type": labelling_type, "prec_tol": prec_tol, "frag_tol": frag_tol,
+            "acq": t.get("acquisition") or "DDA"}
+
+
+def quantms_kit(accession: str) -> bytes:
+    from main import TAG_COLS
+    ctx = _kit_context(accession)
+    p, t, r, raw = ctx["p"], ctx["t"], ctx["r"], ctx["raw"]
+    organism, instrument = ctx["organism"], ctx["instrument"]
+    cleavage, mods = ctx["cleavage"], ctx["mods"]
+    label, labelling_type = ctx["label"], ctx["labelling_type"]
+    prec_tol, frag_tol = ctx["prec_tol"], ctx["frag_tol"]
 
     cols = (["source name", "characteristics[organism]", "characteristics[organism part]", "characteristics[disease]", "characteristics[cell type]",
              "assay name", "comment[fraction identifier]", "comment[label]", "comment[data file]", "comment[file uri]", "comment[instrument]"]
@@ -307,6 +323,409 @@ def dataset_quantms(accession: str):
     data = quantms_kit(accession)
     return Response(content=data, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{accession}_quantms.zip"'})
+
+
+# ----------------------------------------------------------------------------- which search engine can actually run
+# Longest extension first: ".d.tar.gz" must win over ".gz", ".wiff.scan" over ".wiff".
+VENDOR_EXT = [(".wiff.scan", "sciex"), (".wiff2", "sciex"), (".wiff", "sciex"), (".raw", "thermo"),
+              (".d.tar.gz", "bruker"), (".d.tar", "bruker"), (".d.zip", "bruker"), (".d", "bruker"),
+              (".baf", "bruker"), (".yep", "bruker"), (".tdf", "bruker"),
+              (".mzml.gz", "open"), (".mzml", "open"), (".mzxml", "open")]
+VENDOR_LABEL = {"thermo": "Thermo .raw", "bruker": "Bruker .d", "sciex": "SCIEX .wiff", "open": "open mzML/mzXML"}
+# What each engine reads without a conversion step first.
+MQ_NATIVE = {"thermo", "bruker", "open"}
+DIANN_NATIVE = {"thermo", "bruker", "open"}
+MSCONVERT = ("msconvert", "https://proteowizard.sourceforge.io/download.html")
+# DIA markers submitters put in run names. Each token must end the segment, so "Diaphragm" and "median" don't match.
+DIA_NAME_RE = re.compile(r"(?:^|[_\-. ])(swath|dia|diapasef|hrm|scanningswath)(?:[_\-. 0-9]|$)", re.I)
+DDA_NAME_RE = re.compile(r"(?:^|[_\-. ])(dda|ida|shotgun)(?:[_\-. 0-9]|$)", re.I)
+# Index/sidecar files that sit next to a run. They must be downloaded (the readers need them) but are not runs
+# themselves: listing a .wiff.scan as an input would make the search engine try to open an index as spectra.
+SIDECAR_EXT = (".wiff.scan", ".scan", ".idx", ".index", ".mzml.index")
+
+
+def is_run(name: str) -> bool:
+    return not (name or "").lower().endswith(SIDECAR_EXT)
+
+
+def raw_vendor(names: list[str]) -> str | None:
+    """Vendor of the raw files, by extension. Majority wins; None when nothing recognisable is there."""
+    counts: dict[str, int] = {}
+    for n in names:
+        low = (n or "").lower()
+        for ext, vendor in VENDOR_EXT:
+            if low.endswith(ext):
+                counts[vendor] = counts.get(vendor, 0) + 1
+                break
+    return max(counts, key=lambda v: counts[v]) if counts else None
+
+
+def _suffixed(tr: dict) -> dict:
+    """When one kit carries two tracks, each needs its own config name and output directory so they can't collide."""
+    k = tr["kind"].lower()
+    tr["outdir"] = f"out_{k}"
+    if tr["engine"] == "maxquant":
+        tr["config"] = f"mqpar_{k}.xml"
+    else:
+        tr["config"] = f"diann_{k}.cfg"
+        tr["output_table"] = f"out_{k}/report.pg_matrix.tsv"
+    return tr
+
+
+def search_plan(t: dict, raw_names: list[str]) -> dict:
+    """Which search engine a researcher can actually run on THIS dataset's raw files, and why.
+
+    Single owner of the engine decision: the kit, the Analyse banner and the set-up sheet all compose this
+    rather than each guessing. Honest by design — it refuses to offer MaxQuant for data MaxQuant cannot read.
+    """
+    all_names = raw_names
+    raw_names = [n for n in raw_names if is_run(n)]  # sidecars are not runs; callers need not know the difference
+    sidecars = len(all_names) - len(raw_names)
+    vendor = raw_vendor(raw_names)
+    acq = (t or {}).get("acquisition") or "DDA"
+    vlabel = VENDOR_LABEL.get(vendor or "", "unrecognised raw format")
+    # Run names are evidence the tag does not carry. A deposition is often BOTH: fractionated DDA runs that build a
+    # spectral library plus SWATH/DIA runs that do the quantification. One engine cannot be right for both.
+    dia_runs = [n for n in raw_names if DIA_NAME_RE.search(pathlib.PurePath(n or "").name)]
+    dda_runs = [n for n in raw_names if DDA_NAME_RE.search(pathlib.PurePath(n or "").name) and n not in set(dia_runs)]
+    unknown = [n for n in raw_names if n not in set(dia_runs) | set(dda_runs)]
+    mixed = bool(dia_runs and dda_runs)
+    conflict = None
+    if not mixed and acq == "DDA" and raw_names and len(dia_runs) >= max(1, len(raw_names) // 2):
+        conflict = (f"The tag says DDA, but {len(dia_runs)} of {len(raw_names)} run names are marked DIA/SWATH. "
+                    "Going with the file names: a DDA search on DIA spectra gives meaningless results.")
+        acq = "DIA"
+    plan = {"vendor": vendor, "vendor_label": vlabel, "acquisition": "mixed" if mixed else acq,
+            "raw_count": len(raw_names), "convert": None, "maxquant_offered": False, "maxquant_reason": None,
+            "engine": None, "engine_label": None, "why": None, "output_table": None, "caveat": None,
+            "tag_acquisition": (t or {}).get("acquisition"), "conflict": conflict, "mixed": mixed, "sidecars": sidecars,
+            "runs_dda": len(dda_runs), "runs_dia": len(dia_runs), "runs_unclassified": len(unknown), "tracks": []}
+
+    if not raw_names:
+        plan["why"] = "No raw files listed for this dataset, so there is nothing to search."
+        return plan
+
+    if acq in ("PRM_SRM", "top_down", "MALDI"):
+        plan["engine"] = "quantms"
+        plan["engine_label"] = {"PRM_SRM": "Skyline", "top_down": "ProSight or TopPIC", "MALDI": "vendor software"}[acq]
+        plan["why"] = (f"The acquisition tag is {acq}: neither MaxQuant nor DIA-NN is the right tool. "
+                       "Bottom-up DDA/DIA kits do not apply here.")
+        plan["maxquant_reason"] = f"MaxQuant is a bottom-up DDA search engine; this dataset is tagged {acq}."
+        return plan
+
+    needs_convert = vendor not in MQ_NATIVE  # MaxQuant and DIA-NN read the same vendor formats natively
+    if needs_convert:
+        plan["convert"] = {"from": vlabel, "to": "mzML", "tool": MSCONVERT[0], "url": MSCONVERT[1],
+                           "why": f"{vlabel} is not read directly by the engines below; convert to mzML first."}
+
+    def track(kind: str, runs: list[str]) -> dict:
+        if kind == "DDA":
+            return {"kind": "DDA", "engine": "maxquant", "engine_label": "MaxQuant", "runs": sorted(runs),
+                    "run_count": len(runs), "output_table": "combined/txt/proteinGroups.txt", "config": "mqpar.xml",
+                    "why": f"{len(runs)} DDA run(s) — MaxQuant searches them against a FASTA and writes proteinGroups.txt."}
+        return {"kind": "DIA", "engine": "diann", "engine_label": "DIA-NN", "runs": sorted(runs),
+                "run_count": len(runs), "output_table": "report.pg_matrix.tsv", "config": "diann.cfg",
+                "why": f"{len(runs)} DIA/SWATH run(s) — DIA-NN runs library-free from a FASTA and writes the protein matrix."}
+
+    if mixed:
+        # Two genuinely different experiments in one deposition. Each gets its own config and its own output table,
+        # and both outputs can be analysed here. They are not chained: neither needs the other to produce a result.
+        # Names are settled here, not in the kit builder, so the UI advertises exactly what the zip contains.
+        plan["tracks"] = [_suffixed(track("DDA", dda_runs + unknown)), _suffixed(track("DIA", dia_runs))]
+        plan["engine"] = "maxquant"
+        plan["engine_label"] = "MaxQuant"
+        plan["maxquant_offered"] = True
+        plan["output_table"] = "combined/txt/proteinGroups.txt"
+        plan["why"] = (f"This deposition holds both: {len(dda_runs) + len(unknown)} DDA run(s) and {len(dia_runs)} "
+                       f"DIA/SWATH run(s) on {vlabel}. The kit configures both — MaxQuant for the DDA set, "
+                       "DIA-NN for the SWATH set — and either output table can be analysed here.")
+        if needs_convert:
+            plan["caveat"] = f"{vlabel} must go through {MSCONVERT[0]} to mzML before either engine will open it."
+        return plan
+
+    if acq == "DIA":
+        plan["tracks"] = [track("DIA", raw_names)]
+        plan["engine"] = "diann"
+        plan["engine_label"] = "DIA-NN"
+        plan["output_table"] = "report.pg_matrix.tsv"
+        plan["why"] = (f"{len(raw_names)} × {vlabel}, acquisition DIA — DIA-NN runs library-free from a FASTA and "
+                       "writes the protein matrix this Analyse step reads.")
+        plan["maxquant_reason"] = (
+            "MaxQuant cannot read SCIEX .wiff at all, and its DIA mode (MaxDIA) is not the standard route for "
+            "SWATH data — DIA-NN is." if vendor == "sciex" else
+            "MaxQuant's DIA mode (MaxDIA) needs a different workflow and is rarely used for this data; DIA-NN is the standard route.")
+        if needs_convert:
+            plan["caveat"] = f"{vlabel} must go through {MSCONVERT[0]} to mzML before DIA-NN will open it."
+        return plan
+
+    plan["tracks"] = [track("DDA", raw_names)]
+    plan["engine"] = "maxquant"
+    plan["engine_label"] = "MaxQuant"
+    plan["maxquant_offered"] = True
+    plan["output_table"] = "combined/txt/proteinGroups.txt"
+    plan["why"] = f"{len(raw_names)} × {vlabel}, acquisition DDA — MaxQuant searches them against a FASTA and writes proteinGroups.txt."
+    if needs_convert:
+        plan["caveat"] = f"{vlabel} must go through {MSCONVERT[0]} to mzML before MaxQuant will open it."
+    return plan
+
+
+def dataset_search_plan(accession: str) -> dict:
+    ctx = _kit_context(accession)
+    plan = search_plan(ctx["t"], [f.get("file_name") or "" for f in ctx["raw"]])
+    plan["accession"] = accession
+    plan["kit_url"] = f"/dataset/{accession}/searchkit.zip"
+    plan["tagged"] = bool(ctx["t"])
+    return plan
+
+
+@router.get("/dataset/{accession}/searchplan")
+def dataset_searchplan(accession: str):
+    return dataset_search_plan(accession)
+
+
+# ----------------------------------------------------------------------------- MaxQuant / DIA-NN kits
+MQ_INSTRUMENT = {"orbitrap": 0, "timstof": 1, "qtof": 2, "fticr": 0, "ion_trap": 0}
+MQ_VERSION = "2.4.14.0"
+
+
+def _xml_list(tag: str, items: list[str], item_tag: str = "string") -> str:
+    inner = "".join(f"\n         <{item_tag}>{_xml(v)}</{item_tag}>" for v in items)
+    return f"      <{tag}>{inner}\n      </{tag}>"
+
+
+def _xml(v) -> str:
+    return (str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _fasta(ctx: dict) -> tuple[str, str | None]:
+    """Local path the configs point at, and the URL to fetch it from. Engines open files, not URLs."""
+    f = ((ctx["r"] or {}).get("fasta") or {}) if ctx["r"] else {}
+    prot = f.get("uniprot_proteome")
+    return (f"fasta/{prot}.fasta" if prot else "fasta/REPLACE_WITH_LOCAL.fasta"), f.get("url")
+
+
+def _fasta_sh(ctx: dict) -> str:
+    path, url = _fasta(ctx)
+    if not url:
+        return ("#!/usr/bin/env bash\n# No UniProt reference proteome is known for this organism.\n"
+                f"# Download a FASTA by hand and save it as {path}\n")
+    return "\n".join(["#!/usr/bin/env bash", "# Reviewed (Swiss-Prot) reference proteome for this dataset's organism.",
+                      "set -euo pipefail", "mkdir -p fasta",
+                      f'curl -L "{url}" -o {path}.gz', f"gunzip -f {path}.gz",
+                      "# Add contaminants before searching (MaxQuant ships its own; DIA-NN does not).", ""])
+
+
+def _run_path(name: str, plan: dict) -> str:
+    """Where a run sits once the kit's scripts have run. msconvert REPLACES the extension, so X.wiff -> mzml/X.mzML."""
+    if plan.get("convert"):
+        return "mzml/" + re.sub(r"\.[^.]+$", "", pathlib.PurePath(name).name) + ".mzML"
+    return "raw/" + name
+
+
+def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
+    """A MaxQuant mqpar.xml seeded from the tags. A starting point: open it in MaxQuant's GUI and check it."""
+    r, t = ctx["r"], ctx["t"]
+    fasta_path, _ = _fasta(ctx)
+    enzymes = (r or {}).get("enzyme", {}).get("value") or ["Trypsin/P"]
+    fixed = [m for m in ((r or {}).get("fixed_modifications", {}).get("value") or []) if "(" in m]
+    variable = (r or {}).get("variable_modifications", {}).get("value") or ["Oxidation (M)"]
+    lfq = 1 if (t.get("labelling") or "label_free") == "label_free" else 0
+    paths = [_run_path(n, plan) for n in run_names]
+    exps = [re.sub(r"\.[^.]+$", "", pathlib.PurePath(n).name) for n in paths]
+    head = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<MaxQuantParams xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">',
+        f"   <!-- Generated by PRIDE Map for {ctx['accession']} from its tags. Check every value before running. -->",
+        "   <fastaFiles>",
+        "      <FastaFileInfo>",
+        f"         <fastaFilePath>{_xml(fasta_path)}</fastaFilePath>",
+        "         <identifierParseRule>&gt;.*\\|(.*)\\|</identifierParseRule>",
+        "         <descriptionParseRule>&gt;(.*)</descriptionParseRule>",
+        "         <taxonomyParseRule></taxonomyParseRule>",
+        "         <variationParseRule></variationParseRule>",
+        "         <modificationParseRule></modificationParseRule>",
+        f"         <taxonomyId>{_xml(t.get('taxon_id') or '')}</taxonomyId>",
+        "      </FastaFileInfo>",
+        "   </fastaFiles>",
+        "   <fastaFilesProteogenomics></fastaFilesProteogenomics>",
+        "   <fastaFilesFirstSearch></fastaFilesFirstSearch>",
+        "   <fixedSearchFolder></fixedSearchFolder>",
+        "   <includeContaminants>True</includeContaminants>",
+        f"   <maxQuantVersion>{MQ_VERSION}</maxQuantVersion>",
+        "   <numThreads>8</numThreads>",
+        _xml_list("filePaths", paths),
+        _xml_list("experiments", exps),
+        _xml_list("fractions", ["32767"] * len(paths), "short"),
+        _xml_list("ptms", ["False"] * len(paths), "boolean"),
+        _xml_list("paramGroupIndices", ["0"] * len(paths), "int"),
+        "   <parameterGroups>",
+        "      <parameterGroup>",
+        f"         <msInstrument>{MQ_INSTRUMENT.get(t.get('instrument_family') or '', 0)}</msInstrument>",
+        "         <maxCharge>7</maxCharge>",
+        "         <lcmsRunType>Standard</lcmsRunType>",
+        f"         <lfqMode>{lfq}</lfqMode>",
+        f"         <matchBetweenRuns>{'True' if lfq else 'False'}</matchBetweenRuns>",
+        _xml_list("enzymes", enzymes).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
+        "         <maxMissedCleavages>2</maxMissedCleavages>",
+        _xml_list("variableModifications", variable).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
+        _xml_list("fixedModifications", fixed or ["Carbamidomethyl (C)"]).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
+        "      </parameterGroup>",
+        "   </parameterGroups>",
+        "   <peptideFdr>0.01</peptideFdr>",
+        "   <proteinFdr>0.01</proteinFdr>",
+        "   <minPepLen>7</minPepLen>",
+        "   <writeMzTab>True</writeMzTab>",
+        "</MaxQuantParams>",
+        "",
+    ]
+    return "\n".join(head)
+
+
+def diann_cfg(ctx: dict, plan: dict, track: dict, outdir: str) -> str:
+    """A DIA-NN command-line config seeded from the tags (library-free, FASTA-predicted spectral library)."""
+    r, t = ctx["r"], ctx["t"]
+    fasta_path, _ = _fasta(ctx)
+    # --out names the main report; --matrices additionally writes report.pg_matrix.tsv next to it.
+    out = (f"{outdir}/report.tsv" if outdir not in ("", ".") else "report.tsv")
+    lines = [f"# DIA-NN config for {ctx['accession']}, generated by PRIDE Map from its tags.",
+             f"# {track['run_count']} {track['kind']} run(s) on {plan['vendor_label']}. Check every line before running.",
+             "--threads 8", "--verbose 1",
+             f"--out {out}", "--matrices",
+             f"--fasta {fasta_path}",
+             "--fasta-search", "--predictor", "--gen-spec-lib", "--reanalyse", "--smart-profiling",
+             "--qvalue 0.01", "--missed-cleavages 2", "--min-pep-len 7", "--max-pep-len 30", "--unimod4"]
+    cut = {"trypsin": "K*,R*", "trypsin_lysc": "K*,R*", "lysc": "K*", "chymotrypsin": "F*,W*,Y*,L*",
+           "gluc": "E*", "aspn": "*D"}.get(t.get("enzyme") or "trypsin")
+    lines.append(f"--cut {cut}" if cut else "# --cut  (enzyme tag unavailable: set this from the paper)")
+    for m in ((r or {}).get("variable_modifications", {}).get("value") or []):
+        if m.startswith("Oxidation"):
+            lines.append("--var-mod UniMod:35,15.994915,M")
+        elif m.startswith("Acetyl (Protein N-term)"):
+            lines.append("--var-mod UniMod:1,42.010565,*n")
+        elif m.startswith("Phospho"):
+            lines.append("--var-mod UniMod:21,79.966331,STY")
+    lines.append("--var-mods 2")
+    for n in track["runs"]:
+        lines.append(f"--f {_run_path(n, plan)}")
+    return "\n".join(lines) + "\n"
+
+
+def _convert_sh(ctx: dict, plan: dict) -> str:
+    return "\n".join([
+        "#!/usr/bin/env bash",
+        f"# Convert {plan['vendor_label']} to mzML so the search engine can read it.",
+        f"# Needs ProteoWizard msconvert: {MSCONVERT[1]}  (Windows for vendor formats, or the Docker image below).",
+        "set -euo pipefail",
+        "mkdir -p mzml",
+        "# Docker (Linux/macOS): vendor readers run under Wine in this image.",
+        "#   docker run --rm -v \"$PWD\":/data chambm/pwiz-skyline-i-agree-to-the-vendor-licenses \\",
+        "#     wine msconvert /data/raw/<run> --mzML --zlib --filter \"peakPicking vendor msLevel=1-\" -o /data/mzml",
+        "# Only the runs are converted; index sidecars (.wiff.scan) must stay next to them in raw/.",
+        "RUNS=(",
+        *[f'  "{(f.get("file_name") or "")}"' for f in ctx["runs"]],
+        ")",
+        'for f in "${RUNS[@]}"; do',
+        '  msconvert "raw/$f" --mzML --zlib --filter "peakPicking vendor msLevel=1-" -o mzml',
+        "done",
+        "",
+    ])
+
+
+def _download_sh(ctx: dict) -> str:
+    lines = ["#!/usr/bin/env bash",
+             f"# Download the {len(ctx['raw'])} raw files of {ctx['accession']} from PRIDE. Expect tens of GB.",
+             "set -euo pipefail", "mkdir -p raw", "cd raw"]
+    for f in ctx["raw"]:
+        if f.get("ftp"):
+            lines.append(f"curl -C - -O {f['ftp']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def search_kit(accession: str) -> tuple[bytes, dict]:
+    """A ready-to-run kit for the engine that can actually process this dataset's raw files."""
+    ctx = _kit_context(accession)
+    plan = search_plan(ctx["t"], [f.get("file_name") or "" for f in ctx["raw"]])
+    p = ctx["p"]
+    fasta_path, _ = _fasta(ctx)
+    files: dict[str, str] = {"download_raw.sh": _download_sh(ctx), "download_fasta.sh": _fasta_sh(ctx)}
+    steps = [f"1. `bash download_raw.sh` pulls the {len(ctx['raw'])} raw files from PRIDE's FTP into raw/ "
+             "(runs plus their index sidecars — the readers need both).",
+             f"2. `bash download_fasta.sh` fetches the protein database to `{fasta_path}`, where the configs expect it."]
+    n = 3
+    if plan.get("convert"):
+        files["convert_to_mzml.sh"] = _convert_sh(ctx, plan)
+        steps.append(f"{n}. `bash convert_to_mzml.sh` converts {plan['vendor_label']} to mzML "
+                     f"({plan['convert']['tool']}); the search engines cannot read the vendor format directly.")
+        n += 1
+
+    tracks = plan.get("tracks") or []
+    multi = len(tracks) > 1
+    for tr in tracks:
+        label = f"the {tr['kind']} set" if multi else "the runs"
+        outdir = tr.get("outdir", ".")
+        if tr["engine"] == "maxquant":
+            name = tr["config"]
+            files[name] = mqpar_xml(ctx, plan, tr["runs"])
+            steps += [f"{n}. Open `{name}` in MaxQuant ({MQ_VERSION}) for {label} ({tr['run_count']} runs), check the "
+                      "FASTA path, enzyme and modifications, then Start. Headless: "
+                      f"`MaxQuantCmd.exe {name}`.",
+                      f"{n + 1}. Upload the resulting `{tr['output_table']}` to PRIDE Map's Analyse step and pick the "
+                      "LFQ intensity columns as group A and group B."]
+        else:
+            cfg = tr["config"]
+            sh = f"run_{cfg.rsplit('.', 1)[0]}.sh"
+            files[cfg] = diann_cfg(ctx, plan, tr, outdir)
+            files[sh] = "\n".join([
+                "#!/usr/bin/env bash",
+                f"# DIA-NN library-free search of {accession} ({label}, {tr['run_count']} runs).",
+                "# Runs on YOUR machine, not on PRIDE Map. Install: https://github.com/vdemichev/DiaNN/releases",
+                "set -euo pipefail",
+                *( [f"mkdir -p {outdir}"] if multi else [] ),
+                f"diann-linux --cfg {cfg}",
+                "",
+            ])
+            steps += [f"{n}. `bash {sh}` runs DIA-NN library-free over {label} ({tr['run_count']} runs); it predicts a "
+                      f"spectral library from the FASTA. Check `{cfg}` before starting.",
+                      f"{n + 1}. Upload the resulting `{tr['output_table']}` to PRIDE Map's Analyse step and pick sample "
+                      "columns as group A and group B."]
+        n += 2
+    if not tracks:
+        steps.append(f"{n}. {plan['why']} No engine config is generated for this acquisition type.")
+
+    readme = [f"# Search kit for {accession}", "", f"{p.get('title')}", "",
+              f"**Runs:** {plan['raw_count']} × {plan['vendor_label']} "
+              f"({plan['runs_dda']} DDA, {plan['runs_dia']} DIA/SWATH, {plan['runs_unclassified']} unclassified)",
+              f"**Acquisition:** {plan['acquisition']} (tag said: {plan['tag_acquisition'] or 'untagged'})", ""]
+    for tr in tracks:
+        readme.append(f"- **{tr['kind']} → {tr['engine_label']}** · {tr['run_count']} runs · "
+                      f"config `{tr['config']}` · output `{tr['output_table']}`")
+    readme += ["", f"{plan['why']}", ""]
+    if plan.get("conflict"):
+        readme += [f"> **Tag conflict:** {plan['conflict']}", ""]
+    if plan.get("caveat"):
+        readme += [f"> {plan['caveat']}", ""]
+    if not plan["maxquant_offered"] and plan.get("maxquant_reason"):
+        readme += [f"**Why not MaxQuant:** {plan['maxquant_reason']}", ""]
+    readme += ["## Steps", ""] + steps + ["",
+               "Nothing in this kit runs on PRIDE Map — every step happens on your own machine.",
+               f"Values PRIDE Map could not derive are marked `{NA}` or `REPLACE_WITH_...`; fill them in from the paper.",
+               ""]
+    files["README.md"] = "\n".join(readme)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, body in files.items():
+            z.writestr(name, body)
+    return buf.getvalue(), plan
+
+
+@router.get("/dataset/{accession}/searchkit.zip")
+def dataset_searchkit(accession: str):
+    data, plan = search_kit(accession)
+    name = "search" if len(plan.get("tracks") or []) > 1 else (plan.get("engine") or "search")
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{accession}_{name}_kit.zip"'})
 
 
 # ----------------------------------------------------------------------------- corrections feed
