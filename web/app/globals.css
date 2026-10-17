@@ -136,9 +136,10 @@
   html {
     font-family: var(--font-body);
   }
-  body { font-family: var(--font-body); font-size: 16px; line-height: 1.55; }
+  body { font-family: var(--font-body); font-size: 16.5px; line-height: 1.55; }
   /* Arbor's real code: display serif (Crimson Pro) 600 for headings; mono for labels and numbers. */
-  h1, h2, h3, h4 { font-family: var(--font-display); font-weight: 700; text-wrap: balance; letter-spacing: -0.01em; line-height: 1.15; }
+  h1, h2, h3, h4 { font-family: var(--font-display); font-weight: 600; text-wrap: balance; letter-spacing: -0.015em; line-height: 1.15; }
+b, strong, .font-bold, .font-semibold { font-weight: 600; }
   button, input, select, textarea {
     font-family: var(--font-sans);
   }
@@ -387,3 +388,28 @@
   .note b { color: var(--text); }
 }
 @media (prefers-reduced-motion: reduce) { .skeleton, .spinner, .loading-bar.on { animation: none; } }
+
+/* ---------------------------------------------------------------------------
+   Motion pass 2: route fade, staggered cards, popover entrance, calmer chips.
+   ------------------------------------------------------------------------- */
+@layer components {
+  main > div { animation: route-in 240ms var(--ease) both; }
+  @keyframes route-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .enter:nth-child(1) { animation-delay: 0ms } .enter:nth-child(2) { animation-delay: 40ms } .enter:nth-child(3) { animation-delay: 80ms }
+  .enter:nth-child(4) { animation-delay: 120ms } .enter:nth-child(5) { animation-delay: 160ms } .enter:nth-child(n+6) { animation-delay: 200ms }
+  .driver-popover { animation: pop-in 200ms var(--ease) both; }
+  @keyframes pop-in { from { opacity: 0; transform: translateY(6px) scale(.98); } to { opacity: 1; transform: none; } }
+  .driver-active-element { transition: box-shadow 200ms var(--ease); }
+  .pill, .btn { will-change: transform; }
+  a.card, .card-hover { cursor: pointer; }
+  a.card:hover, .card-hover:hover { transform: translateY(-1px); }
+  table tbody tr { transition: background-color 120ms var(--ease); }
+  table tbody tr:hover { background: var(--surface-2); }
+  input[type="checkbox"] { transition: transform 120ms var(--ease); }
+  input[type="checkbox"]:active { transform: scale(.9); }
+  select.input { cursor: pointer; }
+  details > summary { cursor: pointer; }
+  details[open] > summary { color: var(--walnut); }
+  ::selection { background: var(--teal-soft); }
+}
+@media (prefers-reduced-motion: reduce) { main > div, .driver-popover { animation: none; } }

@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Bricolage_Grotesque, Atkinson_Hyperlegible, JetBrains_Mono } from "next/font/google";
+import { Instrument_Sans, Source_Sans_3, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Shell } from "@/components/nav";
 import { CompareBar } from "@/components/compare-bar";
@@ -7,9 +7,9 @@ import { Tour } from "@/components/tour";
 import { LoadingBar } from "@/components/loading-bar";
 import { Suspense } from "react";
 
-const display = Bricolage_Grotesque({ variable: "--font-display", subsets: ["latin"], weight: ["500", "700", "800"] });
-const body = Atkinson_Hyperlegible({ variable: "--font-body", subsets: ["latin"], weight: ["400", "700"] });
-const sans = Atkinson_Hyperlegible({ variable: "--font-sans", subsets: ["latin"], weight: ["400", "700"] });
+const display = Instrument_Sans({ variable: "--font-display", subsets: ["latin"], weight: ["500", "600", "700"] });
+const body = Source_Sans_3({ variable: "--font-body", subsets: ["latin"], weight: ["400", "600", "700"] });
+const sans = Source_Sans_3({ variable: "--font-sans", subsets: ["latin"], weight: ["400", "600", "700"] });
 const mono = JetBrains_Mono({ variable: "--font-mono", subsets: ["latin"], weight: ["400", "500", "600"] });
 
 export const metadata: Metadata = {

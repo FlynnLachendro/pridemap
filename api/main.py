@@ -14,6 +14,7 @@ import pathlib
 import re
 import sqlite3
 import sys
+import time
 import datetime as dt
 from typing import Optional
 
@@ -108,65 +109,44 @@ def norm_org(v: Optional[str]):
     return "|".join(ORG_ALIASES.get(x.lower().strip(), x) for x in v.split("|"))
 
 
-def search(con, f: Filters, limit=25, offset=0):
-    where, params = [], []
-    for k in TAG_COLS:
-        v = getattr(f, k)
-        if not v:
-            continue
-        if k == "organism":
-            v = norm_org(v)
-        if k in FUZZY:
-            vals = [x.strip() for x in v.split("|") if x.strip()]  # '|' separates several picked values; ',' may appear inside names
-            where.append("(" + " OR ".join(f"lower(t.{k}) LIKE ?" for _ in vals) + ")")
-            params += [f"%{x.lower()}%" for x in vals]
-        else:
-            vals = [x.strip() for x in v.split(",") if x.strip()]
-            where.append(f"t.{k} IN ({','.join('?' * len(vals))})")
-            params += vals
-    if f.since:
-        where.append("p.publication_date >= ?")
-        params.append(f"{f.since}-01-01")
-    if f.years:
-        ys = [y.strip() for y in f.years.split(",") if y.strip()]
-        where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})")
-        params += ys
-    join_fts = ""
-    if f.q:
-        join_fts = " JOIN projects_fts fts ON fts.accession = p.accession"
-        where.append("projects_fts MATCH ?")
-        params.append(fts_query(f.q))
-    sql = (
-        "SELECT p.accession, p.title, p.publication_date, p.organic_downloads, p.downloads, p.pubmed_id, p.doi, "
-        "t.* FROM tags t JOIN projects p ON p.accession = t.accession" + join_fts
-        + (" WHERE " + " AND ".join(where) if where else "")
-    )
-    rows = [dict(r) for r in con.execute(sql, params)]
-    # confidences for matched tags
+SCORE_SQL = ("(1.0 + 0.5 * ln(1 + COALESCE(p.organic_downloads, 0)) / 10"
+             " + 0.3 * max(0.0, min(1.0, (CAST(substr(p.publication_date, 1, 4) AS REAL) - 2010) / 16.0))"
+             " + 0.4 * min(COALESCE(t.depth_proteins, 0) / 8000.0, 1.0))")
+SORT_SQL = {"relevance": SCORE_SQL + " DESC", "downloads": "p.organic_downloads DESC", "date": "p.publication_date DESC",
+            "depth": "t.depth_proteins DESC NULLS LAST"}
+
+
+def search(con, f: Filters, limit=25, offset=0, sort="relevance"):
+    """Ranked, paged search over tagged datasets. Ranking and paging happen in SQL; reasons and evidence are
+    computed for the returned page only, so cost doesn't grow with the archive."""
+    join, where, params = where_for(f)
+    base = f"FROM tags t JOIN projects p ON p.accession = t.accession{join}{where}"
+    total = con.execute(f"SELECT count(*) {base}", params).fetchone()[0]
+    if total == 0 or limit <= 0:
+        return total, []
+    # fetch a little more than a page so the watch-penalty can reorder within it without hiding results
+    # rank on a narrow projection first (no wide text columns in the sort), then hydrate the page
+    page = con.execute(f"SELECT t.accession, {SCORE_SQL} AS score {base} ORDER BY {SORT_SQL.get(sort, SORT_SQL['relevance'])}, p.accession LIMIT ? OFFSET ?",
+                       params + [limit, offset]).fetchall()
+    order_idx = {r[0]: i for i, r in enumerate(page)}
+    scores = {r[0]: r[1] for r in page}
+    accs = list(order_idx)
+    cols = "p.accession, p.title, p.publication_date, p.organic_downloads, p.downloads, p.pubmed_id, p.doi, " + ", ".join(f"t.{c}" for c in TAG_COLS + ["depth_proteins", "taxon_id", "summary_one_line", "model"])
+    rows = [dict(r) for r in con.execute(f"SELECT {cols} FROM tags t JOIN projects p ON p.accession = t.accession WHERE t.accession IN ({','.join('?' * len(accs))})", accs)]
+    rows.sort(key=lambda r: order_idx[r["accession"]])
+    for r in rows:
+        r["score"] = scores[r["accession"]]
     conf = {}
-    if rows:
-        accs = [r["accession"] for r in rows]
-        for chunk in range(0, len(accs), 900):
-            sub = accs[chunk:chunk + 900]
-            for e in con.execute(
-                f"SELECT accession, tag, confidence, evidence, source FROM tag_evidence WHERE accession IN ({','.join('?' * len(sub))})", sub
-            ):
-                conf.setdefault(e["accession"], {})[e["tag"]] = dict(e)
+    for e in con.execute(f"SELECT accession, tag, confidence, evidence, source FROM tag_evidence WHERE accession IN ({','.join('?' * len(accs))})", accs):
+        conf.setdefault(e["accession"], {})[e["tag"]] = dict(e)
+    matched = [k for k in TAG_COLS if getattr(f, k)]
     results = []
     for r in rows:
         ev = conf.get(r["accession"], {})
-        matched = [k for k in TAG_COLS if getattr(f, k)]
         avg_conf = sum(ev.get(k, {}).get("confidence", 0.5) for k in matched) / len(matched) if matched else 0.6
-        depth = r.get("depth_proteins") or 0
-        score = (
-            1.0
-            + 0.5 * math.log1p(r.get("organic_downloads") or 0) / 10
-            + 0.3 * recency(r.get("publication_date"))
-            + 0.4 * min(depth / 8000, 1.0)
-            + 0.3 * avg_conf
-        )
         fits, watch = reasons(r, ev, f)
-        score -= 0.25 * sum(1 for w in watch if not w["text"].endswith("is a low-confidence tag"))  # real mismatches cost rank
+        score = r["score"] + 0.3 * avg_conf
+        score -= 0.25 * sum(1 for w in watch if not w["text"].endswith("is a low-confidence tag"))
         score -= 0.05 * sum(1 for w in watch if w["text"].endswith("is a low-confidence tag"))
         results.append({
             "accession": r["accession"], "title": r["title"], "summary": r.get("summary_one_line"),
@@ -175,9 +155,9 @@ def search(con, f: Filters, limit=25, offset=0):
             "tags": {k: r.get(k) for k in TAG_COLS + ["depth_proteins", "taxon_id"]},
             "fits": fits, "watch": watch, "score": round(score, 3),
         })
-    results.sort(key=lambda x: -x["score"])
-    total = len(results)
-    return total, results[offset:offset + limit]
+    if sort == "relevance":
+        results.sort(key=lambda x: -x["score"])
+    return total, results
 
 
 def fts_query(q: str) -> str:
@@ -266,16 +246,27 @@ def where_for(f: Filters, exclude: str | None = None):
     return join, (" WHERE " + " AND ".join(where) if where else ""), params
 
 
+_FACET_CACHE: dict = {}
+
+
 def facets(con, f: Filters, top=8):
-    """Value counts per tag within the current filter set, ignoring that tag's own filter (like a shop sidebar). Pure SQL."""
+    """Value counts per tag within the current filter set, ignoring that tag's own filter (like a shop sidebar). Pure SQL,
+    joins projects only when a project-level filter (year, text) is set, cached 60 s per filter set."""
+    key = (json.dumps(f.model_dump(), sort_keys=True), top)
+    hit = _FACET_CACHE.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
     out = {}
+    needs_projects = bool(f.q or f.since or f.years)
     for tag in FACET_TAGS:
         join, where, params = where_for(f, exclude=tag)
-        rows = con.execute(f"SELECT COALESCE(t.{tag}, 'unknown'), count(*) n FROM tags t JOIN projects p ON p.accession = t.accession{join}{where} GROUP BY 1 ORDER BY n DESC LIMIT ?", params + [top]).fetchall()
+        src = f"FROM tags t JOIN projects p ON p.accession = t.accession{join}" if needs_projects else "FROM tags t"
+        rows = con.execute(f"SELECT COALESCE(t.{tag}, 'unknown'), count(*) n {src}{where} GROUP BY 1 ORDER BY n DESC LIMIT ?", params + [top]).fetchall()
         out[tag] = [[r[0], r[1]] for r in rows]
     join, where, params = where_for(f, exclude="year")
     rows = con.execute(f"SELECT substr(p.publication_date,1,4) y, count(*) n FROM tags t JOIN projects p ON p.accession = t.accession{join}{where} GROUP BY 1 ORDER BY y DESC LIMIT ?", params + [top]).fetchall()
     out["year"] = [[r[0] or "unknown", r[1]] for r in rows]
+    _FACET_CACHE[key] = (time.time(), out)
     return out
 
 
@@ -1302,50 +1293,50 @@ def browse(
     included when `tagged=all`, found by keyword / organism / year only, and flagged `tagged: false`."""
     f = Filters(**{k: v for k, v in locals().items() if k in Filters.model_fields})
     con = db()
-    _, tagged_rows = search(con, f, limit=1000000)
-    if sort == "downloads":
-        tagged_rows.sort(key=lambda r: -(r["downloads"] or 0))
-    elif sort == "date":
-        tagged_rows.sort(key=lambda r: r["publication_date"] or "", reverse=True)
-    elif sort == "depth":
-        tagged_rows.sort(key=lambda r: -(r["tags"].get("depth_proteins") or 0))
-    untagged_rows = []
+    start = (page - 1) * size
+    tagged_total, _ = search(con, f, limit=0)
     tag_filters_set = any(getattr(f, k) for k in TAG_COLS if k != "organism")
-    if tagged == "all" and not tag_filters_set:
-        where, params, join = ["t.accession IS NULL"], [], ""
+    include_untagged = tagged == "all" and not tag_filters_set
+    # untagged: keyword / organism / year only, SQL-paged
+    u_where, u_params, u_join = ["t.accession IS NULL"], [], ""
+    if include_untagged:
         if f.q:
-            join = " JOIN projects_fts fts ON fts.accession = p.accession"
-            where.append("projects_fts MATCH ?")
-            params.append(fts_query(f.q))
+            u_join = " JOIN projects_fts fts ON fts.accession = p.accession"
+            u_where.append("projects_fts MATCH ?"); u_params.append(fts_query(f.q))
         if f.organism:
             vals = norm_org(f.organism).split("|")
-            where.append("(" + " OR ".join("lower(p.organisms) LIKE ?" for _ in vals) + ")")
-            params += [f"%{v.lower()}%" for v in vals]
+            u_where.append("(" + " OR ".join("lower(p.organisms) LIKE ?" for _ in vals) + ")"); u_params += [f"%{v.lower()}%" for v in vals]
         if f.since:
-            where.append("p.publication_date >= ?"); params.append(f"{f.since}-01-01")
+            u_where.append("p.publication_date >= ?"); u_params.append(f"{f.since}-01-01")
         if f.years:
             ys = [y.strip() for y in f.years.split(",") if y.strip()]
-            where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})"); params += ys
+            u_where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})"); u_params += ys
+        u_base = f"FROM projects p LEFT JOIN tags t ON t.accession = p.accession{u_join} WHERE {' AND '.join(u_where)}"
+        untagged_total = con.execute(f"SELECT count(*) {u_base}", u_params).fetchone()[0]
+    else:
+        untagged_total, u_base = 0, ""
+    # page across tagged (first) then untagged
+    allrows = []
+    if start < tagged_total:
+        _, allrows = search(con, f, limit=size, offset=start, sort=sort)
+        for r in allrows:
+            r["tagged"] = True
+    need = size - len(allrows)
+    if need > 0 and include_untagged and untagged_total:
+        u_off = max(0, start - tagged_total)
         order = {"downloads": "p.organic_downloads DESC", "date": "p.publication_date DESC"}.get(sort, "p.organic_downloads DESC")
         rows = con.execute(f"SELECT p.accession, p.title, p.publication_date, p.organic_downloads, p.pubmed_id, p.organisms, p.organism_parts, p.instruments, p.experiment_types "
-                           f"FROM projects p LEFT JOIN tags t ON t.accession = p.accession{join} WHERE {' AND '.join(where)} ORDER BY {order}", params).fetchall()
+                           f"{u_base} ORDER BY {order}, p.accession LIMIT ? OFFSET ?", u_params + [need, u_off]).fetchall()
         for r in rows:
-            untagged_rows.append({"accession": r["accession"], "title": r["title"], "summary": None, "publication_date": r["publication_date"],
-                                  "downloads": r["organic_downloads"], "pubmed_id": r["pubmed_id"], "pride_url": PRIDE_URL + r["accession"], "tagged": False,
-                                  "raw": {"organisms": jl(r["organisms"]), "organism_parts": jl(r["organism_parts"]), "instruments": jl(r["instruments"]), "experiment_types": jl(r["experiment_types"])},
-                                  "tags": {}, "fits": [], "watch": [], "score": 0})
-    for r in tagged_rows:
-        r["tagged"] = True
-    if sort in ("downloads", "date") and untagged_rows:
-        key = (lambda r: -(r["downloads"] or 0)) if sort == "downloads" else (lambda r: r["publication_date"] or "")
-        allrows = sorted(tagged_rows + untagged_rows, key=key, reverse=(sort == "date"))
-    else:
-        allrows = tagged_rows + untagged_rows  # relevance: tagged (ranked) first, then untagged by downloads
-    total = len(allrows)
-    start = (page - 1) * size
+            allrows.append({"accession": r["accession"], "title": r["title"], "summary": None, "publication_date": r["publication_date"],
+                            "downloads": r["organic_downloads"], "pubmed_id": r["pubmed_id"], "pride_url": PRIDE_URL + r["accession"], "tagged": False,
+                            "raw": {"organisms": jl(r["organisms"]), "organism_parts": jl(r["organism_parts"]), "instruments": jl(r["instruments"]), "experiment_types": jl(r["experiment_types"])},
+                            "tags": {}, "fits": [], "watch": [], "score": 0})
+    total = tagged_total + untagged_total
+    tagged_rows, untagged_rows = [r for r in allrows if r["tagged"]], [r for r in allrows if not r["tagged"]]
     return {"filters": f.model_dump(exclude_none=True), "sort": sort, "page": page, "size": size, "total": total,
-            "counts": {"tagged": len(tagged_rows), "untagged": len(untagged_rows)},
-            "results": allrows[start:start + size], "facets": facets(con, f, top=facet_top)}
+            "counts": {"tagged": tagged_total, "untagged": untagged_total},
+            "results": allrows, "facets": facets(con, f, top=facet_top)}
 
 
 # ----------------------------------------------------------------------------- feature routers (separate modules)

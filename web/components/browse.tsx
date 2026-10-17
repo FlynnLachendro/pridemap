@@ -7,6 +7,7 @@ import { ResultCard } from "@/components/result-card";
 import { ProteinCard } from "@/components/protein-card";
 import { CompareToggle } from "@/components/compare-toggle";
 import { CardSkeleton } from "@/components/skeleton";
+import { SaveSearch } from "@/components/save-search";
 
 type Facets = Record<string, [string, number][]>;
 type BrowseRow = Result & { tagged: boolean; raw?: { organisms: string[]; organism_parts: string[]; instruments: string[]; experiment_types: string[] } };
@@ -222,6 +223,7 @@ export function Browse() {
                   {SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
               </label>
+              {(activeChips.length > 0 || filters.q) && out && <SaveSearch key={JSON.stringify(activeChips) + (filters.q ?? "")} filters={filters} total={total} />}
             </div>
           </div>
           {activeChips.length > 0 && (

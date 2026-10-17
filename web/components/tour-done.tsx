@@ -11,12 +11,12 @@ const PLACES = [
   { href: "/flow", title: "Workflow", when: "Run the whole loop with your shortlist: confirm, set up the search, analyse, check." },
   { href: "/analyse", title: "Analyse", when: "Protein table in, fold changes, FDR, volcano and a publication bundle out." },
   { href: "/eval", title: "Eval", when: "See how far to trust the tags: humans vs model, model vs model." },
+  { href: "/collections", title: "Collections", when: "Name a shortlist, share the link, export it as SDRF or a download script." },
+  { href: "/saved", title: "Saved searches", when: "Save a question and see which datasets have landed in PRIDE since." },
 ];
 
 const ROADMAP = [
   { title: "Search by protein", text: "“Which datasets actually contain MFF?” using PRIDE's peptide/protein evidence (PRIDE Peptidome) and spectrum USIs, not just the method tags." },
-  { title: "Saved searches and alerts", text: "Save a question; get told when a new dataset matching it lands in PRIDE (500+ a month)." },
-  { title: "Collections", text: "Name a shortlist, share it with your lab, export it as SDRF or a download script." },
   { title: "One‑click reanalysis", text: "Hand the set‑up sheet to quantms / Nextflow and run the search in the cloud instead of on your laptop." },
   { title: "Cross‑omics links", text: "The matching transcriptomics or metabolomics datasets via OmicsDI for the same tissue and condition." },
   { title: "Corrections feed the model", text: "Every “wrong?” you file becomes a gold label and a prompt fix on the next tagging run." },
