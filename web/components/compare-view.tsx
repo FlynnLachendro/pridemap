@@ -48,7 +48,7 @@ export function CompareView() {
     <div className="grid gap-5">
       <div>
         <h1 className="text-3xl">Can I compare these datasets?</h1>
-        <p className="text-muted-foreground max-w-2xl">Before running group‑A‑vs‑B stats across datasets, the methods have to match. This lines up the tags side by side and says what would break a comparison.</p>
+
       </div>
       <form className="flex gap-2 flex-col sm:flex-row" onSubmit={(e) => { e.preventDefault(); go(input); }}>
         <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="PXD007653, PXD002801" className="input flex-1 h-11 font-mono" aria-label="accessions, comma separated" />
@@ -57,7 +57,7 @@ export function CompareView() {
           <button type="button" onClick={() => { setInput(sel.join(",")); go(sel.join(",")); }} className="btn btn-lg">Use my {sel.length} picked</button>
         )}
       </form>
-      {!a && <p className="text-sm text-muted-foreground">Tip: on the Ask page, hit <b>+ shortlist</b> on two or more results, then use the bar at the bottom.</p>}
+      {!a && <p className="text-sm text-muted-foreground">Shortlist two or more datasets, or type accessions above.</p>}
       {err && <p className="text-warn text-sm">{err}</p>}
 
       {out && a && (
@@ -118,7 +118,7 @@ export function CompareView() {
               </tbody>
             </table>
           </div>
-          <p className="text-xs text-muted-foreground">Rows shaded orange differ between datasets. Next step (stretch): pull both result tables from PRIDE and show shared vs unique proteins.</p>
+          <p className="text-xs text-muted-foreground">Shaded rows differ.</p>
         </>
       )}
     </div>

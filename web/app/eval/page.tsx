@@ -14,7 +14,7 @@ export default async function EvalPage() {
     <div className="grid gap-8 max-w-5xl">
       <div>
         <h1 className="text-4xl">How much to trust the tags</h1>
-        <p className="text-muted-foreground max-w-2xl mt-2">Two checks. Humans versus the model on a hand‑labelled gold set, and five models versus each other on the same 200 datasets. Both are scripts in the repo and re‑run in minutes.</p>
+
       </div>
 
       {!d && <p className="text-warn">API not reachable.</p>}
@@ -48,7 +48,7 @@ export default async function EvalPage() {
         <h2 className="text-2xl">Model vs model (200 datasets, same inputs)</h2>
         {d?.bench ? (
           <>
-            <p className="text-sm text-muted-foreground">Agreement is with Claude Sonnet 5&apos;s tags on the same datasets, so it measures consistency, not truth. Cost is what the provider charged for 200 datasets.</p>
+            <p className="text-sm text-muted-foreground">Agreement with Claude Sonnet 5&apos;s tags on the same 200 datasets.</p>
             <div className="rounded-xl border bg-card overflow-x-auto">
               <table className="w-full text-sm">
                 <thead><tr className="border-b"><th className="text-left p-3 label">model</th><th className="text-right p-3 label">ok</th><th className="text-right p-3 label">cost / 1k</th><th className="text-right p-3 label">s / item</th>{TAGS.map((t) => <th key={t} className="text-right p-3 label">{t.replace("_", " ").slice(0, 8)}</th>)}<th className="text-right p-3 label">avg</th></tr></thead>
@@ -57,7 +57,7 @@ export default async function EvalPage() {
                 ))}</tbody>
               </table>
             </div>
-            <p className="text-xs text-faint">Sonnet 5 itself costs about $24 per 1,000; the cheap models are 1/16th of that at 90–93% agreement. The weak spot for every model is <i>sample type</i>, which says the definition is fuzzy, not that the models are.</p>
+            <p className="text-xs text-faint">Sonnet 5: about $24 per 1,000.</p>
           </>
         ) : <p className="text-sm text-muted-foreground">Not run yet: <code>uv run tag_bench.py run --model …</code> then <code>report</code>.</p>}
       </section>

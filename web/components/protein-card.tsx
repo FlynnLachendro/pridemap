@@ -32,7 +32,7 @@ export function ProteinCard({ name, organism, tissue }: { name: string; organism
       </div>
       {p.tissue_specificity && <p className="text-muted-foreground"><span className="label mr-2">Tissue</span>{p.tissue_specificity}</p>}
       {p.function && <p className="text-muted-foreground line-clamp-2"><span className="label mr-2">Function</span>{p.function}</p>}
-      <p className="text-xs text-faint">Protein names aren&apos;t in dataset metadata, so this can&apos;t filter results. It tells you whether a dataset&apos;s method could plausibly see the protein: enough tryptic peptides, right tissue, right compartment (a membrane protein wants a membrane‑enriched or deep dataset).</p>
+
     </div>
   );
 }

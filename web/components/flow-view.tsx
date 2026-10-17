@@ -77,23 +77,23 @@ export function FlowView() {
     <div className="grid gap-8">
       <div>
         <h1 className="text-4xl">From question to result table</h1>
-        <p className="text-muted-foreground max-w-2xl mt-2">The whole loop a researcher actually runs, with the human in charge at each step. The app does the reading, the ranking and the set‑up; you make the calls.</p>
+
       </div>
 
       <Step n={1} title="Find candidates" done={sel.length > 0}>
-        <p className="text-sm text-muted-foreground">Ask in plain words. Tags read from each dataset&apos;s protocol and paper do the filtering. Hit <b>+ shortlist</b> on anything promising.</p>
+        <p className="text-sm text-muted-foreground">Search, then <b>+ shortlist</b> anything promising.</p>
         <div className="flex gap-2 flex-wrap"><Link href={q ? `/?q=${encodeURIComponent(q)}` : "/"} className="btn btn-primary">Open Ask →</Link><Link href="/map" className="btn">or browse the Map</Link></div>
         <p className="text-xs font-mono text-faint">{sel.length} shortlisted</p>
       </Step>
 
       <Step n={2} title="Confirm each candidate" done={confirmedList.length > 0}>
-        <p className="text-sm text-muted-foreground">For each shortlisted dataset: a three‑sentence case for it, the tags that matter, and what&apos;s on PRIDE. Tick the ones you&apos;ll actually use.</p>
+        <p className="text-sm text-muted-foreground">Read the case for each, tick the ones you&apos;ll use.</p>
         {sel.length === 0 && <p className="text-sm text-faint">Nothing shortlisted yet.</p>}
         <div className="grid gap-3">{sel.map((a) => <Candidate key={a} acc={a} q={q} confirmed={!!confirmed[a]} onConfirm={(v) => setC(a, v)} />)}</div>
       </Step>
 
       <Step n={3} title="Set up the database search" done={false}>
-        <p className="text-sm text-muted-foreground">If the submitter uploaded results you can skip the search. Otherwise the dataset page gives you the file list and the search parameters (tool, enzyme, fixed and variable modifications, quantification, FASTA) derived from the tags, each with the sentence it came from. Load them into MaxQuant, FragPipe or DIA‑NN and run it on your machine; we can&apos;t run it for you.</p>
+        <p className="text-sm text-muted-foreground">Each confirmed dataset has a set‑up sheet: files on PRIDE plus the search parameters read from its tags. The search itself runs on your machine.</p>
         <div className="flex flex-wrap gap-2">
           {confirmedList.map((a) => <Link key={a} href={`/dataset/${a}#reanalyse`} className="btn font-mono">{a} set‑up sheet →</Link>)}
           {confirmedList.length === 0 && <span className="text-sm text-faint">Confirm a candidate first.</span>}
@@ -101,12 +101,12 @@ export function FlowView() {
       </Step>
 
       <Step n={4} title="Analyse the protein table" done={false}>
-        <p className="text-sm text-muted-foreground">Upload the protein table (the submitter&apos;s results file, or your own MaxQuant / DIA‑NN output), pick group A and group B, and get log2 fold changes, t‑tests, FDR and a volcano plot. Odetta&apos;s lyso‑IP pipeline runs when the columns match it.</p>
+        <p className="text-sm text-muted-foreground">Upload the protein table, pick group A and B, get fold changes, FDR and a volcano plot.</p>
         <Link href="/analyse" className="btn btn-primary w-fit">Open Analyse →</Link>
       </Step>
 
       <Step n={5} title="Check the machine's work" done={false}>
-        <p className="text-sm text-muted-foreground">Every tag shows its confidence and evidence, and &quot;wrong?&quot; records a correction. The Eval page compares the model to hand labels and to other models, so you know how much to trust steps 1 to 3.</p>
+        <p className="text-sm text-muted-foreground">How much to trust the tags: humans vs model, model vs model.</p>
         <Link href="/eval" className="btn w-fit">Open Eval →</Link>
       </Step>
     </div>

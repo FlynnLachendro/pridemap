@@ -130,9 +130,6 @@ export function AnalyseView() {
     <div className="grid gap-5">
       <div>
         <h1 className="text-3xl">Analyse a protein table</h1>
-        <p className="text-muted-foreground max-w-2xl">
-          Upload the protein table a search engine gave you (MaxQuant proteinGroups, DIA-NN, Spectronaut…). Pick which samples are group A and group B, and get the standard first look: log2 fold change, a Welch t-test per protein, FDR-corrected q-values and a volcano plot.
-        </p>
       </div>
 
       {/* (a) upload */}

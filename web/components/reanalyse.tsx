@@ -32,9 +32,7 @@ export function Reanalyse({ accession }: { accession: string }) {
       <div>
         <h2 className="text-lg">Reanalyse this dataset</h2>
         <p className="text-sm text-muted-foreground">
-          {out.has_submitter_results
-            ? "The submitter uploaded their search results, so you may not need to re-search at all: start from their protein table for downstream analysis."
-            : "No submitter results on PRIDE: you'll need to run a database search on the raw files. The parameters below are read from the protocol and paper."}
+          {out.has_submitter_results ? "Submitter results are on PRIDE; you may not need to re-search." : "No submitter results on PRIDE; search the raw files with the parameters below."}
         </p>
       </div>
 
@@ -63,7 +61,7 @@ export function Reanalyse({ accession }: { accession: string }) {
         <div className="rounded-xl border bg-card overflow-hidden">
           <div className="px-4 py-3 border-b flex items-baseline justify-between gap-3 flex-wrap">
             <h3 className="text-base">Search parameters, derived from the tags</h3>
-            <span className="text-xs text-muted-foreground">load these into {show(r.tool.value)}; every line says which tag it came from</span>
+            <span className="text-xs text-muted-foreground">for {show(r.tool.value)}</span>
           </div>
           <div className="divide-y text-sm">
             {([
@@ -97,7 +95,7 @@ export function Reanalyse({ accession }: { accession: string }) {
           </div>
         </div>
       )}
-      <p className="text-xs text-muted-foreground">We can&apos;t run MaxQuant or Mascot for you (desktop software, hours of compute, no public API). This is the set‑up sheet, so the search you run matches how the data was made.</p>
+
     </section>
   );
 }

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { API, ask, pretty, TAG_LABEL, type AskOut, type Dropped, type Result, type Stats } from "@/lib/api";
+import { API, ask, pretty, TAG_LABEL, type AskOut, type Dropped, type Result } from "@/lib/api";
 import { ResultCard } from "@/components/result-card";
 import { ProteinCard } from "@/components/protein-card";
 import { CompareToggle } from "@/components/compare-toggle";
@@ -35,7 +35,7 @@ function looksLikeQuestion(s: string) {
   return w.length >= 5 || /\?|\b(want|which|could|show|find|datasets?|looking|need|validate|compare)\b/i.test(s);
 }
 
-export function Browse({ stats }: { stats: Stats | null }) {
+export function Browse() {
   const params = useSearchParams();
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -117,7 +117,6 @@ export function Browse({ stats }: { stats: Stats | null }) {
     <div className="grid gap-5">
       <div>
         <h1 className="text-3xl sm:text-4xl">Search PRIDE by how the data was made</h1>
-        <p className="text-muted-foreground max-w-2xl">Keywords, an accession, or a question in plain words. Filters on the left are tags a model read from each dataset&apos;s protocol and paper, with the sentence behind each one.</p>
       </div>
 
       <form className="search-box" onSubmit={(e) => { e.preventDefault(); submit(q); }} role="search">
@@ -129,7 +128,7 @@ export function Browse({ stats }: { stats: Stats | null }) {
       <div className="flex flex-wrap gap-1.5 items-center text-xs">
         <span className="text-faint font-mono">Try:</span>
         {EXAMPLES.map((ex) => <button key={ex} type="button" onClick={() => { setQ(ex); submit(ex); }} className="pill hover:bg-surface-2">{ex}</button>)}
-        {stats && <span className="ml-auto text-faint font-mono">{stats.tagged.toLocaleString()} of {stats.projects.toLocaleString()} tagged</span>}
+
       </div>
 
       {err && <p className="text-warn text-sm">API error: {err}</p>}
@@ -183,7 +182,7 @@ export function Browse({ stats }: { stats: Stats | null }) {
               </div>
             );
           })}
-          <p className="text-xs text-faint">Counts are over tagged datasets. Untagged ones match on keywords, organism and year only.</p>
+
         </aside>
 
         <div className="grid gap-3 min-w-0">
@@ -274,7 +273,7 @@ function UntaggedCard({ r, rank }: { r: BrowseRow; rank: number }) {
         {r.raw?.instruments.slice(0, 2).map((o) => <span key={o} className="pill text-faint">{o}</span>)}
         {r.raw?.experiment_types.slice(0, 2).map((o) => <span key={o} className="pill text-faint">{o}</span>)}
       </div>
-      <p className="text-xs text-faint">PRIDE&apos;s own fields only. Method tags appear once this dataset is tagged.</p>
+
     </article>
   );
 }
