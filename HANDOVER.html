@@ -64,7 +64,7 @@
 <body>
 <div class="hero"><div class="wrap">
   <h1>PRIDE Map handover</h1>
-  <p>Flynn → Mani, Saturday 17 Oct 2026, 17:00. You have the build until the pitch on Sunday morning. This page is everything: what it is, how to run it, where everything lives, what is still running, what to do before 10:00, and the pitch itself.</p>
+  <p>Flynn → Mani, Saturday 17 Oct 2026, 17:00. You have the build until the pitch on Sunday morning. This page is everything: what it is, how to run it, where everything lives, what the data situation is, what to do before 10:00, and the pitch itself.</p>
   <div class="meta"><span>repo github.com/FlynnLachendro/pridemap</span><span>submission Sun 18 Oct 10:00</span><span>pitch 10:15–12:15 · 3 min demo + 2 min Q</span><span>MIT</span></div>
 </div></div>
 
@@ -98,7 +98,7 @@
   <h2>What matters tonight</h2>
   <div class="callout warn"><b>Three things only.</b> (1) Get it running on your machine and run the tour end to end. (2) Dry‑run the pitch with the team and time it. (3) Push the final commit and paste the hash into the submission form before <b>10:00 Sunday</b>. Everything else on this page is support for those three.</div>
   <div class="timeline">
-    <div class="t"><span class="when">Sat 17:00</span><span>Handover. Flynn's laptop keeps running the tagger (ETA ~18:45) and will push the refreshed data bundle when it finishes.</span></div>
+    <div class="t"><span class="when">Sat 17:00</span><span>Handover. Tagging finished; the full data bundle is in the repo and the whole DB is on the GitHub release (see <a href="#tagging">The tagging run</a>).</span></div>
     <div class="t"><span class="when">Sat evening</span><span>Clone, <code>.env</code> from Flynn, <code>./dev.sh</code>, tour. Read the pitch. If Charlotte or Juri fill the gold set, run <code>uv run eval_tags.py</code> and the Eval page gets a human number.</span></div>
     <div class="t"><span class="when">Sun 09:00</span><span>Final <code>git pull</code>, start the app on the demo laptop, Wi‑Fi check, record a fresh backup video (<code>node demo/record_tour.mjs</code>).</span></div>
     <div class="t"><span class="when">Sun 10:00</span><span>Submission closes: repo URL + commit hash (<code>git rev-parse HEAD</code>).</span></div>
