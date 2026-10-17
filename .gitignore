@@ -17,3 +17,5 @@ eval/*.json
 data/inputs/
 data/tags_json/
 data/chunks/
+analysis/data/*.csv
+analysis/out*/
