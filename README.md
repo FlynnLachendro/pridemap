@@ -18,10 +18,11 @@ The loop a researcher actually runs, with a human tick at each step:
 - **Compare** — two or more datasets side by side with a verdict (comparable / with caution / not) and the exact method difference that breaks it. The check you need before group stats across datasets.
 - **Reanalyse** — on each dataset: the files PRIDE holds (raw, peak lists, submitter results; sizes and links) and the database‑search parameters derived from the tags (tool, enzyme, fixed and variable mods, quantification, FDR, FASTA), each with the sentence it came from. We can't run MaxQuant/Mascot for you; this is the set‑up sheet.
 - **Analyse** — upload a protein table, pick group A and B, get log2 fold change, Welch t‑test, Benjamini‑Hochberg FDR and a volcano plot. Odetta Antico's lyso‑IP pipeline (`analysis/`) runs as an option when the columns match.
-- **Workflow** — Find → Confirm (a written case per shortlisted candidate, you tick it) → Set up the search → Analyse → Check.
+- **Workflow** — Find → Confirm (a written case per shortlisted candidate, you tick it) → Set up the search → Analyse → Check. The same five steps sit as a rail at the top of every page, lit by where you are and ticked by what you've done (switch it off in the sidebar).
 - **Eval** — humans vs model on a 50‑dataset gold set; five models vs each other on 200 datasets (cost, speed, agreement).
+- **Take the tour** — a 24‑step guided run of the whole loop (it types, clicks, shortlists, saves and runs the agent for you); `demo/record_tour.mjs` records it as a video.
 - **MCP server + agent console** — `uv run api/mcp_server.py` exposes the same search / ask / dataset / compare / set‑up sheet / protein tools to Claude Desktop, Claude Code, Cursor or any MCP client (stdio, or `--http` for streamable HTTP on :8010). The `/mcp` page explains it and has a live console where Claude uses the tools in front of you, each call and result streamed.
-- **Collections** — named, shareable shortlists with SDRF export and a download script for all the files. **Saved searches** — save a question, see how many new datasets match since (`check_alerts.py` for cron).
+- **Collections** — named, shareable shortlists with SDRF export and a download script for all the files. Add from the folder button on any result card or dataset page, name your shortlist in the bar at the bottom, or start one empty from the sidebar. **Saved searches** — save a question, see how many new datasets match since (`check_alerts.py` for cron).
 - **Cross‑omics links** (OmicsDI) on every dataset, a **quantms reanalysis kit** (SDRF + params + run.sh) on the set‑up sheet, and **corrections that feed the model** (`apply_corrections.py` re‑tags with human corrections as ground truth).
 - **API** — FastAPI with OpenAPI at `/docs`: `/search`, `/ask`, `/map`, `/compare`, `/dataset/{acc}` (+ `/why`, `/reanalyse`, `/files.txt`), `/analyse/*`, `/export.sdrf.tsv`, `/eval`. Scripts and agents can use everything without the UI.
 
@@ -69,7 +70,7 @@ uv run api/main.py                                  # http://localhost:8000/docs
 cd web && npm i && npm run dev                      # http://localhost:3000
 ```
 
-Skip steps 1–3 to try it on the bundled demo slice (296 tagged datasets, their papers and evidence, in `data/demo/`): `uv run load_demo.py` then step 4.
+Skip steps 1–3 and use the bundled data: `data/demo/*.jsonl.gz` holds every tagged dataset (27k projects, their papers' Methods text, tags and evidence, 113 MB). `./dev.sh` loads it on first run (`uv run load_demo.py`, ~5 s) and starts both servers. Only the not‑yet‑tagged projects are missing from a fresh clone; step 1 adds them.
 
 `/ask` uses Claude to turn the question into filters when `ANTHROPIC_API_KEY` is set, and falls back to a rule‑based parser when it isn't, so the demo never depends on a key.
 
@@ -101,13 +102,14 @@ api/mcp_server.py     MCP server (stdio / streamable HTTP)
 demo/record_tour.mjs  Playwright: plays and records the in-app tour
 web/                  Next.js 16 + Tailwind + shadcn
 PLAN.html, SPEC.md    the plan we built from
+HANDOVER.html         the full handover (run, architecture, pitch, gotchas); mani-claude-handover.md is the same for an AI assistant
 ```
 
 ## Status and honesty
 
-- Tagged so far: 1,671 datasets (most‑downloaded first, every vocab value represented), demo bundle in `data/demo/`. The rest of the archive is ~$60 on DeepSeek V4.1 Flash and a few hours; see Eval for the model comparison.
-- The first 291 were tagged by Claude Sonnet 5 through Claude Code sessions using the exact prompt and schema in `tag.py`; the rest by `tag.py` via the API. Every row records which model tagged it.
-- Methods sections were available for 59% of the slice (open‑access only). The rest were tagged from PRIDE metadata alone and say so.
+- Tagged so far: 27,063 of 41,548 datasets at the Saturday‑evening handover (1,661 by Claude Sonnet 5, the rest by DeepSeek V4.1 Flash through Hugging Face's router), run continuing to the full archive; the bundle in `data/demo/` is refreshed with `uv run export_demo.py`. See Eval for the model comparison.
+- The first 291 were tagged by Claude Sonnet 5 through Claude Code sessions using the exact prompt and schema in `tag.py`; every row records which model tagged it.
+- Methods sections were available for ~64% of datasets (open‑access only). The rest were tagged from PRIDE metadata alone and say so.
 - Tags are model output. Confidence and evidence are shown everywhere so you can judge; "wrong?" on any tag records a correction.
 
 ## Licence

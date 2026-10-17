@@ -125,26 +125,25 @@ export function Browse() {
 
   return (
     <div className="grid gap-5">
-      <div>
-        <h1 className="text-3xl sm:text-4xl">Search PRIDE by how the data was made</h1>
-      </div>
-
+      <div className="hero">
+        <h1>Search PRIDE by how the data was made</h1>
       <form className="search-box" data-tour="search" onSubmit={(e) => { e.preventDefault(); submit(q); }} role="search">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="text-teal shrink-0" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by keyword, accession, or ask a question in plain words" aria-label="search" />
         {q && <button type="button" onClick={() => { setQ(""); setAskOut(null); push({ sort: filters.sort }); }} className="btn btn-ghost btn-sm" aria-label="clear">clear</button>}
         <button type="submit" disabled={pending} className="btn btn-primary">{pending ? <><span className="spinner mr-2" />Searching…</> : "Search"}</button>
       </form>
-      <div className="flex flex-wrap gap-1.5 items-center text-xs">
-        <span className="text-faint font-mono">Try:</span>
-        {EXAMPLES.map((ex) => <button key={ex} type="button" onClick={() => { setQ(ex); submit(ex); }} className="pill hover:bg-surface-2">{ex}</button>)}
+      <div className="flex flex-wrap gap-1.5 items-center text-xs hero-chips">
+        <span className="font-mono opacity-70">Try:</span>
+        {EXAMPLES.map((ex) => <button key={ex} type="button" onClick={() => { setQ(ex); submit(ex); }} className="pill">{ex}</button>)}
       </div>
       {recent.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 items-center text-xs -mt-2">
-          <span className="text-faint font-mono">Recent:</span>
-          {recent.slice(0, 5).map((r) => <button key={r} type="button" onClick={() => { setQ(r); submit(r); }} className="pill hover:bg-surface-2">{r}</button>)}
+        <div className="flex flex-wrap gap-1.5 items-center text-xs -mt-2 hero-chips">
+          <span className="font-mono opacity-70">Recent:</span>
+          {recent.slice(0, 5).map((r) => <button key={r} type="button" onClick={() => { setQ(r); submit(r); }} className="pill">{r}</button>)}
         </div>
       )}
+      </div>
 
       {err && <p className="text-warn text-sm">API error: {err}</p>}
 

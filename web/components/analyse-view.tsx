@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { API } from "@/lib/api";
+import { markAnalysed } from "@/lib/progress-store";
 
 type Group = { stem: string; columns: string[]; fill: number };
 type Inspect = {
@@ -120,6 +121,7 @@ export function AnalyseView() {
         const body = { upload_id: inspect.upload_id, id_column: idCol, group_a: colsA, group_b: colsB, log_transform: logT, min_valid: minValid, contaminant_column: contam || null };
         setLastBody({ ...body, label_a: stemA || "A", label_b: stemB || "B" });
         setResult(await jfetch<RunOut>(fetch(`${API}/analyse/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })));
+        markAnalysed();
       }
     } catch (e) { setErr(String(e)); } finally { setBusy(null); }
   };

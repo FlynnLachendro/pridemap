@@ -62,7 +62,7 @@ export function remember(q: string) {
 }
 
 // ----------------------------------------------------------------------------- collections + saved searches
-export type CollectionRow = { id: string; name: string; note: string | null; n: number; created_at: string; updated_at: string };
+export type CollectionRow = { id: string; name: string; note: string | null; accessions: string[]; n: number; created_at: string; updated_at: string };
 export type CollectionDataset = {
   accession: string; title: string | null; summary: string | null; publication_date: string | null; downloads: number | null; tagged: boolean; known: boolean;
   tags: Record<string, string | null>;

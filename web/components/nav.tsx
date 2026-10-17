@@ -3,6 +3,7 @@ import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "@/components/sidebar";
 import { MobileDrawer, MobileHeader } from "@/components/mobile-header";
+import { WorkflowRail } from "@/components/workflow-rail";
 
 /**
  * The app shell, laid out like Arbor's App.tsx: on desktop a fixed-height
@@ -29,6 +30,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <div className="flex flex-1 overflow-hidden">
         <Sidebar className="hidden md:flex w-52" />
         <main className="flex-1 min-w-0 overflow-y-auto bg-background">
+          <WorkflowRail />
           <div className="w-full max-w-6xl mx-auto px-5 py-8 pb-24">{children}</div>
         </main>
       </div>

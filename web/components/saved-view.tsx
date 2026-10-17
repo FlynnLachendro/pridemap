@@ -1,4 +1,5 @@
 "use client";
+import { EmptyState } from "@/components/empty-state";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { checkSaved, deleteSaved, listSaved, pretty, seenSaved, TAG_LABEL, type SavedCheck, type SavedSearch } from "@/lib/api";
@@ -40,7 +41,7 @@ export function SavedView() {
 
       {err && <p className="text-warn text-sm">API error: {err}</p>}
       {!rows && !err && <div className="grid gap-2"><Skeleton className="h-24" /><Skeleton className="h-24" /></div>}
-      {rows && rows.length === 0 && <p className="text-muted-foreground">Nothing saved yet. Filter or search on Browse, then use “Save search”.</p>}
+      {rows && rows.length === 0 && <EmptyState art="bell" title="Get told when PRIDE grows your way" text="Save any filter set or question from Browse. Each saved search shows how many new datasets have landed since, and check_alerts.py can run it on a schedule." action="Go to Browse" href="/" />}
       {rows && rows.length > 0 && (
         <div className="grid gap-3">
           {rows.map((s) => {

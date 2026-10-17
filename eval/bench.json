@@ -1,0 +1,97 @@
+{
+ "anthropic/claude-haiku-5.5": {
+  "ok": 199,
+  "fail": 1,
+  "cost": 0.2650847,
+  "median_seconds": 4.126452922821045,
+  "agreement": {
+   "organism": 0.9646464646464646,
+   "sample_type": 0.7537688442211056,
+   "enrichment": 0.8140703517587939,
+   "acquisition": 0.9849246231155779,
+   "labelling": 0.9547738693467337,
+   "enzyme": 0.964824120603015,
+   "fractionation": 0.8693467336683417,
+   "instrument_family": 0.949748743718593,
+   "search_engine": 0.8333333333333334
+  },
+  "avg_agreement": 0.8988263427124399,
+  "null_rate": 0.0016750418760469012
+ },
+ "deepseek/deepseek-v4.1-flash": {
+  "ok": 194,
+  "fail": 6,
+  "cost": 0.28447410148,
+  "median_seconds": 3.0938844680786133,
+  "agreement": {
+   "organism": 0.9844559585492227,
+   "sample_type": 0.7319587628865979,
+   "enrichment": 0.8556701030927835,
+   "acquisition": 0.9948453608247423,
+   "labelling": 0.9639175257731959,
+   "enzyme": 0.9690721649484536,
+   "fractionation": 0.9329896907216495,
+   "instrument_family": 0.9896907216494846,
+   "search_engine": 0.917098445595855
+  },
+  "avg_agreement": 0.9266331926713317,
+  "null_rate": 0.001718213058419244
+ },
+ "google/gemini-3.8-flash": {
+  "ok": 198,
+  "fail": 2,
+  "cost": 1.84333425,
+  "median_seconds": 6.551748991012573,
+  "agreement": {
+   "organism": 0.9644670050761421,
+   "sample_type": 0.7626262626262627,
+   "enrichment": 0.9141414141414141,
+   "acquisition": 0.9848484848484849,
+   "labelling": 0.9444444444444444,
+   "enzyme": 0.9646464646464646,
+   "fractionation": 0.9242424242424242,
+   "instrument_family": 0.9595959595959596,
+   "search_engine": 0.9086294416243654
+  },
+  "avg_agreement": 0.9252935445828847,
+  "null_rate": 0.001122334455667789
+ },
+ "moonshotai/kimi-k2.6": {
+  "ok": 170,
+  "fail": 30,
+  "cost": 0.72861232325,
+  "median_seconds": 10.218616485595703,
+  "agreement": {
+   "organism": 0.9526627218934911,
+   "sample_type": 0.7529411764705882,
+   "enrichment": 0.888235294117647,
+   "acquisition": 0.9941176470588236,
+   "labelling": 0.9647058823529412,
+   "enzyme": 0.9647058823529412,
+   "fractionation": 0.9117647058823529,
+   "instrument_family": 0.9647058823529412,
+   "search_engine": 0.8588235294117647
+  },
+  "avg_agreement": 0.9169625246548323,
+  "null_rate": 0.00065359477124183
+ },
+ "openai/gpt-5.4-mini": {
+  "ok": 193,
+  "fail": 7,
+  "cost": 1.2040263,
+  "median_seconds": 3.1903018951416016,
+  "agreement": {
+   "organism": 0.953125,
+   "sample_type": 0.7616580310880829,
+   "enrichment": 0.7461139896373057,
+   "acquisition": 0.9637305699481865,
+   "labelling": 0.9637305699481865,
+   "enzyme": 0.9430051813471503,
+   "fractionation": 0.8756476683937824,
+   "instrument_family": 0.927461139896373,
+   "search_engine": 0.875
+  },
+  "avg_agreement": 0.8899413500287853,
+  "null_rate": 0.0
+ }
+}

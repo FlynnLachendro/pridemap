@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { API, TAG_LABEL } from "@/lib/api";
+import { MarkChecked } from "@/components/mark-checked";
 
 type Bench = Record<string, { ok: number; fail: number; cost: number; median_seconds: number; agreement: Record<string, number>; avg_agreement: number; null_rate: number | null }>;
 type Report = { rows: number; overall: { n: number; agree: number; accuracy: number | null }; per_tag: Record<string, { n: number; agree: number; accuracy: number; misses: { accession: string; gold: string; model: string | null }[] }> };
@@ -24,6 +25,7 @@ export default async function EvalPage() {
   } catch { corr = null; cstats = null; }
   return (
     <div className="grid gap-8 max-w-5xl">
+      <MarkChecked />
       <div>
         <h1 className="text-4xl">How much to trust the tags</h1>
 

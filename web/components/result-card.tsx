@@ -4,6 +4,7 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { METHOD_TAGS, pretty, TAG_LABEL, type Reason, type Result } from "@/lib/api";
 import { CompareToggle } from "@/components/compare-toggle";
+import { AddToCollection } from "@/components/add-to-collection";
 
 function Chip({ r, kind }: { r: Reason; kind: "fit" | "watch" }) {
   const [open, setOpen] = useState(false);
@@ -46,6 +47,7 @@ export function ResultCard({ r, rank }: { r: Result; rank: number }) {
         <span className="text-xs text-muted-foreground tabular">{r.publication_date?.slice(0, 4)}</span>
         {r.downloads ? <span className="text-xs text-muted-foreground tabular">{r.downloads.toLocaleString()} downloads</span> : null}
         <CompareToggle accession={r.accession} className="ml-auto" tourIndex={rank - 1} />
+        <AddToCollection accession={r.accession} compact />
         <a href={r.pride_url} target="_blank" rel="noreferrer" className="text-xs underline text-muted-foreground">PRIDE ↗</a>
         {r.pubmed_id && (
           <a href={`https://europepmc.org/article/MED/${r.pubmed_id}`} target="_blank" rel="noreferrer" className="text-xs underline text-muted-foreground">paper ↗</a>

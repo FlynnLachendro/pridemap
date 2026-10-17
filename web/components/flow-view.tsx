@@ -6,6 +6,7 @@ import { API, pretty, TAG_LABEL } from "@/lib/api";
 import { useCompare } from "@/lib/compare-store";
 import { TOUR_B as TOUR_B_ACC } from "@/lib/tour";
 import { Skeleton } from "@/components/skeleton";
+import { EmptyState } from "@/components/empty-state";
 
 type Why = { why: string; parser: string };
 type Recipe = { tool: { value: string }; enzyme: { value: string[] }; fixed_modifications: { value: string[] }; variable_modifications: { value: string[] }; quantification: { value: string } };
@@ -90,10 +91,11 @@ export function FlowView() {
 
       <Step n={2} title="Confirm each candidate" done={confirmedList.length > 0}>
         <p className="text-sm text-muted-foreground">Read the case for each, tick the ones you&apos;ll use.</p>
-        {sel.length === 0 && <p className="text-sm text-faint">Nothing shortlisted yet.</p>}
+        {sel.length === 0 && <EmptyState art="list" title="Nothing shortlisted yet" text="Shortlist candidates from Browse or the Map and they appear here with a written case each." action="Find candidates" href={q ? `/?q=${encodeURIComponent(q)}` : "/"} />}
         <div className="grid gap-3">{sel.map((a) => <Candidate key={a} acc={a} q={q} confirmed={!!confirmed[a]} onConfirm={(v) => setC(a, v)} />)}</div>
       </Step>
 
+      <div id="setup" />
       <Step n={3} title="Set up the database search" done={false}>
         <p className="text-sm text-muted-foreground">Each confirmed dataset has a set‑up sheet: files on PRIDE plus the search parameters read from its tags. The search itself runs on your machine.</p>
         <div className="flex flex-wrap gap-2" data-tour="setup-links">

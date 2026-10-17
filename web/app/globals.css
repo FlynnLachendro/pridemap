@@ -416,3 +416,67 @@ b, strong, .font-bold, .font-semibold { font-weight: 600; }
 
 /* tour: hide the popover while the tour is doing something on the page (status pill explains) */
 .tour-busy .driver-popover { opacity: 0 !important; pointer-events: none; }
+
+/* ---------------------------------------------------------------------------
+   UX pass 3: workflow rail, grouped sidebar, draft-collection bar, hero band, empty states.
+   ------------------------------------------------------------------------- */
+@layer components {
+  /* the loop, always in view */
+  .rail { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border-light); }
+  .rail ol { display: flex; align-items: stretch; max-width: 72rem; margin: 0 auto; padding: 0 20px; list-style: none; overflow-x: auto; }
+  .rail li { flex: 1 1 0; min-width: 120px; position: relative; }
+  .rail li + li::before { content: ""; position: absolute; left: 0; top: 14px; width: 1px; height: 20px; background: var(--border-light); }
+  .rail a { display: grid; grid-template-columns: 20px 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; padding: 8px 14px 8px 12px; text-decoration: none; color: var(--muted-text); border-bottom: 2px solid transparent; transition: color 120ms var(--ease), background-color 120ms var(--ease); }
+  .rail a:hover { color: var(--text); background: var(--surface-2); }
+  .rail-dot { grid-row: 1 / span 2; width: 20px; height: 20px; border-radius: 999px; border: 1.5px solid var(--border); display: inline-flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 11px; font-weight: 600; background: var(--surface); }
+  .rail-label { font-family: var(--font-sans); font-weight: 700; font-size: 13px; line-height: 1.2; color: var(--text); }
+  .rail-detail { font-family: var(--font-mono); font-size: 11px; line-height: 1.3; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rail li.done .rail-dot { background: var(--ok); border-color: var(--ok); color: var(--on-accent); }
+  .rail li.done .rail-detail { color: var(--ok); }
+  .rail li.current a { border-bottom-color: var(--walnut); }
+  .rail li.current .rail-dot { border-color: var(--walnut); color: var(--walnut); }
+  .rail li.current.done .rail-dot { color: var(--on-accent); }
+  .rail li.current .rail-label { color: var(--walnut); }
+
+  /* grouped sidebar */
+  .nav-group { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); padding: 2px 12px 4px; }
+  .nav-link { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-radius: 6px; font-family: var(--font-sans); font-size: 14.5px; font-weight: 600; color: var(--muted-text); position: relative; text-decoration: none; }
+  .nav-link svg { color: var(--faint); flex: none; }
+  .nav-link:hover { background: var(--surface-2); color: var(--text); }
+  .nav-link.active { background: color-mix(in srgb, var(--teal) 12%, transparent); color: var(--text); }
+  .nav-link.active svg { color: var(--walnut); }
+  .nav-link.active::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 3px; border-radius: 2px; background: var(--walnut); }
+  .nav-sub { list-style: none; margin: 2px 0 2px 22px; padding: 0 0 0 10px; border-left: 1px solid var(--border-light); display: grid; gap: 1px; }
+  .nav-sub-link { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 5px; font-size: 13px; color: var(--muted-text); text-decoration: none; text-align: left; }
+  .nav-sub-link:hover { background: var(--surface-2); color: var(--text); }
+  .nav-sub-link.active { color: var(--walnut); font-weight: 600; }
+  .nav-sub-link svg { flex: none; }
+  .nav-sub-link > span:first-child { min-width: 0; }
+  .switch { position: relative; width: 34px; height: 20px; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--border); transition: background-color 160ms var(--ease), border-color 160ms var(--ease); flex: none; }
+  .switch-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 999px; background: var(--surface); box-shadow: 0 1px 2px rgb(19 32 42 / .25); transition: transform 160ms var(--ease); }
+  .switch.on { background: var(--walnut); border-color: var(--walnut); }
+  .switch.on .switch-knob { transform: translateX(14px); }
+  .switch:focus-visible { outline: 2px solid var(--walnut); outline-offset: 2px; }
+
+  /* the shortlist as an unsaved collection */
+  .shortlist-bar { position: fixed; bottom: 16px; left: 50%; z-index: 30; transform: translateX(-50%); width: min(960px, calc(100vw - 2rem)); display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px 10px 16px; border-radius: 14px; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 16px 40px -20px rgb(19 32 42 / .45), 0 2px 6px -2px rgb(19 32 42 / .15); animation: enter 200ms var(--ease) both; }
+  @media (min-width: 768px) { .shortlist-bar { left: calc(50% + 104px); width: min(960px, calc(100vw - 13rem - 2rem)); } }
+  @media (max-width: 640px) { .shortlist-bar { flex-wrap: wrap; } }
+
+  /* the landing head: quiet. A faintly tinted panel; the search box is the only loud thing on the page */
+  .hero { display: grid; gap: 12px; margin: 0 0 4px; padding: 18px 20px 16px; background: color-mix(in srgb, var(--teal-soft) 45%, var(--surface)); border: 1px solid var(--border-light); border-radius: 12px; }
+  .hero h1 { font-size: 1.45rem; letter-spacing: -0.01em; color: var(--text); }
+  @media (min-width: 640px) { .hero h1 { font-size: 1.6rem; } }
+  .hero-sub { display: none; }
+  .hero-chips { color: var(--muted-text); }
+  .hero-chips .pill { background: var(--surface); border: 1px solid var(--border-light); color: var(--muted-text); font-weight: 600; }
+  .hero-chips .pill:hover { border-color: var(--walnut); color: var(--walnut); }
+
+  /* empty states that teach */
+  .empty { display: grid; justify-items: start; gap: 14px; padding: 28px; border: 1px dashed var(--border); border-radius: 12px; background: color-mix(in srgb, var(--surface) 60%, transparent); }
+  .empty h3 { font-family: var(--font-display); }
+
+  /* browser surfaces carry the palette too */
+  html { caret-color: var(--walnut); accent-color: var(--walnut); }
+  a { text-underline-offset: 3px; }
+}

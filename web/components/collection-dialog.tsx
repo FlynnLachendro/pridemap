@@ -1,12 +1,14 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createCollection, type Collection } from "@/lib/api";
+import { type Collection } from "@/lib/api";
+import { useCollections } from "@/lib/collections-store";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 
-export function CollectionDialog({ accessions, open, onOpenChange, onCreated }: { accessions: string[]; open: boolean; onOpenChange: (o: boolean) => void; onCreated?: (c: Collection) => void }) {
+export function CollectionDialog({ accessions, open, onOpenChange, onCreated, allowEmpty }: { accessions: string[]; open: boolean; onOpenChange: (o: boolean) => void; onCreated?: (c: Collection) => void; allowEmpty?: boolean }) {
   const router = useRouter();
+  const { create } = useCollections();
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -15,7 +17,7 @@ export function CollectionDialog({ accessions, open, onOpenChange, onCreated }: 
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Save {accessions.length} dataset{accessions.length === 1 ? "" : "s"} as a collection</DialogTitle>
+          <DialogTitle>{accessions.length ? `Save ${accessions.length} dataset${accessions.length === 1 ? "" : "s"} as a collection` : "New collection"}</DialogTitle>
         </DialogHeader>
         <form
           className="grid gap-3"
@@ -25,7 +27,7 @@ export function CollectionDialog({ accessions, open, onOpenChange, onCreated }: 
             setBusy(true);
             setErr(null);
             try {
-              const c = await createCollection({ name: name.trim(), note: note.trim() || undefined, accessions });
+              const c = await create(name.trim(), accessions, note.trim() || undefined);
               onOpenChange(false);
               setName("");
               setNote("");
@@ -33,7 +35,8 @@ export function CollectionDialog({ accessions, open, onOpenChange, onCreated }: 
             } catch (ex) { setErr(String(ex)); } finally { setBusy(false); }
           }}
         >
-          <div className="flex flex-wrap gap-1">{accessions.map((a) => <span key={a} className="pill font-mono">{a}</span>)}</div>
+          {accessions.length > 0 && <div className="flex flex-wrap gap-1">{accessions.map((a) => <span key={a} className="pill font-mono">{a}</span>)}</div>}
+          {accessions.length === 0 && allowEmpty && <p className="text-sm text-muted-foreground">Starts empty. Add datasets from any result card with the collection button.</p>}
           <label className="grid gap-1 text-sm">
             <span className="font-medium">Name</span>
             <input value={name} onChange={(e) => setName(e.target.value)} className="input h-10" placeholder="e.g. mouse liver phospho candidates" autoFocus required />

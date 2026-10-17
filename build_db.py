@@ -28,7 +28,6 @@ CREATE INDEX IF NOT EXISTS idx_projects_pubdate ON projects(publication_date);
 CREATE INDEX IF NOT EXISTS idx_projects_cover ON projects(accession, organic_downloads, publication_date, pubmed_id);
 CREATE INDEX IF NOT EXISTS idx_projects_untagged ON projects(organic_downloads DESC, accession, organisms, publication_date);
 CREATE INDEX IF NOT EXISTS idx_projects_dl ON projects(organic_downloads);
-CREATE INDEX IF NOT EXISTS idx_ev_acc ON tag_evidence(accession);
 CREATE TABLE IF NOT EXISTS papers (
   pubmed_id INTEGER PRIMARY KEY, pmcid TEXT, is_open_access INTEGER, title TEXT,
   methods_text TEXT, fetched_at TEXT, error TEXT
@@ -44,6 +43,7 @@ CREATE TABLE IF NOT EXISTS tag_evidence (
   accession TEXT, tag TEXT, value TEXT, confidence REAL, source TEXT, evidence TEXT,
   PRIMARY KEY (accession, tag)
 );
+CREATE INDEX IF NOT EXISTS idx_ev_acc ON tag_evidence(accession);
 CREATE INDEX IF NOT EXISTS idx_tags_enrichment ON tags(enrichment);
 CREATE INDEX IF NOT EXISTS idx_tags_organism ON tags(organism);
 CREATE INDEX IF NOT EXISTS idx_tags_sample ON tags(sample_type);

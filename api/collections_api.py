@@ -121,8 +121,6 @@ def create_collection(body: CollectionIn):
     accs = clean_accessions(body.accessions)
     if not name:
         raise HTTPException(400, "name required")
-    if not accs:
-        raise HTTPException(400, "at least one accession required")
     con = db()
     cid = new_id()
     while con.execute("SELECT 1 FROM collections WHERE id=?", (cid,)).fetchone():
@@ -137,7 +135,7 @@ def create_collection(body: CollectionIn):
 def list_collections():
     con = db()
     return [
-        {"id": r["id"], "name": r["name"], "note": r["note"], "n": len(json.loads(r["accessions"] or "[]")), "created_at": r["created_at"], "updated_at": r["updated_at"]}
+        {"id": r["id"], "name": r["name"], "note": r["note"], "accessions": json.loads(r["accessions"] or "[]"), "n": len(json.loads(r["accessions"] or "[]")), "created_at": r["created_at"], "updated_at": r["updated_at"]}
         for r in con.execute("SELECT * FROM collections ORDER BY updated_at DESC")
     ]
 

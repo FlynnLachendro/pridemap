@@ -6,6 +6,7 @@ import { Reanalyse } from "@/components/reanalyse";
 import { Collapsible, Expandable } from "@/components/expandable";
 import { CompareFromHere } from "@/components/compare-from-here";
 import { OmicsLinks } from "@/components/omics-links";
+import { AddToCollection } from "@/components/add-to-collection";
 
 
 const ORDER = ["organism", "sample_type", "tissue", "cell_line", "disease", ...METHOD_TAGS, "depth_proteins"];
@@ -39,6 +40,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
             <a className="underline text-muted-foreground" href={d.pride_url} target="_blank" rel="noreferrer">PRIDE ↗</a>
             {d.paper_url && <a className="underline text-muted-foreground" href={d.paper_url} target="_blank" rel="noreferrer">paper ↗</a>}
             {d.tagged && <CompareToggle accession={p.accession} />}
+            <AddToCollection accession={p.accession} />
           </div>
           <h1 className="text-2xl sm:text-3xl mt-1">{p.title}</h1>
           {d.tags.summary_one_line && <p className="mt-2 text-lg text-muted-foreground">{String(d.tags.summary_one_line)}</p>}

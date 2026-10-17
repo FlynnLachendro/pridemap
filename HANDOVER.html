@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRIDE Map Handover</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root { --bg:#F4F7F8; --surface:#fff; --surface-2:#EAF0F2; --border:#CFD9DE; --text:#13202A; --muted:#46545F; --faint:#5E6C76; --teal:#0E7C86; --teal-ink:#0B5C64; --teal-soft:#D9EEF0; --amber:#D9731A; --amber-soft:#FBE8D6; --ok:#2E7D4F; --ok-soft:#DCEFE3; --warn:#B23A3A; --warn-soft:#F7DEDE; color-scheme: light; }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin:0; background:var(--bg); color:var(--text); font: 16.5px/1.55 "Source Sans 3", system-ui, sans-serif; }
+  h1,h2,h3,h4 { font-family:"Instrument Sans", system-ui, sans-serif; font-weight:600; letter-spacing:-0.015em; line-height:1.15; text-wrap:balance; margin:0; }
+  h1 { font-size:2.6rem; letter-spacing:-0.02em; }
+  h2 { font-size:1.6rem; margin-top:.4rem; }
+  h3 { font-size:1.15rem; }
+  code, pre, kbd, .mono { font-family:"JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  code { font-size:.86em; background:var(--surface-2); padding:1px 5px; border-radius:4px; }
+  pre { background:#13202A; color:#E8F1F3; padding:14px 16px; border-radius:10px; overflow-x:auto; font-size:13px; line-height:1.5; }
+  pre code { background:none; color:inherit; padding:0; font-size:inherit; }
+  a { color:var(--teal); text-underline-offset:3px; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px 80px; }
+  .hero { background: linear-gradient(135deg, var(--teal-ink) 0%, var(--teal) 60%, #138C96 100%); color:#fff; padding: 44px 0 36px; margin-bottom: 28px; }
+  .hero .wrap { padding-bottom:0; }
+  .hero h1 { color:#fff; }
+  .hero p { color: rgb(255 255 255 / .85); max-width: 70ch; font-size: 1.1rem; margin: 10px 0 0; }
+  .hero .meta { display:flex; flex-wrap:wrap; gap:8px 18px; margin-top:18px; font-family:"JetBrains Mono", monospace; font-size:12.5px; color: rgb(255 255 255 / .85); }
+  .layout { display:grid; grid-template-columns: 220px 1fr; gap: 36px; align-items:start; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } .toc { position: static; } }
+  .toc { position: sticky; top: 16px; font-size: 14px; display:grid; gap:4px; }
+  .toc a { color: var(--muted); text-decoration:none; padding: 3px 8px; border-left: 2px solid transparent; }
+  .toc a:hover { color: var(--text); border-left-color: var(--teal); }
+  .toc .k { font-family:"JetBrains Mono", monospace; font-size: 10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); padding: 10px 8px 2px; }
+  section { display:grid; gap: 14px; padding: 8px 0 30px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+  section > p { max-width: 72ch; margin: 0; }
+  ul, ol { margin: 0; padding-left: 1.3rem; display:grid; gap: 6px; }
+  li { max-width: 78ch; }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-family:"JetBrains Mono", monospace; font-size: 11.5px; letter-spacing:.08em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+  td.n { font-family:"JetBrains Mono", monospace; white-space: nowrap; }
+  .tablewrap { overflow-x:auto; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .grid2 { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .callout { border-radius: 10px; padding: 12px 16px; border: 1px solid; }
+  .callout.warn { background: var(--amber-soft); border-color: var(--amber); }
+  .callout.stop { background: var(--warn-soft); border-color: var(--warn); }
+  .callout.ok { background: var(--ok-soft); border-color: var(--ok); }
+  .pill { display:inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12.5px; font-weight: 600; background: var(--surface-2); }
+  .pill.teal { background: var(--teal-soft); color: var(--teal); }
+  .pill.amber { background: var(--amber-soft); color: var(--amber); }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+  .timeline { display:grid; gap: 10px; }
+  .timeline .t { display:grid; grid-template-columns: 120px 1fr; gap: 14px; align-items: baseline; }
+  .timeline .when { font-family:"JetBrains Mono", monospace; font-size: 13px; color: var(--teal); white-space: nowrap; }
+  .steps { counter-reset: s; display:grid; gap: 10px; padding:0; list-style:none; }
+  .steps li { display:grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: start; }
+  .steps li::before { counter-increment: s; content: counter(s); width: 24px; height: 24px; border-radius: 999px; background: var(--teal); color:#fff; font-family:"JetBrains Mono", monospace; font-size: 12px; font-weight: 600; display:inline-flex; align-items:center; justify-content:center; margin-top: 2px; }
+  kbd { background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: .85em; }
+  ::selection { background: var(--teal-soft); }
+</style>
+</head>
+<body>
+<div class="hero"><div class="wrap">
+  <h1>PRIDE Map handover</h1>
+  <p>Flynn → Mani, Saturday 17 Oct 2026, 17:00. You have the build until the pitch on Sunday morning. This page is everything: what it is, how to run it, where everything lives, what is still running, what to do before 10:00, and the pitch itself.</p>
+  <div class="meta"><span>repo github.com/FlynnLachendro/pridemap</span><span>submission Sun 18 Oct 10:00</span><span>pitch 10:15–12:15 · 3 min demo + 2 min Q</span><span>MIT</span></div>
+</div></div>
+
+<div class="wrap"><div class="layout">
+<nav class="toc" aria-label="Contents">
+  <div class="k">Start here</div>
+  <a href="#now">What matters tonight</a>
+  <a href="#what">What PRIDE Map is</a>
+  <a href="#run">Run it in 15 minutes</a>
+  <div class="k">The system</div>
+  <a href="#repo">Repo map</a>
+  <a href="#pipeline">Data pipeline</a>
+  <a href="#api">API</a>
+  <a href="#web">Web app &amp; UI</a>
+  <a href="#mcp">MCP &amp; agents</a>
+  <a href="#tour">The tour (the demo)</a>
+  <div class="k">Operations</div>
+  <a href="#tagging">The tagging run</a>
+  <a href="#gotchas">Things that bit us</a>
+  <a href="#numbers">Numbers to quote</a>
+  <div class="k">Sunday</div>
+  <a href="#pitch">The pitch</a>
+  <a href="#checklist">Submission checklist</a>
+  <a href="#open">Open work</a>
+  <a href="#team">Team</a>
+</nav>
+
+<div>
+
+<section id="now">
+  <h2>What matters tonight</h2>
+  <div class="callout warn"><b>Three things only.</b> (1) Get it running on your machine and run the tour end to end. (2) Dry‑run the pitch with the team and time it. (3) Push the final commit and paste the hash into the submission form before <b>10:00 Sunday</b>. Everything else on this page is support for those three.</div>
+  <div class="timeline">
+    <div class="t"><span class="when">Sat 17:00</span><span>Handover. Flynn's laptop keeps running the tagger (ETA ~18:45) and will push the refreshed data bundle when it finishes.</span></div>
+    <div class="t"><span class="when">Sat evening</span><span>Clone, <code>.env</code> from Flynn, <code>./dev.sh</code>, tour. Read the pitch. If Charlotte or Juri fill the gold set, run <code>uv run eval_tags.py</code> and the Eval page gets a human number.</span></div>
+    <div class="t"><span class="when">Sun 09:00</span><span>Final <code>git pull</code>, start the app on the demo laptop, Wi‑Fi check, record a fresh backup video (<code>node demo/record_tour.mjs</code>).</span></div>
+    <div class="t"><span class="when">Sun 10:00</span><span>Submission closes: repo URL + commit hash (<code>git rev-parse HEAD</code>).</span></div>
+    <div class="t"><span class="when">Sun 10:15–12:15</span><span>Pitches. 3 minutes demo, 2 minutes judge questions. Judged on Impact, Technical execution, Presentation (10 each).</span></div>
+  </div>
+  <div class="callout stop"><b>Secrets.</b> <code>.env</code> is git‑ignored and holds four keys (<code>ANTHROPIC_API_KEY</code>, <code>OPENROUTER_API_KEY</code>, <code>HF_TOKENS</code>, <code>HF_TOKENS2</code>). Flynn sends it to you directly, not through the repo or a chat log. Never <code>cat</code> it into a terminal that is being recorded or shared, never commit it, never write to it with <code>&gt;</code> (that wiped it once; use <code>&gt;&gt;</code> or an editor).</div>
+</section>
+
+<section id="what">
+  <h2>What PRIDE Map is</h2>
+  <p><b>The problem.</b> PRIDE (EMBL‑EBI's proteomics archive) holds 41,548 mass‑spectrometry datasets. Whether one can answer a researcher's question depends on how it was run: was the sample enriched for phosphopeptides? DDA or DIA acquisition? label‑free, TMT or SILAC? which enzyme, fractionation, instrument? None of those are structured fields in PRIDE. They live in free‑text protocol paragraphs and in the paper's Methods section. Charlotte's real experience: 800 hits, 20 papers opened by hand, three usable, and still no idea which search settings to use.</p>
+  <p><b>The solution.</b> An LLM read every dataset's protocol text plus the paper's open‑access Methods (from Europe PMC) and emitted 14 closed‑vocabulary tags, each with a confidence, a source (metadata / paper / inferred) and the verbatim sentence it came from. On top of those tags: a PRIDE‑style browse with method filters and plain‑English questions, a treemap of the archive, comparability verdicts between datasets, a database‑search set‑up sheet per dataset (what to type into MaxQuant / DIA‑NN, with the quote behind each line), a quantms cloud kit, a downstream analysis step (fold change, Welch t‑test, FDR, volcano, publication bundle), collections, saved searches with alerts, OmicsDI cross‑omics links, an evaluation page, and an MCP server so an AI assistant can do all of it.</p>
+  <p><b>The loop the UI is built around</b> (now shown as a rail at the top of every page): <span class="pill teal">Find</span> → <span class="pill teal">Confirm</span> → <span class="pill teal">Set up</span> → <span class="pill teal">Analyse</span> → <span class="pill teal">Check</span>. A human ticks each step; the machine writes the case, the parameters and the stats.</p>
+  <p><b>Built from zero</b> during the hackathon: first commit Friday night, ~60 commits by handover. Stack: Python scripts with inline deps (<code>uv run</code>), one SQLite file, FastAPI, Next.js 16 + Tailwind 4 + shadcn, driver.js for the tour, Playwright for the recording, the MCP Python SDK.</p>
+</section>
+
+<section id="run">
+  <h2>Run it in 15 minutes</h2>
+  <ol class="steps">
+    <li><span>Install <a href="https://docs.astral.sh/uv/">uv</a> and Node 20+. No venvs, no pip, no Postgres.</span></li>
+    <li><span><code>git clone https://github.com/FlynnLachendro/pridemap &amp;&amp; cd pridemap</code></span></li>
+    <li><span>Create <code>.env</code> in the repo root from what Flynn sends you (4 lines, <code>KEY=value</code>). Without it the app still runs: <code>/ask</code> falls back to a rule‑based parser; only the live agent console on <code>/mcp</code> and the tagger need keys.</span></li>
+    <li><span><code>./dev.sh</code> — first run loads the data bundle (<code>data/demo/*.jsonl.gz</code>, 113 MB, ~5 s) into <code>data/pride.db</code>, installs web deps, then starts the API on :8000 and the web app on :3000. <kbd>Ctrl‑C</kbd> stops both.</span></li>
+    <li><span>Open <a href="http://localhost:3000">localhost:3000</a>. You should see the teal search band and facet counts. <a href="http://localhost:8000/docs">localhost:8000/docs</a> lists the API.</span></li>
+    <li><span>Click <b>▶ Take the tour</b> in the sidebar. It runs itself for about 2.5 minutes across 10 pages and ends on <code>/tour/done</code>. If it does, you are ready.</span></li>
+  </ol>
+  <div class="grid2">
+    <div class="card"><h3>What a fresh clone contains</h3><p>Every <i>tagged</i> dataset: 27,063 projects, 18,824 papers' Methods text, the tags and 351,923 evidence rows. That is the whole demo. Flynn's laptop additionally has the 14.5k not‑yet‑tagged projects and the live tagger.</p></div>
+    <div class="card"><h3>If you want all 41,548 rows</h3><p><code>uv run crawl_pride.py &amp;&amp; uv run build_db.py</code> (~60 min, no keys) then <code>uv run load_demo.py</code> again. Not needed for the demo; untagged rows only add "not tagged yet" badges to Browse.</p></div>
+    <div class="card"><h3>Ports and processes</h3><p>API 8000 (<code>uv run api/main.py</code>), web 3000 (<code>npm run dev</code> in <code>web/</code>), MCP over HTTP 8010 (<code>uv run api/mcp_server.py --http</code>, optional). <code>dev.sh</code> kills stale processes on 8000/3000 first.</p></div>
+    <div class="card"><h3>First load is slower</h3><p>A warmer thread fills the browse cache at API start (~2 s). After that the landing page answers in ~10 ms and filtered browses in 10–400 ms.</p></div>
+  </div>
+</section>
+
+<section id="repo">
+  <h2>Repo map</h2>
+  <div class="tablewrap"><table>
+    <tr><th>path</th><th>what it is</th></tr>
+    <tr><td class="n">crawl_pride.py</td><td>PRIDE v3 REST <code>/projects?page=&amp;pageSize=100</code> → <code>data/raw/page_*.json</code>. All metadata, no raw files.</td></tr>
+    <tr><td class="n">build_db.py</td><td>Raw JSON → <code>data/pride.db</code>. <b>Owns the SCHEMA</b> (projects, papers, tags, tag_evidence, corrections, projects_fts, indexes). <code>load_demo.py</code> imports it.</td></tr>
+    <tr><td class="n">select_slice.py</td><td>Picks a diverse slice of accessions to tag first.</td></tr>
+    <tr><td class="n">fetch_methods.py</td><td>Europe PMC full‑text XML → <code>papers.methods_text</code>. Open access only (~64% hit rate).</td></tr>
+    <tr><td class="n">tag.py</td><td><b>The tagger.</b> System prompt, Pydantic schema, closed <code>VOCAB</code>, <code>render()</code>. Claude Sonnet 5 via structured outputs. Resume‑safe. Its <code>.env</code> loader overrides the shell environment on purpose.</td></tr>
+    <tr><td class="n">tag_oai.py</td><td>Same prompt and schema through any OpenAI‑compatible endpoint. <code>--provider hf</code> = Hugging Face router → DeepSeek V4.1 Flash (DeepInfra), thinking off; rotates <code>HF_TOKENS</code>, <code>HF_TOKENS2</code>… when one runs dry; retries once on an out‑of‑vocab value.</td></tr>
+    <tr><td class="n">tag_bench.py</td><td>Five models on the same 200 datasets via OpenRouter → <code>eval/bench.json</code> (shown on /eval).</td></tr>
+    <tr><td class="n">make_gold_template.py · eval_tags.py</td><td>Gold set template (<code>gold/gold_50.csv</code>, human columns still empty) and the humans‑vs‑model report (<code>eval/report.json</code>).</td></tr>
+    <tr><td class="n">apply_corrections.py</td><td>Every "wrong?" filed in the UI becomes a gold row and a re‑tag with the human value pinned as truth.</td></tr>
+    <tr><td class="n">check_alerts.py</td><td>Pulls the last N days of PRIDE projects and re‑checks every saved search. Meant for cron.</td></tr>
+    <tr><td class="n">export_demo.py · load_demo.py</td><td>Every tagged dataset ↔ <code>data/demo/*.jsonl.gz</code> (gzipped shards under 40 MB). This is how a fresh clone gets data.</td></tr>
+    <tr><td class="n">dev.sh</td><td>Run API + web together.</td></tr>
+    <tr><td class="n">api/main.py</td><td>FastAPI app. Search, ask, browse, map, compare, dataset, reanalyse, protein, analyse, eval, export. SQL‑side ranking (<code>SCORE_SQL</code>), FTS5 query builder, single‑pass facets with a 60 s cache, browse response cache (120 s) with a startup warmer.</td></tr>
+    <tr><td class="n">api/collections_api.py</td><td>Collections CRUD + SDRF export + download script; saved searches CRUD + check + seen. Two tables in the same DB.</td></tr>
+    <tr><td class="n">api/omics.py</td><td>OmicsDI cross‑omics links (cached), quantms kit zip, corrections list and stats.</td></tr>
+    <tr><td class="n">api/tools.py</td><td><b>One</b> list of agent tools, used by both the MCP server and the in‑app agent console.</td></tr>
+    <tr><td class="n">api/mcp_server.py · api/agent_api.py</td><td>MCP server (stdio or streamable HTTP :8010); <code>POST /agent</code> streams a manual Anthropic tool loop as ndjson events.</td></tr>
+    <tr><td class="n">analysis/</td><td>Odetta Antico's lyso‑IP scripts and example CSV. Wired into <code>/analyse/odetta</code>.</td></tr>
+    <tr><td class="n">demo/record_tour.mjs</td><td>Playwright: plays the tour headless at 1440×900 and records <code>demo/videos/*.webm</code>. The backup if Wi‑Fi dies.</td></tr>
+    <tr><td class="n">web/</td><td>Next.js 16 app router. See <a href="#web">Web app</a>.</td></tr>
+    <tr><td class="n">PLAN.html · SPEC.md · README.md</td><td>The plan in seven levels (also on Flynn's Desktop), the original build spec, the public readme.</td></tr>
+    <tr><td class="n">mani-claude-handover.md</td><td>The same handover written for your Claude. Point it at that file first.</td></tr>
+  </table></div>
+  <p>Git‑ignored (not on a fresh clone): <code>data/raw/</code>, <code>data/pride.db</code>, <code>*.log</code>, <code>.env</code>, <code>eval/report.json</code>, <code>demo/videos/</code>, <code>demo/node_modules/</code>.</p>
+</section>
+
+<section id="pipeline">
+  <h2>Data pipeline</h2>
+  <ol class="steps">
+    <li><span><b>Crawl.</b> All PRIDE project metadata, ~250 MB JSON, ~60 min.</span></li>
+    <li><span><b>Build.</b> One SQLite file in WAL mode: <code>projects</code>, <code>papers</code>, <code>tags</code> (one column per tag), <code>tag_evidence</code> (one row per tag per dataset: value, confidence, source, quote), <code>corrections</code>, <code>projects_fts</code> (FTS5, porter), plus <code>collections</code> and <code>saved_searches</code>.</span></li>
+    <li><span><b>Methods.</b> Europe PMC open‑access full text, Methods section extracted.</span></li>
+    <li><span><b>Tag.</b> The model sees the PRIDE fields, the protocols and the Methods text, and must answer with the 14‑tag schema. Closed vocabularies; every value carries its evidence sentence. First 1,661 by Claude Sonnet 5 (~$33), the rest by DeepSeek V4.1 Flash (~$1.5 per 1,000; 93% agreement with Sonnet on the benchmark).</span></li>
+    <li><span><b>Serve.</b> FastAPI reads the DB; the web app reads the API; the MCP server wraps the same tools.</span></li>
+  </ol>
+  <div class="tablewrap"><table>
+    <tr><th>tag</th><th>values</th></tr>
+    <tr><td class="n">organism / taxon_id</td><td>NCBI name + id</td></tr>
+    <tr><td class="n">sample_type</td><td>tissue · cell_line · primary_cells · biofluid · organism_whole · environmental · other</td></tr>
+    <tr><td class="n">tissue / cell_line / disease</td><td>free term or null</td></tr>
+    <tr><td class="n">enrichment</td><td>none · phospho · ubiquitin · glyco · acetyl · ap_ms · proximity_labelling · secretome · membrane · other</td></tr>
+    <tr><td class="n">acquisition</td><td>DDA · DIA · PRM_SRM · top_down · MALDI · other</td></tr>
+    <tr><td class="n">labelling</td><td>label_free · TMT · iTRAQ · SILAC · dimethyl · other</td></tr>
+    <tr><td class="n">enzyme</td><td>trypsin · trypsin_lysc · lysc · chymotrypsin · gluc · aspn · none · other</td></tr>
+    <tr><td class="n">fractionation</td><td>none · high_ph_rp · scx · gel · other</td></tr>
+    <tr><td class="n">instrument_family</td><td>orbitrap · timstof · qtof · triple_quad · fticr · ion_trap · other</td></tr>
+    <tr><td class="n">depth_proteins · search_engine</td><td>integer or null · maxquant · proteome_discoverer · fragpipe · diann · spectronaut · mascot · other</td></tr>
+  </table></div>
+</section>
+
+<section id="api">
+  <h2>API (FastAPI, :8000, OpenAPI at /docs)</h2>
+  <div class="tablewrap"><table>
+    <tr><th>endpoint</th><th>does</th></tr>
+    <tr><td class="n">GET /browse</td><td>The landing page: filters (multi‑value), free text (keyword / accession / question detection happens in the UI), sort, paging, facet counts, untagged rows with a badge. Cached 120 s.</td></tr>
+    <tr><td class="n">POST /ask</td><td>Plain question → filters (Claude structured output, rule fallback) → ranked results with "fits" and "watch" reasons; drops a filter if nothing matches and says which.</td></tr>
+    <tr><td class="n">GET /search · /map · /stats · /vocab</td><td>Filter search with reasons; treemap counts; totals; the closed vocabularies.</td></tr>
+    <tr><td class="n">GET /dataset/{acc}</td><td>Project, paper, tags, evidence, corrections. Plus <code>/why?q=</code> (three‑sentence case), <code>/reanalyse</code> (files on PRIDE + search parameters derived from the tags), <code>/files.txt</code>, <code>/methods</code>, <code>/omics</code> (OmicsDI), <code>/quantms.zip</code>, <code>POST /correct</code>.</td></tr>
+    <tr><td class="n">GET /compare?a=X,Y</td><td>Comparability verdict, match score, per‑tag rows with the exact method difference.</td></tr>
+    <tr><td class="n">GET /protein?name=</td><td>UniProt lookup: synonyms, tryptic peptide count, location, detectability notes. Backs the protein card and "datasets that mention it".</td></tr>
+    <tr><td class="n">/analyse/*</td><td>inspect an uploaded table, load the example, run A vs B (Welch, BH FDR, volcano), Odetta's pipeline, build the report bundle (methods paragraph, results CSV, params, reproduce.py, provenance).</td></tr>
+    <tr><td class="n">/collections · /saved</td><td>CRUD; <code>/collections/{id}/export.sdrf.tsv</code>, <code>/download.sh</code>, <code>/accessions.txt</code>; <code>/saved/{id}/check</code> counts new datasets since save.</td></tr>
+    <tr><td class="n">GET /eval · /corrections</td><td>Benchmark, gold‑set report, tagged‑by‑model counts; corrections list and stats.</td></tr>
+    <tr><td class="n">GET /mcp/tools · POST /agent</td><td>Tool definitions; a streamed agent run (events: start, tool_call, tool_result, text, done, error).</td></tr>
+    <tr><td class="n">GET /export.sdrf.tsv</td><td>Any search as an SDRF‑Proteomics sample sheet.</td></tr>
+  </table></div>
+</section>
+
+<section id="web">
+  <h2>Web app &amp; UI (web/)</h2>
+  <p>App router pages: <code>/</code> browse · <code>/dataset/[acc]</code> · <code>/compare</code> · <code>/flow</code> workflow · <code>/analyse</code> · <code>/map</code> · <code>/eval</code> · <code>/collections</code> and <code>/collections/[id]</code> · <code>/saved</code> · <code>/mcp</code> · <code>/about</code> · <code>/tour/done</code>. Layout: <code>app/layout.tsx</code> (fonts, loading bar, shell, shortlist bar, tour). All tokens and component classes live in <code>app/globals.css</code>; token names are historical (<code>--walnut</code> is the teal).</p>
+  <h3>What changed in the last UI pass (Saturday afternoon)</h3>
+  <ul>
+    <li><b>Workflow rail</b> at the top of every page (<code>components/workflow-rail.tsx</code>): Find → Confirm → Set up → Analyse → Check, lit by the current route, ticked by what you have done (shortlist, confirmations, set‑up sheets opened, an analysis run, Eval visited). The switch in the sidebar hides it (<code>pridemap.rail</code> in localStorage). Progress state lives in <code>lib/progress-store.ts</code>.</li>
+    <li><b>Collections everywhere</b>: a folder button on every result card and dataset page opens "Collections for PXD…" where you tick existing collections or type a name to start a new one (<code>components/add-to-collection.tsx</code>). The sidebar lists your collections with counts under the Collections entry and has "+ New collection". The floating shortlist bar is now an <b>unsaved collection</b> you name in place. Collections can start empty; rename inline (double‑click or Rename) on the list; the list has a find box past three collections. Shared client cache: <code>lib/collections-store.ts</code>.</li>
+    <li><b>Sidebar</b> grouped (Find / Work / Yours / Trust) with lucide icons.</li>
+    <li><b>Landing hero</b>: one teal band with the search box, examples and recent searches on it. Everything below it unchanged.</li>
+    <li><b>Empty states that teach</b> (<code>components/empty-state.tsx</code>) on Collections, Saved searches and the Workflow page.</li>
+  </ul>
+  <h3>Client state</h3>
+  <p>localStorage: <code>pridemap.compare</code> (shortlist), <code>pridemap.confirmed</code>, <code>pridemap.setup-seen</code>, <code>pridemap.analysed</code>, <code>pridemap.checked</code>, <code>pridemap.rail</code>, <code>pridemap.history</code> (recent searches). Collections and saved searches are server‑side in the DB. "Take the tour" clears the progress keys and does a full page load of <code>/?tour=0</code>.</p>
+  <h3>Verify after a change</h3>
+  <pre><code>cd web &amp;&amp; npx tsc --noEmit -p . &amp;&amp; npx eslint components lib app
+cd demo &amp;&amp; node record_tour.mjs        # the integration test: the tour must reach /tour/done</code></pre>
+</section>
+
+<section id="mcp">
+  <h2>MCP &amp; agents</h2>
+  <p>Seven tools, defined once in <code>api/tools.py</code>: <code>search_datasets</code>, <code>ask_question</code>, <code>get_dataset</code>, <code>compare_datasets</code>, <code>setup_sheet</code>, <code>protein_info</code>, <code>why_candidate</code>. The MCP server wraps them; the in‑app console on <code>/mcp</code> runs a Claude tool loop over the same list and streams every call. The console needs <code>ANTHROPIC_API_KEY</code> and internet.</p>
+  <pre><code>claude mcp add pridemap -- uv run /path/to/pridemap/api/mcp_server.py     # Claude Code
+uv run api/mcp_server.py --http                                          # streamable HTTP on :8010/mcp
+# Claude Desktop: Settings → Developer → Edit config → "mcpServers": {"pridemap": {"command": "uv", "args": ["run", ".../api/mcp_server.py"]}}</code></pre>
+  <p>The API must be running (default <code>http://localhost:8000</code>, override with <code>PRIDEMAP_API</code>). Demo line: "Everything you just clicked, your assistant can do mid‑conversation, with the same evidence."</p>
+</section>
+
+<section id="tour">
+  <h2>The tour (this is the demo)</h2>
+  <p>24 steps across Browse, Compare, a collection, Workflow, a dataset's set‑up sheet, Analyse, Map, Eval and MCP. It types the question, ticks DIA, shortlists two datasets, saves a search and a collection, confirms a candidate, loads the example table, runs the analysis, runs the agent. Steps are data in <code>web/lib/tour.ts</code>; the runner is <code>web/components/tour.tsx</code>; anchors are <code>data-tour="…"</code> attributes.</p>
+  <ul>
+    <li>It depends on <b>PXD055942</b> and <b>PXD029247</b> being in the DB and PXD029247 surviving the DIA filter. Do not delete or re‑tag them.</li>
+    <li>Offline: the question step falls back to the rule parser (fine); the UniProt card, OmicsDI panel and the agent step need internet. Have the backup video ready: <code>cd demo &amp;&amp; npm i &amp;&amp; npx playwright install chromium &amp;&amp; node record_tour.mjs</code> → <code>demo/videos/*.webm</code>.</li>
+    <li>Hidden browser tabs throttle timers, so the tour looks broken in a background tab. Verify it with the recorder, not in a tab you cannot see.</li>
+    <li>The app scrolls inside <code>&lt;main&gt;</code>, not the window; the tour's scroll helper knows that.</li>
+  </ul>
+</section>
+
+<section id="tagging">
+  <h2>The tagging run (still running on Flynn's laptop)</h2>
+  <p>Command: <code>caffeinate -i uv run tag_oai.py --provider hf --limit 40000 --workers 16</code>, log <code>tag_hf2.log</code> (one line per 50: done/total, fails, cost, ETA). At handover ~14k of the remaining 28k were done at ~166 per minute, ~$15 of the HF credits spent, ETA about 18:45. It is resume‑safe: rerun the same command and it skips what is tagged.</p>
+  <p>When it finishes (Flynn will do this if he is around; otherwise you, with the DB):</p>
+  <pre><code>uv run export_demo.py                                     # ~15 s, refreshes data/demo/*.jsonl.gz
+git add data/demo &amp;&amp; git commit -m "data: full tagged archive" &amp;&amp; git push</code></pre>
+  <p>Then update the counts in README "Status" and in the <a href="#numbers">numbers</a> below. The sidebar count is live from <code>/stats</code>.</p>
+</section>
+
+<section id="gotchas">
+  <h2>Things that bit us (so they don't bite you)</h2>
+  <ol>
+    <li><b>Anthropic structured outputs</b> reject nested or optional‑heavy schemas ("Schema is too complex"). Every <code>messages.parse(output_format=…)</code> model is flat with all fields required.</li>
+    <li><b>SQLite "database is locked"</b> when the tagger, the paper fetcher and the API overlap: WAL mode plus <code>timeout=120</code> on every connection. Keep it on new connections.</li>
+    <li><b>FastAPI</b> handlers must not take <code>**kwargs</code> (422s).</li>
+    <li><b>Next.js 16</b>: <code>cacheComponents</code> is incompatible with <code>force-dynamic</code> pages (it is off). The <code>set-state-in-effect</code> lint rule: use <code>setTimeout(…, 0)</code> in effects or derive state. Client caches read after mount or you get hydration mismatches.</li>
+    <li><b>CSS watcher</b> sometimes misses a save of <code>globals.css</code>: <code>touch web/app/globals.css</code>.</li>
+    <li><b>Caches</b>: browse 120 s, facets 60 s. New data shows after an API restart or within two minutes.</li>
+    <li><b>HF router</b>: model id <code>deepseek-ai/DeepSeek-V4.1-Flash:deepinfra</code>; thinking must be off or it reasons for ages; 402/429 on one token rotates to the next.</li>
+    <li><b>Anthropic key</b>: the one in <code>.env</code> is from Flynn's "Default" org (the other org has no credit). <code>tag.py</code>'s loader overrides a stale shell variable on purpose.</li>
+    <li><b>Collections</b> list endpoint returns <code>accessions</code> now; the UI relies on it for membership ticks.</li>
+  </ol>
+</section>
+
+<section id="numbers">
+  <h2>Numbers to quote</h2>
+  <div class="tablewrap"><table>
+    <tr><th>thing</th><th>value</th></tr>
+    <tr><td>PRIDE projects crawled</td><td class="n">41,548</td></tr>
+    <tr><td>tagged at handover</td><td class="n">27,063 (1,661 Sonnet 5, rest DeepSeek V4.1 Flash; run continuing)</td></tr>
+    <tr><td>papers with Methods text</td><td class="n">26,724</td></tr>
+    <tr><td>evidence rows</td><td class="n">351,923</td></tr>
+    <tr><td>tags per dataset</td><td class="n">14 + a one‑line summary</td></tr>
+    <tr><td>cost</td><td class="n">Sonnet ~$24 / 1,000 · DeepSeek ~$1.5 / 1,000 · whole archive ≈ $60</td></tr>
+    <tr><td>landing page latency</td><td class="n">~10 ms cached · 10–400 ms filtered</td></tr>
+    <tr><td>tour</td><td class="n">24 steps · 10 pages · ≈2.5 min · automatic</td></tr>
+    <tr><td>MCP tools</td><td class="n">7</td></tr>
+  </table></div>
+  <h3>Model benchmark (200 datasets, same inputs)</h3>
+  <div class="tablewrap"><table>
+    <tr><th>model</th><th>$ / 1,000</th><th>full archive</th><th>agreement with Sonnet 5</th><th>failures / 200</th></tr>
+    <tr><td>DeepSeek V4.1 Flash <span class="pill ok">chosen</span></td><td class="n">$1.47</td><td class="n">~$59</td><td class="n">93%</td><td class="n">6</td></tr>
+    <tr><td>Claude Haiku 5.5</td><td class="n">$1.33</td><td class="n">~$53</td><td class="n">90%</td><td class="n">1</td></tr>
+    <tr><td>Kimi K2.6</td><td class="n">$4.29</td><td class="n">~$171</td><td class="n">92%</td><td class="n">30</td></tr>
+    <tr><td>GPT‑5.4 mini</td><td class="n">$6.24</td><td class="n">~$249</td><td class="n">89%</td><td class="n">7</td></tr>
+    <tr><td>Gemini 3.8 Flash</td><td class="n">$9.31</td><td class="n">~$371</td><td class="n">93%</td><td class="n">2</td></tr>
+    <tr><td>Claude Sonnet 5 (reference)</td><td class="n">$24.00</td><td class="n">~$958</td><td class="n">—</td><td class="n">33 / 1000</td></tr>
+  </table></div>
+</section>
+
+<section id="pitch">
+  <h2>The pitch (3 min + 2 min questions)</h2>
+  <div class="timeline">
+    <div class="t"><span class="when">0:00 Problem</span><span>Charlotte, 30 s: "I needed a public dataset to check my protein. PRIDE search gave me 800 hits. I opened 20 papers. Three were usable, and I still didn't know which search settings to use."</span></div>
+    <div class="t"><span class="when">0:30 Ask</span><span>Type "I want to validate phosphorylated MFF in mouse liver". Chips appear; the protein card says MFF gives 10 tryptic peptides on the mitochondrial outer membrane. Open a green chip: the sentence from the paper. Tick DIA in the facets. 50 s.</span></div>
+    <div class="t"><span class="when">1:20 Shortlist</span><span>Shortlist PXD055942 and PXD029247; the bar at the bottom is an unsaved collection. Compare: "Not directly comparable: TMT vs label‑free" with the match bar. Odetta: "This is the check I do by hand before any batch comparison." 40 s.</span></div>
+    <div class="t"><span class="when">2:00 Set up</span><span>Workflow: the written case per candidate, tick one, open its set‑up sheet: DIA‑NN, enzyme, mods, FASTA, the raw files, each with its quote. "What you'd type into the search software." The quantms kit is one Nextflow command. 30 s.</span></div>
+    <div class="t"><span class="when">2:30 Analyse + trust</span><span>Load the example table, lyso‑IP vs mock, volcano, report bundle. Eval: five models, the cheap one within 3 points of Sonnet at 1/16 the cost; N of 41,548 tagged. 20 s.</span></div>
+    <div class="t"><span class="when">2:50 Agents</span><span>"Everything you just clicked, your assistant can do mid‑conversation with the same evidence." Show the agent console answering live (needs internet). Close: repo, MIT, <code>/docs</code>, three commands. 10 s.</span></div>
+  </div>
+  <p>Or press <b>Take the tour</b> and talk over it: it does the clicking, you do the story.</p>
+  <h3>Likely judge questions</h3>
+  <ul>
+    <li><b>How accurate are the tags?</b> The benchmark (93% agreement between the cheap model and Sonnet), every tag carries its sentence and confidence, "wrong?" feeds corrections back; the gold set gives a human number once filled.</li>
+    <li><b>Does it hallucinate?</b> Every tag has a verbatim quote and a source (metadata / paper / inferred). Inferred tags are flagged and lower confidence. The UI never hides the evidence.</li>
+    <li><b>Can it run the reanalysis?</b> No. MaxQuant and Mascot are desktop tools without APIs. It produces the set‑up sheet and a quantms/Nextflow kit so the search is one command in the cloud.</li>
+    <li><b>Why not PRIDE's own search?</b> Keyword matching over prose; none of these properties are fields. PRIDE Map adds the fields.</li>
+    <li><b>Cost for the whole archive?</b> About $60 with DeepSeek; about $1,000 with Sonnet. A nightly job keeps it current.</li>
+    <li><b>Datasets that actually contain protein X?</b> PRIDE retired its protein‑evidence API. We search UniProt synonyms over text and label it "mentions"; peptide‑level evidence is on the roadmap.</li>
+    <li><b>Licensing?</b> MIT code. PRIDE metadata under EBI terms; only open‑access Methods text is stored.</li>
+  </ul>
+</section>
+
+<section id="checklist">
+  <h2>Submission checklist (before 10:00 Sunday)</h2>
+  <ul>
+    <li>Repo public, MIT licence file present, README current, no secrets in history (<code>git log -p -- .env</code> should be empty).</li>
+    <li><code>git pull</code> on the demo laptop, <code>./dev.sh</code>, tour runs to <code>/tour/done</code>.</li>
+    <li>Fresh backup video recorded on the demo laptop and copied somewhere you can play it without the app.</li>
+    <li><code>git rev-parse HEAD</code> → the hash goes in the form with the repo URL.</li>
+    <li>Wi‑Fi tested in the room; if it is bad, present offline and skip the agent step (the video has it).</li>
+  </ul>
+</section>
+
+<section id="open">
+  <h2>Open work, in priority order</h2>
+  <ol>
+    <li><b>Gold set.</b> <code>gold/gold_50.csv</code> has 50 datasets with empty human columns; Charlotte and Juri were going to fill it. Any filled rows → <code>uv run eval_tags.py</code> → the Eval page's humans‑vs‑model section and a better trust line in the pitch.</li>
+    <li><b>Dry‑run the pitch</b> and decide who speaks each part.</li>
+    <li><b>README numbers</b> are stale (1,671 tagged). Update when the run finishes.</li>
+    <li>Nice‑to‑haves: a <code>/health</code> endpoint; email delivery for <code>check_alerts.py</code>; mobile layout polish; an architecture diagram in the README.</li>
+  </ol>
+</section>
+
+<section id="team">
+  <h2>Team</h2>
+  <ul>
+    <li><b>Flynn Lachendro</b> built it; reachable by you directly for keys, the DB and anything on this page.</li>
+    <li><b>Charlotte Ellison</b> owns the problem (protein ID, Mascot) and the opening line of the pitch.</li>
+    <li><b>Juri Westendorf</b>, <b>Ahmed Dawoud</b> (Southampton bioinformatics): gold set, domain checks.</li>
+    <li><b>Odetta Antico</b> (Dundee): downstream analysis; her scripts are in <code>analysis/</code> and run from the Analyse page.</li>
+  </ul>
+  <p>Hackathon: <i>Reinvent the Wheel: a tools‑for‑science hack</i>, Science Works / Inherent Labs, Pillar VC, King's Cross, 16–18 Oct 2026.</p>
+  <div class="callout ok">If something breaks at 09:30 on Sunday: <code>git stash</code> your change, <code>git pull</code>, <code>./dev.sh</code>, play the video. The app on the last pushed commit works; the recording proves it.</div>
+</section>
+
+</div></div></div>
+</body>
+</html>

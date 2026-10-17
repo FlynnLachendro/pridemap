@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { markSetupSeen } from "@/lib/progress-store";
 import { API } from "@/lib/api";
 
 type Param = { value: unknown; why?: string; tag?: string; confidence?: number | null; evidence?: string | null; missed_cleavages?: number; from_pride_ptms?: string[] };
@@ -16,6 +17,7 @@ const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : String(v));
 export function Reanalyse({ accession }: { accession: string }) {
   const [out, setOut] = useState<Out | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { markSetupSeen(accession); }, [accession]);
   useEffect(() => {
     let live = true;
     fetch(`${API}/dataset/${accession}/reanalyse`).then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json(); })

@@ -13,7 +13,7 @@ __pycache__/
 node_modules/
 .next/
 web/.env*
-eval/*.json
+eval/report.json
 data/inputs/
 data/tags_json/
 data/chunks/
