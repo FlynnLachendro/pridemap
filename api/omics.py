@@ -1111,7 +1111,10 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         "   <restrictProteinQuantification>True</restrictProteinQuantification>",
         _xml_list("restrictMods", RESTRICT_MODS),
         _xml_list("massDifferenceMods", []),
-        _xml_list("referenceChannel", []),
+        # referenceChannel is deliberately NOT emitted. Absent, MaxQuant's ReferenceChannels getter yields
+        # one entry per parameter group; present-but-empty makes that same getter throw
+        # IndexOutOfRangeException while the modificationSpecificPeptides table is written — job 48 of 49,
+        # after everything expensive has succeeded. Another case where empty and absent differ.
         "   <peptideFdr>0.01</peptideFdr>",
         "   <proteinFdr>0.01</proteinFdr>",
         "   <minPepLen>7</minPepLen>",
