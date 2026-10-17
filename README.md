@@ -8,6 +8,95 @@ PRIDE Map has a model read each dataset's protocol text **and** the paper's Meth
 
 Built at *Reinvent the Wheel: a tools‑for‑science hack* (Science Works / Inherent Labs, London, 16–18 Oct 2026) by Flynn Lachendro with Charlotte Ellison, Juri Westendorf and Ahmed Dawoud (University of Southampton). MIT.
 
+## Quick start
+
+**Prerequisites:** [uv](https://docs.astral.sh/uv/getting-started/installation/) and Node 20+.
+
+```bash
+git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
+```
+
+### Option A — demo in 2 minutes (no API key, no crawl)
+
+Uses the bundled 296‑dataset slice already tagged and shipped in `data/demo/`.
+
+```bash
+./dev.sh
+```
+
+That's it. `dev.sh` loads the demo data automatically if `data/pride.db` doesn't exist, then starts both servers.
+
+| Service | URL |
+|---------|-----|
+| Web UI  | http://localhost:3000 |
+| API / OpenAPI docs | http://localhost:8000/docs |
+
+`/ask` works without an API key (rule‑based filter parser). Add `ANTHROPIC_API_KEY` to a `.env` file in the repo root to enable Claude‑powered natural‑language search.
+
+---
+
+### Option B — full pipeline (tag your own slice)
+
+**1. Environment**
+
+Create `.env` in the repo root:
+
+```dotenv
+ANTHROPIC_API_KEY=sk-ant-...   # for tag.py and /ask (Claude)
+HF_TOKENS=hf_a,hf_b,...        # for tag_oai.py --provider hf (optional, rotated)
+NEXT_PUBLIC_API_URL=http://localhost:8000   # web → API base (default if omitted)
+```
+
+**2. Crawl all PRIDE project metadata** (~250 MB JSON, ~60 min)
+
+```bash
+uv run crawl_pride.py    # → data/raw/page_*.json
+uv run build_db.py       # → data/pride.db
+```
+
+Smoke‑check: `sqlite3 data/pride.db "select count(*) from projects;"` should print ~42 000.
+
+**3. Pick a slice and fetch paper Methods**
+
+```bash
+uv run select_slice.py --n 300   # → data/slice.txt
+uv run fetch_methods.py --accessions data/slice.txt   # → papers table
+```
+
+Smoke‑check: `sqlite3 data/pride.db "select count(*) from papers where methods_text is not null;"` — expect ~60 % of the slice.
+
+**4. Tag** (choose one)
+
+```bash
+# Claude Sonnet 5 — ~$0.024/dataset, ~$7 for 300
+uv run tag.py --accessions data/slice.txt
+
+# DeepSeek V4.1 Flash via HF router — ~$0.0015/dataset, 90–93 % agreement; resumes on restart
+uv run tag_oai.py --provider hf --limit 300
+```
+
+Smoke‑check: `sqlite3 data/pride.db "select count(*) from tags;"` — should match the number of accessions in `data/slice.txt`.
+
+**5. Serve**
+
+```bash
+uv run api/main.py &
+cd web && npm i && npm run dev
+```
+
+---
+
+### MCP server (Claude Desktop / Claude Code / Cursor)
+
+```bash
+uv run api/mcp_server.py           # stdio — add to your MCP client config
+uv run api/mcp_server.py --http    # streamable HTTP on :8010
+```
+
+The `/mcp` page in the running web UI explains the available tools and has a live console.
+
+---
+
 ## What it does
 
 The loop a researcher actually runs, with a human tick at each step:
