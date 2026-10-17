@@ -8,6 +8,14 @@ type Out = {
   accession: string; tagged: boolean; has_submitter_results: boolean;
   files: { total: number; all_ftp_url: string; groups: Record<string, { count: number; bytes: number; examples: { file_name: string; size_bytes: number; ftp: string | null }[] }> };
   recipe: null | { tool: Param; enzyme: Param; fixed_modifications: Param; variable_modifications: Param; quantification: Param; fdr: Param; instrument_preset: Param; fasta: { uniprot_proteome: string | null; organism: string | null; url: string | null; note: string }; notes: string[] };
+  plan: null | {
+    vendor_label: string; acquisition: string; tag_acquisition: string | null; raw_count: number;
+    engine: string | null; engine_label: string | null; why: string | null; output_table: string | null;
+    maxquant_offered: boolean; maxquant_reason: string | null; caveat: string | null; conflict: string | null;
+    convert: { from: string; to: string; tool: string; url: string } | null; kit_url: string;
+    mixed: boolean; runs_dda: number; runs_dia: number;
+    tracks: { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string }[];
+  };
 };
 
 const CAT: Record<string, string> = { RAW: "Raw instrument files", PEAK: "Peak lists (already converted)", RESULT: "Submitter's results (protein/peptide tables)", SEARCH: "Submitter's search output", OTHER: "Other", FASTA: "FASTA used", SPECTRUM_LIBRARY: "Spectral library", EXPERIMENTAL_DESIGN: "Experimental design" };
@@ -93,6 +101,34 @@ export function Reanalyse({ accession }: { accession: string }) {
             </div>
             {r.notes.length > 0 && (
               <div className="px-4 py-3 text-xs text-muted-foreground grid gap-1">{r.notes.map((n) => <div key={n}>• {n}</div>)}</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {out.plan && out.plan.engine && out.plan.engine !== "quantms" && (
+        <div className="rounded-xl border bg-card overflow-hidden" data-tour="searchkit">
+          <div className="px-4 py-3 border-b flex items-center justify-between gap-3 flex-wrap">
+            <h3 className="text-base">
+              Run the search on your machine with {out.plan.tracks.map((t) => t.engine_label).join(" + ")}
+            </h3>
+            <a className="btn btn-primary btn-sm" href={`${API}${out.plan.kit_url}`} download>Download kit (zip)</a>
+          </div>
+          <div className="px-4 py-3 grid gap-2 text-sm">
+            <p className="text-xs text-muted-foreground">{out.plan.why}</p>
+            {out.plan.conflict && <p className="text-warn text-xs">⚠ {out.plan.conflict}</p>}
+            {out.plan.caveat && <p className="text-xs text-muted-foreground">{out.plan.caveat}</p>}
+            <div className="label">What you get</div>
+            <ul className="grid gap-0.5 text-xs text-muted-foreground">
+              <li>• <code>download_raw.sh</code>: pulls the {out.plan.raw_count} raw files ({out.plan.vendor_label}) from PRIDE&apos;s FTP</li>
+              {out.plan.convert && <li>• <code>convert_to_mzml.sh</code>: {out.plan.convert.from} → {out.plan.convert.to} via <a className="underline" href={out.plan.convert.url} target="_blank" rel="noreferrer">{out.plan.convert.tool}</a></li>}
+              <li>• <code>download_fasta.sh</code>: the reference proteome, saved where the configs expect it</li>
+              {out.plan.tracks.map((t) => (
+                <li key={t.kind}>• <code>{t.config}</code>: {t.engine_label} settings for the {t.run_count} {t.kind} run{t.run_count === 1 ? "" : "s"} → <code>{t.output_table}</code> uploads straight into Analyse</li>
+              ))}
+            </ul>
+            {!out.plan.maxquant_offered && out.plan.maxquant_reason && (
+              <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {out.plan.maxquant_reason}</p>
             )}
           </div>
         </div>

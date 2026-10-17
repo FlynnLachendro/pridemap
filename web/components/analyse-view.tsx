@@ -41,7 +41,56 @@ const fmt = (v: number | null | undefined, d = 3) => (v === null || v === undefi
 const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 
 type PrideTable = { file_name: string; category: string; size_bytes: number | null; kind: string; openable: boolean };
-type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTable[]; raw_files: number; has_results: boolean; note: string | null };
+/** Which search engine can actually run on this dataset's raw files — decided by the API from vendor + acquisition. */
+type Track = { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string; why: string };
+type SearchPlan = {
+  vendor: string | null; vendor_label: string; acquisition: string; tag_acquisition: string | null; raw_count: number;
+  engine: string | null; engine_label: string | null; why: string | null; output_table: string | null;
+  maxquant_offered: boolean; maxquant_reason: string | null; caveat: string | null; conflict: string | null;
+  mixed: boolean; runs_dda: number; runs_dia: number; runs_unclassified: number; sidecars: number; tracks: Track[];
+  convert: { from: string; to: string; tool: string; url: string; why: string } | null; kit_url?: string;
+};
+type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTable[]; raw_files: number; has_results: boolean; note: string | null; plan: SearchPlan | null };
+
+/** Raw-only dataset: name the engine that can actually run, say why, and hand over a kit for it. */
+function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string }) {
+  const tracks = plan.tracks ?? [];
+  const label = tracks.length > 1 ? "search kit" : `${plan.engine_label} kit`;
+  const prep = [
+    `Download the raw files from PRIDE (${plan.raw_count} runs${plan.sidecars ? ` plus ${plan.sidecars} index sidecars the readers need`: ""})`,
+    "Fetch the protein database with the included script",
+    ...(plan.convert ? [`Convert ${plan.convert.from} → ${plan.convert.to} with ${plan.convert.tool}`] : []),
+  ];
+  return (
+    <div className="rounded-lg border bg-muted/30 p-4 grid gap-3" data-tour="searchkit">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="font-semibold text-sm">Run the search yourself</span>
+        {tracks.map((t) => <span key={t.kind} className="pill">{t.kind} → {t.engine_label}</span>)}
+        <span className="text-xs text-faint">{plan.raw_count} × {plan.vendor_label}</span>
+        <a className="btn btn-sm btn-primary ml-auto" href={`${API}${plan.kit_url ?? `/dataset/${accession}/searchkit.zip`}`} download>
+          Download {label} (zip)
+        </a>
+      </div>
+      {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
+      {plan.caveat && <p className="text-xs text-muted-foreground">{plan.caveat}</p>}
+      <ol className="grid gap-1 text-xs text-muted-foreground">
+        {prep.map((s, i) => <li key={s}>{i + 1}. {s}</li>)}
+      </ol>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {tracks.map((t) => (
+          <div key={t.kind} className="rounded-md border bg-card px-3 py-2 text-xs grid gap-0.5">
+            <div className="font-semibold">{t.engine_label} <span className="text-faint font-normal">· {t.run_count} {t.kind} runs</span></div>
+            <div className="text-muted-foreground">config <code>{t.config}</code></div>
+            <div className="text-muted-foreground">upload <code>{t.output_table}</code> here when it finishes</div>
+          </div>
+        ))}
+      </div>
+      {!plan.maxquant_offered && plan.maxquant_reason && (
+        <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {plan.maxquant_reason}</p>
+      )}
+    </div>
+  );
+}
 
 /** Open a submitter result table straight from a confirmed PRIDE dataset: no download, no file picker. */
 function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; onOpen: (acc: string, file: string) => void }) {
@@ -70,6 +119,7 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
       </div>
       {err && <p className="text-warn text-sm">{err}</p>}
       {res && res.note && <p className="note text-sm"><span aria-hidden>ⓘ</span><span>{res.note} {res.raw_files > 0 && <Link href={`/dataset/${res.accession}#reanalyse`} className="underline">Open the set‑up sheet →</Link>}</span></p>}
+      {res && res.plan && res.plan.engine && <SearchKit plan={res.plan} accession={res.accession} />}
       {res && all.length > 0 && (
         <ul className="grid gap-1">
           {all.slice(0, 8).map((t) => (
@@ -83,7 +133,7 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
           {all.length > 8 && <li className="text-xs text-faint">…and {all.length - 8} more on PRIDE</li>}
         </ul>
       )}
-      <p className="text-xs text-muted-foreground">Uses the submitter&apos;s own search output on PRIDE (MaxQuant proteinGroups, DIA‑NN report, FragPipe tables, any CSV/TSV/XLSX). PRIDE Map can&apos;t run MaxQuant or Mascot itself; if a dataset only has raw files, the set‑up sheet tells you what to run.</p>
+      <p className="text-xs text-muted-foreground">Uses the submitter&apos;s own search output on PRIDE (MaxQuant proteinGroups, DIA‑NN report, FragPipe tables, any CSV/TSV/XLSX). PRIDE Map can&apos;t run MaxQuant or DIA‑NN itself; if a dataset only has raw files, it works out which engine fits and hands you a ready‑made kit to run on your own machine.</p>
     </div>
   );
 }
