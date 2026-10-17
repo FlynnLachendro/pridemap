@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useCompare } from "@/lib/compare-store";
@@ -7,10 +7,14 @@ import { API } from "@/lib/api";
 import { markAnalysed } from "@/lib/progress-store";
 
 type Group = { stem: string; columns: string[]; fill: number };
+type MzTab = {
+  rows: number; runs: number; per_run_columns: number; per_run_values: number;
+  intensity_based: boolean; comparable: boolean; quant_kind: string | null;
+};
 type Inspect = {
   upload_id: string; file: string; n_rows: number; n_cols: number;
   id_columns: string[]; numeric_columns: string[]; suggested_groups: Group[]; contaminant_columns: string[];
-  odetta_compatible: boolean; odetta_prefixes: string[];
+  odetta_compatible: boolean; odetta_prefixes: string[]; mztab?: MzTab | null;
 };
 type Row = { id: string; log2fc: number | null; t: number | null; p: number | null; q: number | null; mean_a: number | null; mean_b: number | null; n_a: number; n_b: number };
 type Pt = { id: string; log2fc: number | null; neglog10p: number | null; sig: "up" | "down" | "ns" };
@@ -64,6 +68,99 @@ const NO_SUB = () => () => {};
 const getOrigin = () => window.location.origin;
 const getOriginServer = () => "";
 
+type RunStage = Stage & { state: "pending" | "running" | "done" | "failed"; seconds: number | null; steps: string[]; message: string | null };
+type RunStatus = {
+  accession: string; can_run: boolean; exists: boolean; running: boolean; finished: boolean; failed: boolean;
+  stages: RunStage[]; log: string[]; uploads: string[]; dir: string | null;
+};
+const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
+
+/** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
+function RunHere({ accession }: { accession: string }) {
+  const router = useRouter();
+  const [status, setStatus] = useState<RunStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const seen = useRef<string | null>(null);
+
+  const poll = useCallback(async () => {
+    try { return await jfetch<RunStatus>(fetch(`${API}/dataset/${accession}/pipeline/status`)); } catch { return null; }
+  }, [accession]);
+
+  // One timer owns the polling: a quick beat while a run is live, a slow one otherwise so an idle page is cheap.
+  const running = status?.running ?? false;
+  useEffect(() => {
+    let live = true;
+    const tick = async () => {
+      const s = await poll();
+      if (live && s) setStatus(s);
+    };
+    const first = window.setTimeout(tick, 0);
+    const id = window.setInterval(tick, running ? 2000 : 15000);
+    return () => { live = false; window.clearTimeout(first); window.clearInterval(id); };
+  }, [poll, running]);
+  // When the run hands a table back, open it: the point of the whole exercise is the table, not the run.
+  useEffect(() => {
+    const last = status?.uploads?.[status.uploads.length - 1];
+    if (last && seen.current !== last) { seen.current = last; router.push(`/analyse?upload=${encodeURIComponent(last)}`); }
+  }, [status?.uploads, router]);
+
+  if (status && !status.can_run) return null;  // a hosted PRIDE Map cannot run searches; the one-liner still can
+
+  const start = async () => {
+    setStarting(true); setErr(null);
+    try {
+      await jfetch(fetch(`${API}/dataset/${accession}/pipeline/start?web=${encodeURIComponent(window.location.origin)}`, { method: "POST" }));
+      const s = await poll();
+      if (s) setStatus(s);
+    } catch (e) { setErr(String(e)); } finally { setStarting(false); }
+  };
+
+  const stages = status?.stages ?? [];
+  const active = stages.find((s) => s.state === "running");
+  const done = stages.filter((s) => s.state === "done").length;
+  return (
+    <div className="rounded-md border bg-card p-3 grid gap-2" data-tour="run-here">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm font-semibold">Run it here</span>
+        {status?.running
+          ? <span className="pill">running · {done}/{stages.length - 1} stages</span>
+          : status?.finished ? <span className="pill bg-ok-soft text-ok">finished</span>
+          : status?.failed ? <span className="pill text-warn">stopped</span> : null}
+        <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={starting || !!status?.running} onClick={start}>
+          {status?.running ? <><span className="spinner mr-2" />Running…</> : starting ? "Starting…" : status?.exists ? "Resume" : "Run the whole pipeline"}
+        </button>
+      </div>
+      <p className="text-xs text-faint">
+        PRIDE Map runs every stage for you on this machine — nothing to paste into a terminal. Safe to close this
+        page; the run keeps going and resumes where it stopped.
+      </p>
+      {err && <p className="text-xs text-warn">{err}</p>}
+      {stages.length > 0 && (status?.running || status?.finished || status?.failed) && (
+        <ol className="grid gap-0.5 text-xs">
+          {stages.map((s) => (
+            <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
+              <span aria-hidden className="inline-block w-4">{STATE_MARK[s.state]}</span>
+              {s.label}
+              {s.seconds != null && <span className="text-faint"> · {Math.floor(s.seconds / 60)}m {s.seconds % 60}s</span>}
+              {s.message && <span className="text-faint"> · {s.message}</span>}
+              {s.state === "running" && s.steps.length > 0 && (
+                <div className="pl-6 text-faint">{s.steps[s.steps.length - 1]}</div>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      {active && status?.log && status.log.length > 0 && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-faint hover:text-foreground">output</summary>
+          <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{status.log.join("\n")}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 /** The whole pipeline as one command. Carries this page's origin so the script can link results straight back. */
 function OneLiner({ accession }: { accession: string }) {
   const origin = useSyncExternalStore(NO_SUB, getOrigin, getOriginServer);
@@ -103,19 +200,20 @@ function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string })
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
 
-      <OneLiner accession={accession} />
+      <RunHere accession={accession} />
 
       <p className="text-xs text-muted-foreground">
-        That runs all {auto} stages — tool and disk check, download, {plan.convert ? "conversion, " : ""}
-        {tracks.map((t) => t.engine_label).join(" and ")}, then it uploads the finished
-        table{tracks.length > 1 ? "s" : ""} back here and prints the link. The only thing left for you is picking
-        group A and group B.
+        All {auto} stages — tool and disk check, download, {plan.convert ? "conversion, " : ""}
+        {tracks.map((t) => t.engine_label).join(" and ")}, then the finished
+        table{tracks.length > 1 ? "s are" : " is"} loaded straight into Analyse. The only thing left for you is
+        picking group A and group B.
       </p>
 
       <details className="text-xs">
         <summary className="cursor-pointer text-faint hover:text-foreground">
-          Prefer to do it by hand? Every step spelled out, and the kit as a zip
+          Rather drive it yourself? A one-line command, the kit as a zip, and every step spelled out
         </summary>
+        <div className="mt-2"><OneLiner accession={accession} /></div>
         <div className="grid gap-3 mt-2">
           <div className="flex flex-wrap items-center gap-3">
             <a className="btn btn-sm" href={`${API}${plan.kit_url ?? `/dataset/${accession}/searchkit.zip`}`} download>
@@ -333,6 +431,27 @@ export function AnalyseView() {
           <p className="text-sm" data-tour="loaded">
             <span className="font-semibold">{inspect.file}</span> · <span className="tabular">{inspect.n_rows.toLocaleString()}</span> rows × <span className="tabular">{inspect.n_cols.toLocaleString()}</span> columns · {inspect.suggested_groups.length} sample groups detected
             {inspect.odetta_compatible && <span className="ml-2 pill bg-ok-soft text-ok">lyso‑IP layout: Odetta&apos;s pipeline available</span>}
+          </p>
+        )}
+        {inspect?.mztab && !inspect.mztab.comparable && (
+          <p className="note text-sm text-warn" data-tour="mztab-warning">
+            <span aria-hidden>⚠</span>
+            <span>
+              This mzTab identifies {inspect.mztab.rows.toLocaleString()} proteins, but every one of its{" "}
+              {inspect.mztab.per_run_columns} per‑run columns is empty — a flat identification list for the whole
+              study, with no per‑sample numbers. There is nothing here to compare, so A vs B and a volcano plot are
+              not possible from this file. Getting them means running the search over the raw files.
+            </span>
+          </p>
+        )}
+        {inspect?.mztab?.comparable && (
+          <p className="note text-sm">
+            <span aria-hidden>ⓘ</span>
+            <span>
+              mzTab: {inspect.mztab.rows.toLocaleString()} proteins across {inspect.mztab.runs} runs, quantified by{" "}
+              {inspect.mztab.quant_kind}.
+              {!inspect.mztab.intensity_based && " Spectral counts are semi-quantitative — noisier than LFQ intensities, and a t-test on counts is approximate."}
+            </span>
           </p>
         )}
         {busy && <p className="text-sm text-teal">{busy}</p>}

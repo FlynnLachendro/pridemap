@@ -120,6 +120,16 @@ SCORE_SQL = ("(1.0 + 0.5 * ln(1 + COALESCE(p.organic_downloads, 0)) / 10"
 SORT_SQL = {"relevance": SCORE_SQL + " DESC", "downloads": "p.organic_downloads DESC", "date": "p.publication_date DESC",
             "depth": "t.depth_proteins DESC NULLS LAST"}
 
+# Repository accession patterns: PXD (PRIDE), MSV (MassIVE), and variants — case-insensitive.
+ACCESSION_RE = re.compile(r'\b(PXD\d{3,}|MSV\d{6,}|RPXD\d{3,})\b', re.I)
+
+
+def _extract_accs(q: str) -> tuple[list[str], str]:
+    """Return (upper-cased accession IDs, remaining query text) from a search string."""
+    accs = list(dict.fromkeys(m.upper() for m in ACCESSION_RE.findall(q or "")))
+    rest = ACCESSION_RE.sub("", q or "").strip()
+    return accs, rest
+
 
 def search(con, f: Filters, limit=25, offset=0, sort="relevance"):
     """Ranked, paged search over tagged datasets. Ranking and paging happen in SQL; reasons and evidence are
@@ -288,8 +298,17 @@ def where_for(f: Filters, exclude: str | None = None):
         ys = [y.strip() for y in f.years.split(",") if y.strip()]
         where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})")
         params += ys
+    # Direct accession lookup: extract repository IDs (PXD…, MSV…) from free text and match
+    # the accession column directly — they never appear in the FTS-indexed prose columns.
+    acc_ids, q_rest = _extract_accs(f.q or "")
+    if acc_ids:
+        where.append(f"p.accession IN ({','.join('?' * len(acc_ids))})")
+        params += acc_ids
+
     join = ""
-    expr = fts_expr(f)
+    # Pass remaining text (accessions stripped) to FTS so they don't pollute the prose search.
+    f_fts = Filters(**{**f.model_dump(), "q": q_rest or None}) if acc_ids else f
+    expr = fts_expr(f_fts)
     if expr:
         join = " JOIN projects_fts fts ON fts.accession = p.accession"
         where.append("projects_fts MATCH ?")
@@ -933,7 +952,7 @@ from fastapi import File, UploadFile
 UPLOADS = ROOT / "data" / "uploads"
 ANALYSIS_DIR = ROOT / "analysis"
 EXAMPLE_TABLE = ANALYSIS_DIR / "data" / "lysoip_brain_batch2.csv"
-UPLOAD_EXTS = (".csv", ".tsv", ".txt", ".xlsx")
+UPLOAD_EXTS = (".csv", ".tsv", ".txt", ".xlsx", ".mztab")
 MAX_UPLOAD = 200 * 1024 * 1024
 REPLICATE_RE = re.compile(r"^(.+?)[._ ](\d{1,3})$")  # Set1_Brain_IP_LTKI.3 -> stem Set1_Brain_IP_LTKI
 ID_PRIORITY = ["genes", "gene names", "gene", "protein.group", "protein ids", "majority protein ids", "protein.names", "protein", "accession", "id"]
@@ -1012,6 +1031,100 @@ def load_df(upload_id: str):
     return df
 
 
+# ----------------------------------------------------------------------------- mzTab
+# PRIDE's standard results format, and often the only processed data a submitter uploads. It is one file holding
+# several sections keyed by the first column: MTD metadata, PRH/PRT proteins, PSH/PSM spectrum matches. The PSM
+# section dominates the size (4.7M rows vs 4.6k proteins in PXD046787's 1.2 GB file), so everything here streams
+# and keeps only the protein section — never load an mzTab with a plain read_csv.
+MZTAB_RUN_RE = re.compile(r"^ms_run\[(\d+)\]-location$")
+MZTAB_ASSAY_RE = re.compile(r"^assay\[(\d+)\]-ms_run_ref$")
+MZTAB_SV_RE = re.compile(r"^study_variable\[(\d+)\]-description$")
+# Quantities can be indexed by ms_run, assay or study_variable depending on the exporter.
+MZTAB_COL_RE = re.compile(r"^(.*?)_?(ms_run|assay|study_variable)\[(\d+)\]$")
+MZTAB_METRIC = {"num_psms": "psms", "num_peptides_unique": "unique_peptides",
+                "num_peptides_distinct": "distinct_peptides", "search_engine_score[1]": "score",
+                "protein_abundance": "abundance", "peptide_abundance": "abundance",
+                "protein_abundance_std_error": "abundance_stderr", "protein_abundance_stdev": "abundance_stdev"}
+# Column prefixes that carry a per-sample number, i.e. something an A-vs-B comparison could use.
+MZTAB_QUANT_PREFIXES = ("abundance ", "psms ", "unique_peptides ", "distinct_peptides ")
+
+
+def _looks_mztab(first_lines: list[str]) -> bool:
+    return any(ln.startswith(("MTD\t", "PRH\t", "PRT\t", "PSH\t")) for ln in first_lines)
+
+
+def mztab_to_tsv(lines, out_path: pathlib.Path) -> dict:
+    """Stream an mzTab and write its protein section as a plain TSV the rest of the Analyse step can read.
+
+    Per-run columns are renamed from ms_run[n] to the actual run name, so the replicate grouping and the column
+    picker show something a researcher recognises instead of an index.
+    """
+    runs: dict[str, str] = {}
+    assays: dict[str, str] = {}
+    svs: dict[str, str] = {}
+    header: list[str] | None = None
+    per_run_idx: list[int] = []
+    rows = 0
+    filled = 0
+    with open(out_path, "w") as out:
+        for raw in lines:
+            if not raw:
+                continue
+            kind, _, rest = raw.rstrip("\n").partition("\t")
+            if kind == "MTD":
+                key, _, val = rest.partition("\t")
+                val = val.strip()
+                if m := MZTAB_RUN_RE.match(key):
+                    runs[m.group(1)] = pathlib.PurePath(val.rstrip("/")).name or val
+                elif m := MZTAB_ASSAY_RE.match(key):
+                    if r := re.match(r"ms_run\[(\d+)\]", val):
+                        assays[m.group(1)] = r.group(1)
+                elif m := MZTAB_SV_RE.match(key):
+                    svs[m.group(1)] = val
+            elif kind == "PRH":
+                header = [_mztab_col(c, runs, assays, svs) for c in rest.split("\t")]
+                per_run_idx = [i for i, c in enumerate(header) if c.startswith(MZTAB_QUANT_PREFIXES)]
+                out.write("\t".join(header) + "\n")
+            elif kind == "PRT":
+                if header is None:
+                    continue
+                cells = rest.replace("\r", "").split("\t")
+                out.write("\t".join(cells) + "\n")
+                rows += 1
+                filled += sum(1 for i in per_run_idx if i < len(cells) and cells[i] not in ("null", "", "NA", "NaN"))
+            elif kind == "PSH":
+                break  # protein section is finished; the rest is the huge PSM block
+    if not rows:
+        raise HTTPException(400, "that mzTab has no protein section (PRT rows) to analyse")
+    head = header or []
+    abundance = [c for c in head if c.startswith("abundance ")]
+    # An mzTab can legitimately carry no per-sample numbers at all — a flat identification list for the whole
+    # study. It parses fine and is still worth showing, but nothing in it can drive an A-vs-B comparison, so say so
+    # here rather than letting the Analyse step present an unusable table.
+    return {"rows": rows, "runs": len(runs), "per_run_columns": len(per_run_idx),
+            "per_run_values": filled, "intensity_based": bool(abundance),
+            "comparable": filled > 0,
+            "quant_kind": ("protein abundances" if abundance else "spectral counts and peptide counts")
+            if filled else None}
+
+
+def _mztab_col(col: str, runs: dict[str, str], assays: dict[str, str], svs: dict[str, str]) -> str:
+    """protein_abundance_assay[3] / num_psms_ms_run[3] -> a name carrying the sample, not the index."""
+    col = col.strip()
+    m = MZTAB_COL_RE.match(col)
+    if not m:
+        return col
+    stem, kind, idx = m.group(1), m.group(2), m.group(3)
+    if kind == "ms_run":
+        name = runs.get(idx)
+    elif kind == "assay":
+        name = runs.get(assays.get(idx, ""), "") or f"assay{idx}"
+    else:
+        name = svs.get(idx) or f"group{idx}"
+    name = re.sub(r"\.(raw|wiff|d|mzml|mzxml)$", "", name or f"run{idx}", flags=re.I)
+    return f"{MZTAB_METRIC.get(stem, stem or 'value')} {name}"
+
+
 def _clean(v):
     """JSON-safe scalar: NaN/inf -> None, numpy -> python."""
     if v is None:
@@ -1076,7 +1189,7 @@ except ImportError:
 async def _analyse_inspect(file: UploadFile):
     ext = pathlib.Path(file.filename or "table.csv").suffix.lower()
     if ext not in UPLOAD_EXTS:
-        raise HTTPException(400, f"unsupported file type {ext}; use .csv, .tsv, .txt or .xlsx")
+        raise HTTPException(400, f"unsupported file type {ext}; use .csv, .tsv, .txt, .xlsx or .mztab")
     UPLOADS.mkdir(parents=True, exist_ok=True)
     uid = uuid.uuid4().hex[:12]
     dest = UPLOADS / f"{uid}{ext}"
@@ -1090,12 +1203,46 @@ async def _analyse_inspect(file: UploadFile):
                 raise HTTPException(413, "file larger than 200 MB")
             out.write(chunk)
     try:
-        return inspect_df(uid)
+        # A .txt/.tsv upload may still be an mzTab; sniff rather than trust the extension.
+        if ext == ".mztab" or (ext in (".txt", ".tsv") and _looks_mztab(_head_lines(dest))):
+            # Write to a sibling first: the destination can be the very file being read (a .tsv that is an mzTab).
+            tmp = UPLOADS / f"{uid}.mztab.part"
+            with open(dest, "r", errors="replace") as src:
+                _mztab_meta_write(uid, mztab_to_tsv(src, tmp))
+            dest.unlink(missing_ok=True)
+            tmp.replace(UPLOADS / f"{uid}.tsv")
+        return {"mztab": _mztab_meta_read(uid), **inspect_df(uid)}
     except HTTPException:
         raise
     except Exception as e:
         dest.unlink(missing_ok=True)
         raise HTTPException(400, f"could not read the table: {e}")
+
+
+def _mztab_meta_path(upload_id: str) -> pathlib.Path:
+    return UPLOADS / f"{upload_id}.mztab.json"
+
+
+def _mztab_meta_write(upload_id: str, meta: dict) -> dict:
+    """Keep the mzTab summary beside the converted table: a cached re-open must say the same thing as the first one."""
+    try:
+        _mztab_meta_path(upload_id).write_text(json.dumps(meta))
+    except OSError:
+        pass
+    return meta
+
+
+def _mztab_meta_read(upload_id: str):
+    p = _mztab_meta_path(upload_id)
+    try:
+        return json.loads(p.read_text()) if p.exists() else None
+    except (OSError, ValueError):
+        return None
+
+
+def _head_lines(path: pathlib.Path, n: int = 5) -> list[str]:
+    with open(path, "r", errors="replace") as fh:
+        return [fh.readline() for _ in range(n)]
 
 
 if HAVE_MULTIPART:
@@ -1108,8 +1255,8 @@ else:
         raise HTTPException(503, "upload needs python-multipart: restart the API (uv run api/main.py) to pick up the new dependencies")
 
 
-RESULT_NAME_RE = re.compile(r"proteingroups|protein_groups|report\.pg_matrix|pg_matrix|report\.tsv|report\.pr_matrix|protein.?quant|proteins?\.(tsv|txt|csv|xlsx)|combined_protein|abundance|intensit|lfq|quant|results?|peptides?\.(tsv|txt)|evidence\.txt|psm", re.I)
-TABLE_EXTS = (".txt", ".tsv", ".csv", ".xlsx", ".xls", ".zip", ".gz")
+RESULT_NAME_RE = re.compile(r"mztab|proteingroups|protein_groups|report\.pg_matrix|pg_matrix|report\.tsv|report\.pr_matrix|protein.?quant|proteins?\.(tsv|txt|csv|xlsx)|combined_protein|abundance|intensit|lfq|quant|results?|peptides?\.(tsv|txt)|evidence\.txt|psm", re.I)
+TABLE_EXTS = (".txt", ".tsv", ".csv", ".xlsx", ".xls", ".zip", ".gz", ".mztab")
 MAX_PRIDE_FETCH = 400 * 1024 * 1024
 
 
@@ -1136,8 +1283,10 @@ def dataset_results(accession: str):
             continue
         entry = {"file_name": name, "category": cat, "size_bytes": fobj.get("size_bytes"), "ftp": fobj.get("ftp"),
                  "openable": low.endswith((".txt", ".tsv", ".csv", ".xlsx", ".zip", ".gz")) and (fobj.get("size_bytes") or 0) <= MAX_PRIDE_FETCH,
-                 "kind": "MaxQuant proteinGroups" if "proteingroups" in low else "DIA-NN protein matrix" if "pg_matrix" in low else "DIA-NN report" if "report" in low and low.endswith((".tsv", ".parquet")) else "FragPipe protein table" if "combined_protein" in low else "archive (will look inside)" if low.endswith((".zip", ".gz")) else "table"}
-        (archives if low.endswith((".zip", ".gz")) else tables).append(entry)
+                 "kind": "mzTab (submitter's results)" if ".mztab" in low else "MaxQuant proteinGroups" if "proteingroups" in low else "DIA-NN protein matrix" if "pg_matrix" in low else "DIA-NN report" if "report" in low and low.endswith((".tsv", ".parquet")) else "FragPipe protein table" if "combined_protein" in low else "archive (will look inside)" if low.endswith((".zip", ".gz")) else "table"}
+        # An mzTab is openable directly, even gzipped: it streams. It is a table, not an archive to rummage in.
+        is_mztab = ".mztab" in low
+        (tables if is_mztab else archives if low.endswith((".zip", ".gz")) else tables).append(entry)
     tables.sort(key=lambda e: (0 if "proteingroups" in e["file_name"].lower() or "pg_matrix" in e["file_name"].lower() or "combined_protein" in e["file_name"].lower() else 1, e["size_bytes"] or 0))
     out = {"accession": accession, "tables": tables, "archives": archives, "raw_files": raw,
            "has_results": bool(tables or archives), "note": None, "plan": None}
@@ -1190,10 +1339,14 @@ def analyse_from_pride(body: FromPrideIn):
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", f"{body.accession}_{pathlib.Path(body.file_name).stem}")[:70]
     low = body.file_name.lower()
     ext = next((e for e in (".xlsx", ".csv", ".tsv", ".txt") if low.endswith(e)), None)
+    if low.endswith((".mztab", ".mztab.gz")):
+        ext = ".tsv"  # an mzTab is converted to a plain protein TSV on the way in
     if ext and (UPLOADS / f"{safe}{ext}").exists():
-        return {"upload_id": safe, "file": body.file_name, "cached": True, **inspect_df(safe)}
+        return {"upload_id": safe, "file": body.file_name, "cached": True,
+                "mztab": _mztab_meta_read(safe), **inspect_df(safe)}
     url = fobj["ftp"].replace("ftp://", "https://", 1)
     raw_dest = UPLOADS / f"{safe}.download"
+    mztab_meta = None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "pridemap/1.0"})
         with urllib.request.urlopen(req, timeout=120) as r, open(raw_dest, "wb") as out:
@@ -1214,16 +1367,30 @@ def analyse_from_pride(body: FromPrideIn):
         raw_dest.unlink(missing_ok=True)
     elif low.endswith(".gz"):
         import gzip
-        ext = pathlib.Path(low[:-3]).suffix or ".txt"
-        if ext not in (".txt", ".tsv", ".csv"):
-            ext = ".txt"
-        with gzip.open(raw_dest, "rb") as src, open(UPLOADS / f"{safe}{ext}", "wb") as out:
-            shutil.copyfileobj(src, out)
+        inner_low = low[:-3]
+        if inner_low.endswith(".mztab"):
+            # Stream the protein section straight out of the gzip: this file is 55 MB compressed and 1.2 GB open,
+            # almost all of it PSM rows we do not need.
+            ext = ".tsv"
+            with gzip.open(raw_dest, "rt", errors="replace") as src:
+                mztab_meta = _mztab_meta_write(safe, mztab_to_tsv(src, UPLOADS / f"{safe}{ext}"))
+        else:
+            ext = pathlib.Path(inner_low).suffix or ".txt"
+            if ext not in (".txt", ".tsv", ".csv"):
+                ext = ".txt"
+            with gzip.open(raw_dest, "rb") as src, open(UPLOADS / f"{safe}{ext}", "wb") as out:
+                shutil.copyfileobj(src, out)
+        raw_dest.unlink(missing_ok=True)
+    elif low.endswith(".mztab"):
+        ext = ".tsv"
+        with open(raw_dest, "r", errors="replace") as src:
+            mztab_meta = _mztab_meta_write(safe, mztab_to_tsv(src, UPLOADS / f"{safe}{ext}"))
         raw_dest.unlink(missing_ok=True)
     else:
         raw_dest.rename(UPLOADS / f"{safe}{ext}")
     try:
-        return {"upload_id": safe, "file": inner or body.file_name, "cached": False, **inspect_df(safe)}
+        return {"upload_id": safe, "file": inner or body.file_name, "cached": False,
+                "mztab": mztab_meta, **inspect_df(safe)}
     except HTTPException:
         raise
     except Exception as e:

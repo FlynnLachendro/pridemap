@@ -35,3 +35,5 @@ combined/
 out_dda/
 out_dia/
 fasta/
+# Pipeline runs started from the UI land here (api/omics.py RUNS_DIR).
+reanalysis/

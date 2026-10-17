@@ -7,10 +7,12 @@ import concurrent.futures as cf
 import datetime as dt
 import io
 import json
+import os
 import pathlib
 import re
 import sqlite3
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
@@ -180,6 +182,247 @@ def dataset_omics(accession: str, refresh: bool = False):
     return out
 
 
+# ----------------------------------------------------------------------------- per-run sample annotations
+# PRIDE has no field for "which sample is this run?". The answer, when it exists at all, is in files the
+# submitter attached: an SDRF (the community standard) and/or a spreadsheet of their own. Neither can be
+# trusted blindly — PXD046787's community-annotated SDRF says organism part = brain for a study of pulmonary
+# endothelial cells, and carries none of the sex / condition / duration the design actually turns on, while its
+# Samplelist.xlsx carries all three. So this reports every source side by side with its provenance, flags where
+# a source contradicts the dataset's own tags, and leaves the choice to the human. Same contract as the tags:
+# show the evidence, never launder a guess into a fact.
+SDRF_RE = re.compile(r"\.sdrf\.tsv$", re.I)
+SHEET_EXT = (".xlsx", ".xls", ".csv", ".tsv")
+RUN_NAME_RE = re.compile(r"\.(raw|wiff|wiff2|d|mzml|mzxml|mgf|baf|yep|tdf)(\.gz|\.zip)?$", re.I)
+# Plumbing: true of every row, so it says nothing about which sample a run is.
+SDRF_SKIP = {"comment[file uri]", "comment[data file]", "comment[sdrf version]", "comment[sdrf template]",
+             "comment[sdrf annotation tool]", "assay name", "technology type", "source name"}
+MAX_ANNOT_BYTES = 8 * 1024 * 1024
+SAMPLE_CACHE_HOURS = 24
+# Which tag a given SDRF/spreadsheet field should agree with, so a contradiction can be surfaced rather than
+# silently preferred one way or the other.
+ANNOT_VS_TAG = {"characteristics[organism part]": "tissue", "characteristics[organism]": "organism",
+                "characteristics[disease]": "disease", "characteristics[cell line]": "cell_line"}
+
+
+def raw_cache_dir(accession: str) -> pathlib.Path:
+    """Where downloaded raw files live between runs. A temp directory by default, one folder per accession, so
+    selecting a different pair of runs from the same dataset reuses what is already on disk instead of pulling
+    gigabytes again. Override with PRIDEMAP_RAW_DIR to keep them somewhere that survives a reboot."""
+    base = os.environ.get("PRIDEMAP_RAW_DIR") or str(pathlib.Path(tempfile.gettempdir()) / "pridemap-raw")
+    return pathlib.Path(base).expanduser() / accession
+
+
+def _cached_raw(accession: str, file_name: str, size_bytes: int | None) -> bool:
+    """True when the cache already holds this run, complete. Size is the check: a part file from an interrupted
+    download is present but useless, and claiming it is there would skip the resume that would fix it."""
+    p = raw_cache_dir(accession) / pathlib.PurePath(file_name).name
+    try:
+        return p.is_file() and (not size_bytes or p.stat().st_size == size_bytes)
+    except OSError:
+        return False
+
+
+def _with_local_state(out: dict, accession: str) -> dict:
+    """Stamp each run with whether it is already downloaded. Never cached: the answer changes as files land."""
+    cache = raw_cache_dir(accession)
+    for r in out.get("rows") or []:
+        r["local"] = _cached_raw(accession, r.get("file_name") or "", r.get("size_bytes"))
+    out["raw_cache"] = str(cache)
+    out["local_runs"] = sum(1 for r in (out.get("rows") or []) if r.get("local"))
+    return out
+
+
+def _run_key(name: str) -> str:
+    """A run's identity across sources: basename, run extension dropped, lowercased. The SDRF says
+    '2019_12_13_Daria_16', the spreadsheet says '2019_12_13_Daria_16.raw', PRIDE lists the file — all one run."""
+    base = pathlib.PurePath((name or "").strip().replace("\\", "/")).name
+    return RUN_NAME_RE.sub("", base).strip().lower()
+
+
+def _slug(value: str, n: int = 14) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "", re.sub(r"\s*y\.?o\.?\s*", "", str(value or ""), flags=re.I))
+    return s[:n]
+
+
+def _fetch_annot_bytes(ftp: str | None) -> bytes | None:
+    if not ftp:
+        return None
+    url = ftp.replace("ftp://", "https://", 1)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "pridemap/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.read(MAX_ANNOT_BYTES + 1)[:MAX_ANNOT_BYTES]
+    except Exception as e:
+        print(f"sample annotation fetch failed ({ftp}):", e, file=sys.stderr)
+        return None
+
+
+def _sdrf_annotations(data: bytes) -> dict[str, dict[str, str]]:
+    """One row per run, keyed by run. SDRF names the run in comment[data file] / file uri / source name."""
+    import csv
+
+    text = data.decode("utf-8", errors="replace")
+    out: dict[str, dict[str, str]] = {}
+    for row in csv.DictReader(io.StringIO(text), delimiter="\t"):
+        key = ""
+        for col in ("comment[data file]", "comment[file uri]", "source name", "assay name"):
+            if _run_key(row.get(col) or ""):
+                key = _run_key(row.get(col) or "")
+                break
+        if not key:
+            continue
+        fields = {k.strip(): str(v).strip() for k, v in row.items()
+                  if k and k.strip() not in SDRF_SKIP and str(v or "").strip()
+                  and str(v).strip().lower() not in (NA, "not applicable")}
+        # Ontology-style cells ("NT=q exactive;AC=MS:1001911") read as noise in a picker; keep the name.
+        for k, v in list(fields.items()):
+            m = re.match(r"^NT=([^;]+)", v)
+            if m:
+                fields[k] = m.group(1)
+        out[key] = fields
+    return out
+
+
+def _sheet_annotations(data: bytes, file_name: str) -> dict[str, dict[str, str]]:
+    """One row per run from a submitter spreadsheet. The run column is whichever column actually holds run
+    names — submitters title it anything ('Raw datafile name', 'File', 'Sample'), so it is found, not assumed."""
+    _, pd = _pandas()
+    buf = io.BytesIO(data)
+    if file_name.lower().endswith((".xlsx", ".xls")):
+        df = pd.read_excel(buf)
+    else:
+        text = data.decode("utf-8", errors="replace")
+        sep = "\t" if text.count("\t") > text.count(",") else ","
+        df = pd.read_csv(io.StringIO(text), sep=sep)
+    if df.empty:
+        return {}
+    scores = {c: sum(1 for v in df[c] if _run_key(str(v))) for c in df.columns}
+    key_col = max(scores, key=lambda c: scores[c])
+    if scores[key_col] == 0:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for _, row in df.iterrows():
+        key = _run_key(str(row[key_col]))
+        if not key:
+            continue
+        out[key] = {str(c).strip(): str(row[c]).strip() for c in df.columns
+                    if c != key_col and str(row[c]).strip() and str(row[c]).strip().lower() != "nan"}
+    return out
+
+
+def _pandas():
+    try:
+        import numpy as np
+        import pandas as pd
+        return np, pd
+    except ImportError:
+        raise HTTPException(503, "reading sample annotations needs pandas: restart the API to pick up dependencies")
+
+
+def sample_annotations(accession: str, refresh: bool = False) -> dict:
+    """Per-run sample annotations for one dataset, assembled from whatever the deposition actually carries."""
+    from main import pride_files
+
+    con = db()
+    con.execute("CREATE TABLE IF NOT EXISTS sample_cache (accession TEXT PRIMARY KEY, json TEXT, fetched_at TEXT)")
+    p = con.execute("SELECT accession FROM projects WHERE accession=?", (accession,)).fetchone()
+    if not p:
+        raise HTTPException(404, "unknown accession")
+    if not refresh:
+        c = con.execute("SELECT json, fetched_at FROM sample_cache WHERE accession=?", (accession,)).fetchone()
+        if c and c["fetched_at"] and dt.datetime.fromisoformat(c["fetched_at"]) > dt.datetime.now(dt.UTC) - dt.timedelta(hours=SAMPLE_CACHE_HOURS):
+            out = json.loads(c["json"])
+            out["cached"] = True
+            return _with_local_state(out, accession)
+
+    files = pride_files(con, accession)
+    runs = [f for f in files if (f.get("category") or "").upper() == "RAW" and is_run(f.get("file_name") or "")]
+    if not runs:
+        runs = [f for f in files if (f.get("file_name") or "").lower().endswith(RAW_EXT) and is_run(f.get("file_name") or "")]
+
+    sources, per_run = [], {}
+    for f in files:
+        name = f.get("file_name") or ""
+        if SDRF_RE.search(name):
+            data = _fetch_annot_bytes(f.get("ftp"))
+            parsed = _sdrf_annotations(data) if data else {}
+            if parsed:
+                sources.append({"kind": "sdrf", "file_name": name, "runs_annotated": len(parsed),
+                                "note": "SDRF-Proteomics, the community standard. Often curated after the fact — check it against the paper."})
+                per_run["sdrf:" + name] = parsed
+        elif name.lower().endswith(SHEET_EXT) and (f.get("category") or "").upper() not in ("RAW", "PEAK", "SEARCH", "RESULT"):
+            data = _fetch_annot_bytes(f.get("ftp"))
+            try:
+                parsed = _sheet_annotations(data, name) if data else {}
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"sheet parse failed ({name}):", e, file=sys.stderr)
+                parsed = {}
+            if parsed:
+                sources.append({"kind": "spreadsheet", "file_name": name, "runs_annotated": len(parsed),
+                                "note": "The submitter's own sample list. Free-form columns, so the field names are theirs, not a standard's."})
+                per_run["sheet:" + name] = parsed
+
+    # Merge per run, remembering which file each value came from.
+    rows = []
+    for f in sorted(runs, key=lambda f: f.get("file_name") or ""):
+        name = f.get("file_name") or ""
+        key = _run_key(name)
+        annotations: dict[str, dict] = {}
+        for src, table in per_run.items():
+            for field, value in (table.get(key) or {}).items():
+                annotations.setdefault(field, {"value": value, "source": src.split(":", 1)[1],
+                                               "source_kind": src.split(":", 1)[0]})
+        rows.append({"file_name": name, "run": key, "size_bytes": f.get("size_bytes"), "ftp": f.get("ftp"),
+                     "annotations": annotations})
+
+    # The fields that differ between runs are the ones worth showing and the only possible experimental factors.
+    counts: dict[str, set] = {}
+    for r in rows:
+        for field, a in r["annotations"].items():
+            counts.setdefault(field, set()).add(a["value"])
+    fields = [{"field": f, "distinct": len(v), "varies": len(v) > 1, "values": sorted(v)[:12]}
+              for f, v in counts.items()]
+    fields.sort(key=lambda f: (not f["varies"], -f["distinct"], f["field"]))
+    varying = [f["field"] for f in fields if f["varies"]]
+    for r in rows:
+        r["label"] = "_".join(_slug(r["annotations"][f]["value"]) for f in varying[:3]
+                              if f in r["annotations"]) or _run_key(r["file_name"])
+
+    t = con.execute("SELECT organism, tissue, disease, cell_line FROM tags WHERE accession=?", (accession,)).fetchone()
+    tags = dict(t) if t else {}
+    conflicts = []
+    for field, tag in ANNOT_VS_TAG.items():
+        vals = counts.get(field) or set()
+        tag_val = (tags.get(tag) or "").strip()
+        if len(vals) == 1 and tag_val:
+            got = next(iter(vals))
+            if got.strip().lower() not in tag_val.lower() and tag_val.lower() not in got.strip().lower():
+                conflicts.append({"field": field, "annotation_says": got, "tag": tag, "tag_says": tag_val,
+                                  "note": "These disagree. Neither is automatically right — the tag comes from the "
+                                          "protocol text, the annotation from a file someone attached."})
+
+    out = {"accession": accession, "runs": len(rows), "sources": sources, "fields": fields,
+           "varying_fields": varying, "rows": rows, "conflicts": conflicts,
+           "note": None if sources else "This deposition carries no SDRF or sample spreadsheet PRIDE Map could read, "
+                                        "so the runs can only be told apart by file name.",
+           "fetched_at": now_iso(), "cached": False}
+    con.execute("INSERT OR REPLACE INTO sample_cache VALUES (?,?,?)", (accession, json.dumps(out), out["fetched_at"]))
+    con.commit()
+    return _with_local_state(out, accession)
+
+
+@router.get("/dataset/{accession}/samples")
+def dataset_samples(accession: str, refresh: bool = False):
+    """Which sample each raw run is, from the deposition's own SDRF and/or sample spreadsheet, with provenance.
+
+    Drives the 'pick two runs' step: varying_fields are the candidate factors, conflicts are where a source
+    contradicts the dataset's tags, and local tells you whether the file is already in the raw cache.
+    """
+    return sample_annotations(accession, refresh=refresh)
+
+
 # ----------------------------------------------------------------------------- quantms reanalysis kit
 NA = "not available"
 CLEAVAGE = {"trypsin": ["NT=Trypsin;AC=MS:1001251"], "trypsin_lysc": ["NT=Trypsin;AC=MS:1001251", "NT=Lys-C;AC=MS:1001309"],
@@ -205,9 +448,31 @@ def _tsv_cell(v) -> str:
     return re.sub(r"[\t\r\n]+", " ", str(v if v not in (None, "") else NA))
 
 
-def _kit_context(accession: str) -> dict:
+def _run_labels(accession: str) -> dict[str, str]:
+    """file name -> a label built from the annotations that vary, e.g. M69_Hypoxia_48h. Used for MaxQuant's
+    experiment names, so proteinGroups.txt arrives with columns a researcher can read the design out of.
+    Annotations are best-effort: no sample metadata means plain file-name stems, which is what it did before."""
+    try:
+        ann = sample_annotations(accession)
+    except Exception as e:
+        print(f"run labels unavailable ({accession}):", e, file=sys.stderr)
+        return {}
+    return {r["file_name"]: r["label"] for r in ann.get("rows") or [] if r.get("label")}
+
+
+def parse_runs(runs: str) -> list[str]:
+    """A comma-separated run selection from a query string. Accepts file names or bare run keys, either way."""
+    return [s.strip() for s in (runs or "").split(",") if s.strip()]
+
+
+def _kit_context(accession: str, runs: list[str] | None = None) -> dict:
     """Everything a reanalysis kit needs about one dataset: project row, tags, derived recipe, raw files and the
-    SDRF-shaped values derived from them. Single owner — quantms_kit and search_kit both compose this."""
+    SDRF-shaped values derived from them. Single owner — quantms_kit and search_kit both compose this.
+
+    `runs` narrows it to a chosen subset, so comparing two samples out of twenty-four downloads and searches
+    two files rather than all of them. Everything downstream — the scripts, the config, the plan, the stage
+    list — is derived from this list, so none of them can disagree about which runs the kit is for.
+    """
     from main import jl, pride_files, recipe
     con = db()
     p = con.execute("SELECT * FROM projects WHERE accession=?", (accession,)).fetchone()
@@ -223,6 +488,15 @@ def _kit_context(accession: str) -> dict:
     if not raw:
         raw = [f for f in files if (f.get("file_name") or "").lower().endswith(RAW_EXT)]
     raw.sort(key=lambda f: f.get("file_name") or "")
+    selected = list(runs or [])
+    if selected:
+        want = {_run_key(s) for s in selected}
+        # Sidecars travel with the run they belong to: selecting X.wiff must still fetch X.wiff.scan.
+        kept = [f for f in raw if _run_key(f.get("file_name") or "") in want]
+        missing = want - {_run_key(f.get("file_name") or "") for f in kept}
+        if missing:
+            raise HTTPException(400, f"not raw files of {accession}: {', '.join(sorted(missing))}")
+        raw = kept
 
     organism = t.get("organism") or (jl(p.get("organisms")) or [NA])[0]
     instruments = jl(p.get("instruments"))
@@ -236,7 +510,8 @@ def _kit_context(accession: str) -> dict:
     label, labelling_type = LABEL.get(t.get("labelling") or "", (NA, NA))
     prec_tol, frag_tol = TOLERANCE.get(t.get("instrument_family") or "", (NA, NA))
     # raw = everything to download (sidecars included); runs = what the search engine is actually pointed at.
-    return {"accession": accession, "p": p, "t": t, "r": r, "raw": raw,
+    return {"accession": accession, "p": p, "t": t, "r": r, "raw": raw, "selected": selected,
+            "run_labels": _run_labels(accession) if selected else {},
             "runs": [f for f in raw if is_run(f.get("file_name") or "")], "organism": organism,
             "instruments": instruments,
             "instrument": f"NT={instruments[0]}" if instruments else (f"NT={t['instrument_family']}" if t.get("instrument_family") else NA),
@@ -245,9 +520,9 @@ def _kit_context(accession: str) -> dict:
             "acq": t.get("acquisition") or "DDA"}
 
 
-def quantms_kit(accession: str) -> bytes:
+def quantms_kit(accession: str, runs: list[str] | None = None) -> bytes:
     from main import TAG_COLS
-    ctx = _kit_context(accession)
+    ctx = _kit_context(accession, runs)
     p, t, r, raw = ctx["p"], ctx["t"], ctx["r"], ctx["raw"]
     organism, instrument = ctx["organism"], ctx["instrument"]
     cleavage, mods = ctx["cleavage"], ctx["mods"]
@@ -319,8 +594,8 @@ def quantms_kit(accession: str) -> bytes:
 
 
 @router.get("/dataset/{accession}/quantms.zip")
-def dataset_quantms(accession: str):
-    data = quantms_kit(accession)
+def dataset_quantms(accession: str, runs: str = ""):
+    data = quantms_kit(accession, parse_runs(runs))
     return Response(content=data, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{accession}_quantms.zip"'})
 
@@ -476,8 +751,8 @@ def _build_plan(t: dict, raw_names: list[str]) -> dict:
     return plan
 
 
-def dataset_search_plan(accession: str) -> dict:
-    ctx = _kit_context(accession)
+def dataset_search_plan(accession: str, runs: list[str] | None = None) -> dict:
+    ctx = _kit_context(accession, runs)
     plan = search_plan(ctx["t"], [f.get("file_name") or "" for f in ctx["raw"]])
     plan["accession"] = accession
     plan["kit_url"] = f"/dataset/{accession}/searchkit.zip"
@@ -486,8 +761,8 @@ def dataset_search_plan(accession: str) -> dict:
 
 
 @router.get("/dataset/{accession}/searchplan")
-def dataset_searchplan(accession: str):
-    return dataset_search_plan(accession)
+def dataset_searchplan(accession: str, runs: str = ""):
+    return dataset_search_plan(accession, parse_runs(runs))
 
 
 # ----------------------------------------------------------------------------- the pipeline, start to finish
@@ -598,6 +873,24 @@ def _run_path(name: str, plan: dict) -> str:
     return "raw/" + name
 
 
+# MaxQuant spawns MaxQuantTask workers that resolve paths from their own working directory, not the one
+# MaxQuantCmd was started in. A relative filePath therefore fails deep into the run with "Given path for proc
+# folder does not exist. Path=raw/combined/proc" — after the download, which is the expensive part. The config
+# ships with this placeholder and run_all.sh substitutes the kit's real directory before the search, so the
+# paths are absolute wherever the kit was unpacked, without the generator having to know that directory.
+KIT_DIR_TOKEN = "__KIT_DIR__"
+
+
+def _abs_in_kit(path: str) -> str:
+    return f"{KIT_DIR_TOKEN}/{path.lstrip('/')}"
+
+
+def _local_config(name: str) -> str:
+    """The run-time copy of a config, with the kit directory substituted in. Kept beside the original so the
+    shipped config stays diffable and the resolved one is obviously generated."""
+    return re.sub(r"(\.[^.]+)$", r".local\1", name)
+
+
 def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
     """A MaxQuant mqpar.xml seeded from the tags. A starting point: open it in MaxQuant's GUI and check it."""
     r, t = ctx["r"], ctx["t"]
@@ -606,15 +899,19 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
     fixed = [m for m in ((r or {}).get("fixed_modifications", {}).get("value") or []) if "(" in m]
     variable = (r or {}).get("variable_modifications", {}).get("value") or ["Oxidation (M)"]
     lfq = 1 if (t.get("labelling") or "label_free") == "label_free" else 0
-    paths = [_run_path(n, plan) for n in run_names]
-    exps = [re.sub(r"\.[^.]+$", "", pathlib.PurePath(n).name) for n in paths]
+    paths = [_abs_in_kit(_run_path(n, plan)) for n in run_names]
+    # Experiment names become the column names in proteinGroups.txt. When the deposition says what each run is,
+    # use that ("M69_Hypoxia_48h") instead of a file name that hides the design.
+    labels = ctx.get("run_labels") or {}
+    exps = [labels.get(pathlib.PurePath(n).name) or re.sub(r"\.[^.]+$", "", pathlib.PurePath(n).name)
+            for n in run_names]
     head = [
         '<?xml version="1.0" encoding="utf-8"?>',
         '<MaxQuantParams xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">',
         f"   <!-- Generated by PRIDE Map for {ctx['accession']} from its tags. Check every value before running. -->",
         "   <fastaFiles>",
         "      <FastaFileInfo>",
-        f"         <fastaFilePath>{_xml(fasta_path)}</fastaFilePath>",
+        f"         <fastaFilePath>{_xml(_abs_in_kit(fasta_path))}</fastaFilePath>",
         "         <identifierParseRule>&gt;.*\\|(.*)\\|</identifierParseRule>",
         "         <descriptionParseRule>&gt;(.*)</descriptionParseRule>",
         "         <taxonomyParseRule></taxonomyParseRule>",
@@ -626,6 +923,10 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         "   <fastaFilesProteogenomics></fastaFilesProteogenomics>",
         "   <fastaFilesFirstSearch></fastaFilesFirstSearch>",
         "   <fixedSearchFolder></fixedSearchFolder>",
+        # Left empty, MaxQuant derives this from the raw directory and writes raw/combined, while run_all.sh and
+        # its progress watcher both look for combined/ at the kit root. Pin it so the two agree. This is the
+        # folder MaxQuant creates "combined" INSIDE, so it is the kit root — naming combined here nests it.
+        f"   <fixedCombinedFolder>{_xml(KIT_DIR_TOKEN)}</fixedCombinedFolder>",
         "   <includeContaminants>True</includeContaminants>",
         f"   <maxQuantVersion>{MQ_VERSION}</maxQuantVersion>",
         "   <numThreads>8</numThreads>",
@@ -719,12 +1020,47 @@ def _convert_sh(ctx: dict, plan: dict) -> str:
 
 
 def _download_sh(ctx: dict) -> str:
+    """Fetch this kit's runs, via a cache shared by every kit for the same dataset.
+
+    A run already in the cache, at its full size, is not downloaded again — so picking a different pair of
+    samples from the same deposition costs nothing for the files you already have, and an interrupted download
+    resumes rather than restarting. Files are linked into raw/ so the configs still see a local raw/ directory.
+    """
+    total = sum(f.get("size_bytes") or 0 for f in ctx["raw"])
+    gb = total / (1 << 30)
     lines = ["#!/usr/bin/env bash",
-             f"# Download the {len(ctx['raw'])} raw files of {ctx['accession']} from PRIDE. Expect tens of GB.",
-             "set -euo pipefail", "mkdir -p raw", "cd raw"]
+             f"# Download the {len(ctx['raw'])} raw file(s) of {ctx['accession']} from PRIDE"
+             + (f" — about {gb:.1f} GB." if total else "."),
+             "#",
+             "# Cached in PRIDEMAP_RAW_DIR (a temp directory by default) and linked into raw/, so re-running this",
+             "# or building another kit for the same dataset re-uses what is already downloaded.",
+             "set -euo pipefail",
+             f'CACHE="${{PRIDEMAP_RAW_DIR:-${{TMPDIR:-/tmp}}/pridemap-raw}}/{ctx["accession"]}"',
+             'mkdir -p "$CACHE" raw',
+             'echo "raw cache: $CACHE"',
+             "",
+             "# have <file> <bytes> — true when the cache holds the whole file, so it can be skipped.",
+             "have() {",
+             '  [ -f "$CACHE/$1" ] || return 1',
+             '  [ -z "$2" ] && return 0',
+             '  local n; n=$(wc -c < "$CACHE/$1" | tr -d " ")',
+             '  [ "$n" = "$2" ]',
+             "}",
+             ""]
     for f in ctx["raw"]:
-        if f.get("ftp"):
-            lines.append(f"curl -C - -O {f['ftp']}")
+        if not f.get("ftp"):
+            continue
+        name = pathlib.PurePath(f.get("file_name") or "").name
+        size = f.get("size_bytes") or ""
+        lines += [
+            f'if have "{name}" "{size}"; then',
+            f'  echo "  ✓ {name} already downloaded"',
+            "else",
+            f'  echo "  ↓ {name}"',
+            f'  curl -C - -o "$CACHE/{name}" "{f["ftp"]}"',
+            "fi",
+            f'ln -sf "$CACHE/{name}" "raw/{name}"',
+        ]
     lines.append("")
     return "\n".join(lines)
 
@@ -780,17 +1116,17 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
             '  warn "docker not available — only matters if msconvert is missing natively"',
             "fi",
             "",
-            "# ---- msconvert: auto-provisioned from the ProteoWizard image when not installed",
+            "# ---- msconvert. Checked now; the 2 GB image pull is deferred to the end, because pulling it only to",
+            "# abort on a different failed check wastes bandwidth and several minutes.",
+            "NEED_PWIZ_PULL=0",
             'if command -v msconvert >/dev/null 2>&1; then',
             '  ok "msconvert (native)"',
-            '  echo "native" > .pipeline_msconvert 2>/dev/null || true',
             'elif [ "$HAVE_DOCKER" = "1" ]; then',
-            f'  printf "  … pulling {PWIZ_IMAGE} (one-time, ~2GB)\\n"',
-            f'  if docker pull -q {PWIZ_IMAGE} >/dev/null 2>&1; then',
-            '    ok "msconvert (docker, pulled automatically)"',
-            '    echo "docker" > .pipeline_msconvert 2>/dev/null || true',
+            f'  if docker image inspect {PWIZ_IMAGE} >/dev/null 2>&1; then',
+            '    ok "msconvert (docker image already present)"',
             "  else",
-            f'    bad "could not pull {PWIZ_IMAGE} — check your docker login/network"',
+            "    NEED_PWIZ_PULL=1",
+            f'    warn "msconvert will come from {PWIZ_IMAGE} — a ~2GB pull, once, after the other checks pass"',
             "  fi",
             "else",
             '  bad "msconvert missing and docker unavailable. Install ProteoWizard "'
@@ -832,6 +1168,18 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
         '  printf "\\nPreflight failed. Nothing has been downloaded — fix the items marked ✗ and re-run.\\n" >&2',
         "  exit 1",
         "fi",
+    ]
+    if need_convert:
+        out += [
+            '# Everything else passed, so the one expensive bit of provisioning is now worth doing.',
+            'if [ "${NEED_PWIZ_PULL:-0}" = "1" ]; then',
+            f'  printf "  … pulling {PWIZ_IMAGE} (one-time, ~2GB)\\n"',
+            f'  docker pull -q {PWIZ_IMAGE} >/dev/null 2>&1 \\',
+            f'    || {{ printf "  ✗ could not pull {PWIZ_IMAGE}\\n" >&2; exit 1; }}',
+            '  printf "  ✓ msconvert (docker, pulled automatically)\\n"',
+            "fi",
+        ]
+    out += [
         'printf "\\nPreflight passed.\\n"',
         "",
     ]
@@ -885,6 +1233,9 @@ out_*/
 .pipeline/
 progress.jsonl
 *.log
+# Configs with this kit's directory substituted in, written by run_all.sh. The shipped config is the one to keep.
+*.local.xml
+*.local.cfg
 """
 
 
@@ -1056,13 +1407,17 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 "",
                 f"# ---------------------------------------------------------------- {tr['engine_label']} ({tr['run_count']} {tr['kind']} runs)",
                 f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
+                # MaxQuant's workers resolve paths from their own cwd, so the config needs absolute ones. The kit
+                # cannot know where it will be unpacked, so the directory is substituted here, once, per run.
+                f'  sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
+                f'  step "paths in {tr["config"]} resolved against $PWD -> {_local_config(tr["config"])}"',
                 '  step "MaxQuant writes one combined/proc/<step>.finished.txt per internal step; echoing them as they land"',
                 "  watch_maxquant & MQ_WATCH=$!",
                 '  trap \'kill "$MQ_WATCH" 2>/dev/null || true\' EXIT',
                 '  if [ -n "$MQ" ]; then',
-                f'    "$MQ" {tr["config"]} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
+                f'    "$MQ" {_local_config(tr["config"])} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
                 '  elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
-                f'    mono "$MAXQUANT_DIR/bin/MaxQuantCmd.exe" {tr["config"]} \\',
+                f'    mono "$MAXQUANT_DIR/bin/MaxQuantCmd.exe" {_local_config(tr["config"])} \\',
                 '      || fail "MaxQuant (mono) failed — see combined/proc/ for the step it stopped on"',
                 "  else",
                 '    fail "MaxQuant not found — preflight.sh explains how to point at it (MAXQUANT_CMD / MAXQUANT_DIR)"',
@@ -1137,9 +1492,11 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
     return "\n".join(out)
 
 
-def search_kit(accession: str, api_base: str = "", web_base: str = "") -> tuple[bytes, dict]:
-    """A ready-to-run kit for the engine that can actually process this dataset's raw files."""
-    ctx = _kit_context(accession)
+def search_kit(accession: str, api_base: str = "", web_base: str = "", runs: list[str] | None = None) -> tuple[bytes, dict]:
+    """A ready-to-run kit for the engine that can actually process this dataset's raw files.
+
+    `runs` restricts it to a chosen subset of the deposition's runs."""
+    ctx = _kit_context(accession, runs)
     ctx["api_base"] = api_base.rstrip("/")
     ctx["web_base"] = _safe_origin(web_base)
     plan = search_plan(ctx["t"], [f.get("file_name") or "" for f in ctx["raw"]])
@@ -1269,19 +1626,180 @@ def _safe_origin(value: str) -> str:
 
 
 @router.get("/dataset/{accession}/searchkit.zip")
-def dataset_searchkit(accession: str, request: Request, web: str = ""):
-    data, plan = search_kit(accession, _api_base(request), web)
+def dataset_searchkit(accession: str, request: Request, web: str = "", runs: str = ""):
+    data, plan = search_kit(accession, _api_base(request), web, runs=parse_runs(runs))
     name = "search" if len(plan.get("tracks") or []) > 1 else (plan.get("engine") or "search")
     return Response(content=data, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{accession}_{name}_kit.zip"'})
 
 
 @router.get("/dataset/{accession}/pipeline.sh")
-def dataset_pipeline_sh(accession: str, request: Request, web: str = ""):
+def dataset_pipeline_sh(accession: str, request: Request, web: str = "", runs: str = ""):
     """The one-liner: `curl -fsSL <api>/dataset/<acc>/pipeline.sh | bash` runs the whole thing."""
-    _kit_context(accession)  # 404 early for an unknown accession rather than handing back a broken script
+    _kit_context(accession, parse_runs(runs))  # 404 early for an unknown accession rather than handing back a broken script
     return Response(content=bootstrap_sh(accession, _api_base(request), _safe_origin(web)),
                     media_type="text/x-shellscript")
+
+
+# ----------------------------------------------------------------------------- running the pipeline for you
+# The deployed API is a slim container with no .NET, no vendor readers and no room for 500 GB, so it cannot run a
+# search. A local API is a different machine entirely — the researcher's own — and there is no reason to make them
+# copy a command into a terminal when the server is already sitting on the disk the files belong on. These routes
+# therefore only work for a loopback client, unless the operator explicitly opts in.
+RUNS_DIR = ROOT / "reanalysis"
+_ALLOW_RUN_ENV = "PRIDEMAP_ALLOW_LOCAL_RUN"
+
+
+def _is_local(request: Request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "localhost") or os.environ.get(_ALLOW_RUN_ENV) == "1"
+
+
+def _require_local(request: Request):
+    if not _is_local(request):
+        raise HTTPException(403, "the pipeline can only be run by a local PRIDE Map; "
+                                 f"set {_ALLOW_RUN_ENV}=1 on a server that really should run searches")
+
+
+def _selection_key(runs: list[str] | None) -> str:
+    """A short stable id for a run selection, so two different pairs from one dataset get their own run
+    directory instead of overwriting each other's combined/ and progress.jsonl."""
+    keys = sorted({_run_key(r) for r in (runs or []) if _run_key(r)})
+    if not keys:
+        return ""
+    import hashlib
+    return hashlib.sha1("\n".join(keys).encode()).hexdigest()[:8]
+
+
+def run_dir(accession: str, runs: list[str] | None = None) -> pathlib.Path:
+    d = RUNS_DIR / re.sub(r"[^A-Za-z0-9_-]", "", accession)[:32]
+    sel = _selection_key(runs)
+    return d.with_name(f"{d.name}__{sel}") if sel else d
+
+
+def _write_kit(accession: str, api_base: str, web_base: str, runs: list[str] | None = None) -> pathlib.Path:
+    """Unpack the kit into reanalysis/<accession>/ — the same layout the one-liner uses."""
+    data, _ = search_kit(accession, api_base, web_base, runs=runs)
+    d = run_dir(accession, runs)
+    d.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        z.extractall(d)
+    for p in d.glob("*.sh"):
+        p.chmod(0o755)
+    return d
+
+
+def _read_progress(d: pathlib.Path) -> list[dict]:
+    p = d / "progress.jsonl"
+    if not p.exists():
+        return []
+    out = []
+    try:
+        with open(p, errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        continue
+    except OSError:
+        return []
+    return out
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@router.post("/dataset/{accession}/pipeline/start")
+def pipeline_start(accession: str, request: Request, web: str = "", runs: str = ""):
+    """Start the whole reanalysis here, in the background. Returns immediately; poll /pipeline/status.
+
+    `runs` is a comma-separated selection of this dataset's raw files — the two samples you want to compare,
+    say. Each selection gets its own run directory, so starting a different pair does not disturb this one,
+    and the raw cache means files already downloaded for an earlier selection are not fetched again.
+    """
+    _require_local(request)
+    import subprocess
+    sel = parse_runs(runs)
+    d = run_dir(accession, sel)
+    state = d / ".pipeline" / "run.pid"
+    if state.exists():
+        try:
+            if _pid_alive(int(state.read_text().strip())):
+                raise HTTPException(409, "a run is already in progress for this dataset")
+        except ValueError:
+            pass
+    d = _write_kit(accession, _api_base(request), _safe_origin(web), runs=sel)
+    if not (d / "run_all.sh").exists():
+        raise HTTPException(400, "this dataset has no runnable pipeline (nothing for an engine to do)")
+    (d / ".pipeline").mkdir(exist_ok=True)
+    log = open(d / "run.log", "ab", buffering=0)
+    proc = subprocess.Popen(["bash", "run_all.sh"], cwd=d, stdout=log, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+    (d / ".pipeline" / "run.pid").write_text(str(proc.pid))
+    return {"accession": accession, "started": True, "pid": proc.pid, "dir": str(d), "runs": sel}
+
+
+@router.get("/dataset/{accession}/pipeline/status")
+def pipeline_status(accession: str, request: Request, tail: int = 40):
+    """Where the run has got to: one entry per stage, plus the last lines of output."""
+    local = _is_local(request)
+    d = run_dir(accession)
+    plan = dataset_search_plan(accession)
+    events = _read_progress(d)
+    by_stage: dict[str, dict] = {}
+    for e in events:
+        sid = e.get("stage") or ""
+        if not sid:
+            continue
+        s = by_stage.setdefault(sid, {"state": "pending", "seconds": None, "steps": [], "message": None})
+        ev = e.get("event")
+        if ev == "stage_started":
+            s["state"] = "running"
+        elif ev == "stage_finished":
+            s["state"] = "done"
+            s["seconds"] = e.get("seconds")
+        elif ev == "stage_skipped":
+            s["state"] = "done"
+            s["message"] = "already done"
+        elif ev == "stage_failed":
+            s["state"] = "failed"
+            s["message"] = e.get("message")
+        elif ev in ("substage", "maxquant_step", "uploaded", "warning"):
+            s["steps"].append(e.get("message"))
+    pid_file = d / ".pipeline" / "run.pid"
+    running = False
+    if pid_file.exists():
+        try:
+            running = _pid_alive(int(pid_file.read_text().strip()))
+        except ValueError:
+            running = False
+    stages = []
+    for s in plan.get("stages") or []:
+        st = by_stage.get(s["id"], {})
+        stages.append({**s, "state": st.get("state", "pending"), "seconds": st.get("seconds"),
+                       "steps": (st.get("steps") or [])[-6:], "message": st.get("message")})
+    log_lines: list[str] = []
+    lg = d / "run.log"
+    if lg.exists():
+        try:
+            log_lines = lg.read_text(errors="replace").splitlines()[-max(1, min(tail, 200)):]
+        except OSError:
+            pass
+    finished = any(e.get("event") == "run_finished" for e in events)
+    failed = any(e.get("event") == "stage_failed" for e in events)
+    return {"accession": accession, "can_run": local, "exists": d.exists(), "running": running,
+            "finished": finished, "failed": failed, "stages": stages, "log": log_lines,
+            "uploads": [e.get("upload_id") for e in events if e.get("event") == "uploaded" and e.get("upload_id")],
+            "dir": str(d) if d.exists() else None}
 
 
 # ----------------------------------------------------------------------------- corrections feed
