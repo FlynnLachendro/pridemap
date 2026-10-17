@@ -583,6 +583,7 @@ def compare(accessions: str):
 
 
 # ----------------------------------------------------------------------------- reanalyse
+import urllib.parse
 import urllib.request
 
 PROTEOMES = {9606: ("UP000005640", "Homo sapiens"), 10090: ("UP000000589", "Mus musculus"), 10116: ("UP000002494", "Rattus norvegicus"),
@@ -1000,8 +1001,8 @@ def analyse_run(body: RunIn):
         dropped_contaminants = int(flag.sum())
         df = df[~flag]
     ids = df[body.id_column].astype(str).where(df[body.id_column].notna(), "").to_numpy()
-    A = df[body.group_a].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-    B = df[body.group_b].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    A = np.array(df[body.group_a].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float), copy=True)
+    B = np.array(df[body.group_b].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float), copy=True)
     A[~(A > 0)] = np.nan  # 0 / negative / NaN = missing
     B[~(B > 0)] = np.nan
     allv = np.concatenate([A.ravel(), B.ravel()])
@@ -1086,6 +1087,69 @@ def analyse_odetta(body: OdettaIn):
     tail = lambda s: "\n".join(s.strip().splitlines()[-30:])  # noqa: E731
     return {"ok": rc == 0, "returncode": rc, "error": None if rc == 0 else f"script exited with {rc}",
             "stdout": tail(out), "stderr": tail(err), "outputs": outputs, "outdir": str(outdir.relative_to(ROOT)), "command": " ".join(cmd)}
+
+
+# ----------------------------------------------------------------------------- protein (UniProt)
+ORG_TAXON = {"homo sapiens": 9606, "mus musculus": 10090, "rattus norvegicus": 10116, "saccharomyces cerevisiae": 4932,
+             "arabidopsis thaliana": 3702, "escherichia coli": 562, "drosophila melanogaster": 7227, "caenorhabditis elegans": 6239, "danio rerio": 7955}
+
+
+def tryptic_peptides(seq: str, lo=7, hi=25):
+    """Count peptides trypsin would produce (cut after K/R unless followed by P) with a usable length; a quick 'can it be seen' proxy."""
+    peps, cur = [], ""
+    for i, aa in enumerate(seq):
+        cur += aa
+        nxt = seq[i + 1] if i + 1 < len(seq) else ""
+        if aa in "KR" and nxt != "P":
+            peps.append(cur)
+            cur = ""
+    if cur:
+        peps.append(cur)
+    return sum(1 for x in peps if lo <= len(x) <= hi), len(peps)
+
+
+@app.get("/protein")
+def protein(name: str, organism: Optional[str] = None):
+    """UniProt lookup for a gene/protein name: what it is, where it's expressed, how detectable it is by tryptic LC-MS."""
+    con = db()
+    con.execute("CREATE TABLE IF NOT EXISTS protein_cache (key TEXT PRIMARY KEY, json TEXT, fetched_at TEXT)")
+    taxon = ORG_TAXON.get((norm_org(organism) or "").lower()) if organism else None
+    key = f"{name.strip().upper()}|{taxon or ''}"
+    row = con.execute("SELECT json FROM protein_cache WHERE key=?", (key,)).fetchone()
+    if row:
+        return json.loads(row[0])
+    q = f"(gene_exact:{name} OR protein_name:{name})" + (f" AND organism_id:{taxon}" if taxon else "") + " AND reviewed:true"
+    url = ("https://rest.uniprot.org/uniprotkb/search?query=" + urllib.parse.quote(q)
+           + "&fields=accession,protein_name,gene_primary,organism_name,cc_tissue_specificity,cc_subcellular_location,cc_function,sequence,length,mass&format=json&size=1")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            res = json.load(r).get("results", [])
+    except Exception as e:
+        return {"found": False, "name": name, "error": str(e)[:200]}
+    if not res:
+        out = {"found": False, "name": name, "organism": organism}
+    else:
+        r = res[0]
+        seq = r.get("sequence", {}).get("value", "")
+        usable, total = tryptic_peptides(seq)
+        comments = {c["commentType"]: c for c in r.get("comments", [])}
+        tissue = (comments.get("TISSUE SPECIFICITY", {}).get("texts") or [{}])[0].get("value")
+        func = (comments.get("FUNCTION", {}).get("texts") or [{}])[0].get("value")
+        locs = [l["location"]["value"] for l in comments.get("SUBCELLULAR LOCATION", {}).get("subcellularLocations", [])][:4]
+        out = {
+            "found": True, "name": name, "accession": r["primaryAccession"],
+            "protein_name": r.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value"),
+            "gene": (r.get("genes") or [{}])[0].get("geneName", {}).get("value"),
+            "organism": r.get("organism", {}).get("scientificName"),
+            "length": r.get("sequence", {}).get("length"), "mass_kda": round((r.get("sequence", {}).get("molWeight") or 0) / 1000, 1),
+            "tissue_specificity": tissue, "function": (func or "")[:400], "locations": locs,
+            "tryptic_peptides_usable": usable, "tryptic_peptides_total": total,
+            "detectability": ("good" if usable >= 8 else "fair" if usable >= 4 else "poor") + f": trypsin yields {usable} peptides of usable length (7–25 aa)",
+            "url": f"https://www.uniprot.org/uniprotkb/{r['primaryAccession']}/entry",
+        }
+    con.execute("INSERT OR REPLACE INTO protein_cache VALUES (?,?,?)", (key, json.dumps(out), dt.datetime.now(dt.UTC).isoformat()))
+    con.commit()
+    return out
 
 
 @app.get("/")

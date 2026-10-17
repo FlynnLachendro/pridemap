@@ -3,6 +3,7 @@ import { useEffect, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ask, search, TAG_LABEL, pretty, type AskOut, type Dropped, type Filters, type Result, type Stats } from "@/lib/api";
 import { ResultCard } from "@/components/result-card";
+import { ProteinCard } from "@/components/protein-card";
 import { Button } from "@/components/ui/button";
 
 const EXAMPLES = [
@@ -162,6 +163,10 @@ export function Ask({ stats }: { stats: Stats | null }) {
                 ))}
               </ul>
             </div>
+          )}
+
+          {(out.filters.q || (out.dropped ?? []).some((d) => d.key === "q")) && (
+            <ProteinCard name={String(out.filters.q ?? (out.dropped ?? []).find((d) => d.key === "q")?.value ?? "")} organism={out.filters.organism ? String(out.filters.organism) : undefined} tissue={out.filters.tissue ? String(out.filters.tissue) : undefined} />
           )}
 
           <div className="grid lg:grid-cols-[220px_1fr] gap-5 items-start">

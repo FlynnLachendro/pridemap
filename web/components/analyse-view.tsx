@@ -1,0 +1,481 @@
+"use client";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { API } from "@/lib/api";
+
+type Group = { stem: string; columns: string[]; fill: number };
+type Inspect = {
+  upload_id: string; file: string; n_rows: number; n_cols: number;
+  id_columns: string[]; numeric_columns: string[]; suggested_groups: Group[]; contaminant_columns: string[];
+  odetta_compatible: boolean; odetta_prefixes: string[];
+};
+type Row = { id: string; log2fc: number | null; t: number | null; p: number | null; q: number | null; mean_a: number | null; mean_b: number | null; n_a: number; n_b: number };
+type Pt = { id: string; log2fc: number | null; neglog10p: number | null; sig: "up" | "down" | "ns" };
+type RunOut = {
+  summary: { n_proteins: number; n_dropped_contaminants: number; n_tested: number; n_sig_q05: number; n_up: number; n_down: number; log_transform: string; p99_raw: number | null; min_valid: number; sign: string; test: string };
+  columns: string[]; rows: Row[]; volcano: Pt[];
+};
+type OdettaOut = {
+  ok: boolean; error: string | null; stdout: string; stderr: string; command?: string; outdir?: string;
+  outputs: { name: string; rows: number; columns: string[]; head: Record<string, unknown>[]; error?: string }[];
+};
+type Mode = "welch" | "odetta";
+type SortKey = keyof Row;
+
+const CUSTOM = "__custom__";
+const PAGE = 300;
+
+async function jfetch<T>(r: Promise<Response>): Promise<T> {
+  const res = await r;
+  if (!res.ok) {
+    let msg = `${res.status}`;
+    try { const j = await res.json(); msg += ` ${j.detail ?? JSON.stringify(j)}`; } catch { msg += ` ${await res.text()}`; }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+const fmt = (v: number | null | undefined, d = 3) => (v === null || v === undefined ? "—" : Math.abs(v) < 1e-3 && v !== 0 ? v.toExponential(2) : v.toFixed(d));
+const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+
+export function AnalyseView() {
+  const params = useSearchParams();
+  const router = useRouter();
+  const uploadParam = params.get("upload");
+
+  const [inspect, setInspect] = useState<Inspect | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [idCol, setIdCol] = useState("");
+  const [stemA, setStemA] = useState("");
+  const [stemB, setStemB] = useState("");
+  const [colsA, setColsA] = useState<string[]>([]);
+  const [colsB, setColsB] = useState<string[]>([]);
+  const [logT, setLogT] = useState<"auto" | "log2" | "none">("auto");
+  const [minValid, setMinValid] = useState(2);
+  const [contam, setContam] = useState("");
+  const [mode, setMode] = useState<Mode>("welch");
+  const [prefix, setPrefix] = useState("Set1_Brain");
+  const [name, setName] = useState("batch");
+  const [result, setResult] = useState<RunOut | null>(null);
+  const [odetta, setOdetta] = useState<OdettaOut | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const loadedId = inspect?.upload_id ?? null;
+
+  const applyInspect = (d: Inspect) => {
+    setInspect(d);
+    setIdCol(d.id_columns[0] ?? "");
+    const g = d.suggested_groups;
+    setStemA(g[0]?.stem ?? CUSTOM); setColsA(g[0]?.columns ?? []);
+    setStemB(g[1]?.stem ?? CUSTOM); setColsB(g[1]?.columns ?? []);
+    setContam("");
+    setMode("welch");
+    setPrefix(d.odetta_prefixes[0] ?? "Set1_Brain");
+    setResult(null); setOdetta(null); setErr(null);
+  };
+
+  // ?upload=<id> re-opens an existing upload
+  useEffect(() => {
+    if (!uploadParam || uploadParam === loadedId) return;
+    let live = true;
+    jfetch<Inspect>(fetch(`${API}/analyse/${encodeURIComponent(uploadParam)}`))
+      .then((d) => { if (live) applyInspect(d); })
+      .catch((e) => { if (live) setErr(String(e)); });
+    return () => { live = false; };
+  }, [uploadParam, loadedId]);
+  const reopening = !!uploadParam && uploadParam !== loadedId && !err && !busy;
+
+  const open = (d: Inspect) => { applyInspect(d); router.replace(`/analyse?upload=${encodeURIComponent(d.upload_id)}`); };
+
+  const upload = async (file: File) => {
+    setErr(null); setBusy(`Uploading ${file.name} (${(file.size / 1e6).toFixed(1)} MB) and reading the columns…`);
+    try {
+      const fd = new FormData(); fd.append("file", file);
+      open(await jfetch<Inspect>(fetch(`${API}/analyse/inspect`, { method: "POST", body: fd })));
+    } catch (e) { setErr(String(e)); } finally { setBusy(null); }
+  };
+  const useExample = async () => {
+    setErr(null); setBusy("Loading Odetta's lyso-IP batch 2 (9k proteins × 1.9k columns)…");
+    try {
+      const { upload_id } = await jfetch<{ upload_id: string }>(fetch(`${API}/analyse/example`));
+      open(await jfetch<Inspect>(fetch(`${API}/analyse/${upload_id}`)));
+    } catch (e) { setErr(String(e)); } finally { setBusy(null); }
+  };
+
+  const pickGroup = (which: "a" | "b", stem: string) => {
+    const g = inspect?.suggested_groups.find((x) => x.stem === stem);
+    if (which === "a") { setStemA(stem); if (g) setColsA(g.columns); } else { setStemB(stem); if (g) setColsB(g.columns); }
+  };
+
+  const run = async () => {
+    if (!inspect) return;
+    setErr(null); setResult(null); setOdetta(null);
+    try {
+      if (mode === "odetta") {
+        setBusy("Running Odetta's TESE pipeline (tag effect, input-normalised enrichment, mock-controlled dod)…");
+        setOdetta(await jfetch<OdettaOut>(fetch(`${API}/analyse/odetta`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ upload_id: inspect.upload_id, prefix, name }) })));
+      } else {
+        setBusy("Welch t-test per protein + Benjamini–Hochberg…");
+        const body = { upload_id: inspect.upload_id, id_column: idCol, group_a: colsA, group_b: colsB, log_transform: logT, min_valid: minValid, contaminant_column: contam || null };
+        setResult(await jfetch<RunOut>(fetch(`${API}/analyse/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })));
+      }
+    } catch (e) { setErr(String(e)); } finally { setBusy(null); }
+  };
+
+  const canRun = !!inspect && !busy && (mode === "odetta" ? !!prefix && !!name : !!idCol && colsA.length >= 2 && colsB.length >= 2);
+
+  return (
+    <div className="grid gap-5">
+      <div>
+        <h1 className="text-3xl font-extrabold">Analyse a protein table</h1>
+        <p className="text-muted-foreground max-w-2xl">
+          Upload the protein table a search engine gave you (MaxQuant proteinGroups, DIA-NN, Spectronaut…). Pick which samples are group A and group B, and get the standard first look: log2 fold change, a Welch t-test per protein, FDR-corrected q-values and a volcano plot.
+        </p>
+      </div>
+
+      {/* (a) upload */}
+      <div
+        className={`rounded-xl border-2 border-dashed bg-card p-5 grid gap-3 ${dragging ? "border-teal bg-teal-soft/40" : ""}`}
+        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files?.[0]; if (f) upload(f); }}
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <button type="button" onClick={() => fileRef.current?.click()} disabled={!!busy} className="h-11 px-5 rounded-xl bg-teal text-white font-bold disabled:opacity-50">Choose a file</button>
+          <span className="text-sm text-muted-foreground">or drop a .csv / .tsv / .txt / .xlsx here (up to 200 MB)</span>
+          <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = ""; }} />
+          <button type="button" onClick={useExample} disabled={!!busy} className="h-11 px-4 rounded-xl border font-bold disabled:opacity-50">Use the example table (Odetta&apos;s lyso‑IP batch 2)</button>
+        </div>
+        {inspect && (
+          <p className="text-sm">
+            <span className="font-bold">{inspect.file}</span> · <span className="tabular">{inspect.n_rows.toLocaleString()}</span> rows × <span className="tabular">{inspect.n_cols.toLocaleString()}</span> columns · {inspect.suggested_groups.length} sample groups detected
+            {inspect.odetta_compatible && <span className="ml-2 rounded-full px-2 py-0.5 text-xs font-bold bg-ok-soft text-ok">lyso‑IP layout: Odetta&apos;s pipeline available</span>}
+          </p>
+        )}
+        {busy && <p className="text-sm text-teal">{busy}</p>}
+        {reopening && <p className="text-sm text-teal">Re-opening upload {uploadParam}…</p>}
+        {err && <p className="text-sm text-warn">{err}</p>}
+      </div>
+
+      {/* (b) choose groups */}
+      {inspect && (
+        <div className="rounded-xl border bg-card p-5 grid gap-4">
+          <div className="flex flex-wrap gap-2">
+            <ModeButton active={mode === "welch"} onClick={() => setMode("welch")}>Group A vs group B</ModeButton>
+            <ModeButton active={mode === "odetta"} onClick={() => setMode("odetta")} disabled={!inspect.odetta_compatible} title={inspect.odetta_compatible ? "" : "needs <prefix>_IP_LTKI.N and <prefix>_IP_LTWT.N columns"}>Odetta&apos;s TESE pipeline</ModeButton>
+          </div>
+
+          {mode === "welch" ? (
+            <>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <GroupPicker label="Group A" hint="the baseline (e.g. WT, control)" stem={stemA} cols={colsA} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("a", s)} onCols={(c) => { setColsA(c); setStemA(CUSTOM); }} />
+                <GroupPicker label="Group B" hint="the condition (e.g. KO, treated)" stem={stemB} cols={colsB} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("b", s)} onCols={(c) => { setColsB(c); setStemB(CUSTOM); }} />
+              </div>
+              <div className="grid sm:grid-cols-4 gap-3 text-sm">
+                <label className="grid gap-1">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">protein id column</span>
+                  <select value={idCol} onChange={(e) => setIdCol(e.target.value)} className="h-10 rounded-xl border bg-card px-3">
+                    {inspect.id_columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                    {!inspect.id_columns.length && <option value="">(no text id column found)</option>}
+                  </select>
+                </label>
+                <label className="grid gap-1">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">intensities are</span>
+                  <select value={logT} onChange={(e) => setLogT(e.target.value as typeof logT)} className="h-10 rounded-xl border bg-card px-3">
+                    <option value="auto">auto-detect (log2 if raw)</option>
+                    <option value="log2">raw → take log2</option>
+                    <option value="none">already log-scale</option>
+                  </select>
+                </label>
+                <label className="grid gap-1">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">min values per group</span>
+                  <input type="number" min={2} max={50} value={minValid} onChange={(e) => setMinValid(Math.max(2, Number(e.target.value) || 2))} className="h-10 rounded-xl border bg-card px-3 tabular" />
+                </label>
+                <label className="grid gap-1">
+                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">drop contaminants by</span>
+                  <select value={contam} onChange={(e) => setContam(e.target.value)} className="h-10 rounded-xl border bg-card px-3">
+                    <option value="">(don&apos;t filter)</option>
+                    {inspect.contaminant_columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </label>
+              </div>
+            </>
+          ) : (
+            <div className="grid sm:grid-cols-[1fr_1fr_2fr] gap-3 text-sm">
+              <label className="grid gap-1">
+                <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">column prefix</span>
+                <select value={prefix} onChange={(e) => setPrefix(e.target.value)} className="h-10 rounded-xl border bg-card px-3">
+                  {inspect.odetta_prefixes.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </label>
+              <label className="grid gap-1">
+                <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">batch name</span>
+                <input value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9_-]/g, "_"))} className="h-10 rounded-xl border bg-card px-3 font-mono" />
+              </label>
+              <p className="text-muted-foreground self-end">
+                Runs <code>analysis/tese_lysoip_analysis.py</code>: tag‑vs‑tag TESE effect, input‑normalised enrichment and the mock‑controlled dod, using the <code>{prefix}_IP_*</code> and <code>{prefix}_WC_*</code> columns. Positive = TESE‑high.
+              </p>
+            </div>
+          )}
+
+          <div className="flex items-center gap-3">
+            <button type="button" onClick={run} disabled={!canRun} className="h-11 px-6 rounded-xl bg-teal text-white font-bold disabled:opacity-50">{busy ? "Running…" : "Run"}</button>
+            {mode === "welch" && <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>}
+          </div>
+        </div>
+      )}
+
+      {/* (d) results */}
+      {result && <WelchResults out={result} uploadId={inspect?.upload_id ?? "table"} />}
+      {odetta && <OdettaResults out={odetta} />}
+    </div>
+  );
+}
+
+function ModeButton({ active, disabled, title, onClick, children }: { active: boolean; disabled?: boolean; title?: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} title={title} className={`h-9 px-4 rounded-full border text-sm font-bold disabled:opacity-40 ${active ? "bg-teal text-white border-teal" : "bg-card"}`}>{children}</button>
+  );
+}
+
+function GroupPicker({ label, hint, stem, cols, groups, numeric, onStem, onCols }: {
+  label: string; hint: string; stem: string; cols: string[]; groups: Group[]; numeric: string[]; onStem: (s: string) => void; onCols: (c: string[]) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [editing, setEditing] = useState(false);
+  const shown = useMemo(() => {
+    const f = filter.toLowerCase();
+    return numeric.filter((c) => !f || c.toLowerCase().includes(f)).slice(0, 400);
+  }, [numeric, filter]);
+  const toggle = (c: string) => onCols(cols.includes(c) ? cols.filter((x) => x !== c) : [...cols, c]);
+  return (
+    <div className="grid gap-2 text-sm">
+      <div>
+        <div className="text-xs uppercase tracking-wide text-muted-foreground font-bold">{label} <span className="normal-case font-normal">· {hint}</span></div>
+        <select value={stem} onChange={(e) => onStem(e.target.value)} className="mt-1 w-full h-10 rounded-xl border bg-card px-3">
+          {groups.map((g) => <option key={g.stem} value={g.stem}>{g.stem} ({g.columns.length} samples, {Math.round(g.fill * 100)}% filled)</option>)}
+          <option value={CUSTOM}>custom selection…</option>
+        </select>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {cols.map((c) => <span key={c} className="rounded-full bg-secondary px-2 py-0.5 text-xs font-mono">{c}</span>)}
+        {!cols.length && <span className="text-xs text-muted-foreground">no columns yet</span>}
+      </div>
+      <button type="button" onClick={() => setEditing((v) => !v)} className="justify-self-start text-xs underline text-muted-foreground">{editing ? "done" : "edit columns"}</button>
+      {editing && (
+        <div className="rounded-lg border p-2 grid gap-1">
+          <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter columns" className="h-8 rounded-lg border bg-card px-2 text-xs" />
+          <div className="max-h-48 overflow-y-auto grid gap-0.5">
+            {shown.map((c) => (
+              <label key={c} className="flex items-center gap-2 text-xs font-mono">
+                <input type="checkbox" checked={cols.includes(c)} onChange={() => toggle(c)} />{c}
+              </label>
+            ))}
+            {shown.length === 400 && <div className="text-xs text-muted-foreground">showing first 400; narrow the filter</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Tile({ label, value, cls }: { label: string; value: number; cls?: string }) {
+  return (
+    <div className={`rounded-xl border p-4 ${cls ?? "bg-card"}`}>
+      <div className="text-3xl font-extrabold tabular">{value.toLocaleString()}</div>
+      <div className="text-xs uppercase tracking-wide text-muted-foreground font-bold">{label}</div>
+    </div>
+  );
+}
+
+function WelchResults({ out, uploadId }: { out: RunOut; uploadId: string }) {
+  const s = out.summary;
+  return (
+    <div className="grid gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Tile label="proteins tested" value={s.n_tested} />
+        <Tile label="significant (q < 0.05)" value={s.n_sig_q05} />
+        <Tile label="up: higher in B" value={s.n_up} cls="bg-peak-soft text-peak" />
+        <Tile label="down: higher in A" value={s.n_down} cls="bg-teal-soft text-teal" />
+      </div>
+      <div className="text-xs text-muted-foreground grid gap-0.5">
+        <div><b>log2FC</b> = log2(mean B ÷ mean A): +1 means twice as much in B, −1 means half. {s.sign}.</div>
+        <div><b>q</b> = the t-test p-value corrected for testing {s.n_tested.toLocaleString()} proteins at once (Benjamini–Hochberg); q &lt; 0.05 means about 5% of the proteins called significant are expected to be false positives.</div>
+        <div>{s.n_proteins.toLocaleString()} rows in the table{s.n_dropped_contaminants ? `, ${s.n_dropped_contaminants} dropped as contaminants` : ""}; rows with fewer than {s.min_valid} values in either group were skipped. Intensities {s.log_transform === "log2" ? `were log2-transformed (99th percentile of raw values ≈ ${s.p99_raw?.toLocaleString()})` : "were used as given (already log-scale)"}. {s.test}.</div>
+      </div>
+      <Volcano points={out.volcano} />
+      <ResultsTable rows={out.rows} columns={out.columns} uploadId={uploadId} />
+    </div>
+  );
+}
+
+function niceTicks(min: number, max: number, n = 6): number[] {
+  const span = max - min || 1;
+  const raw = span / n;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw) ?? mag;
+  const out: number[] = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) out.push(Number(v.toFixed(6)));
+  return out;
+}
+
+function Volcano({ points }: { points: Pt[] }) {
+  const [hover, setHover] = useState<Pt | null>(null);
+  const W = 760, H = 440, m = { l: 56, r: 16, t: 20, b: 48 };
+  const { pts, xmax, ymax, sx, sy } = useMemo(() => {
+    const pts = points.filter((p) => p.log2fc !== null && p.neglog10p !== null) as (Pt & { log2fc: number; neglog10p: number })[];
+    const xmax = Math.max(1, ...pts.map((p) => Math.abs(p.log2fc))) * 1.05;
+    const ymax = Math.max(1, ...pts.map((p) => p.neglog10p)) * 1.05;
+    const sx = (x: number) => m.l + ((x + xmax) / (2 * xmax)) * (W - m.l - m.r);
+    const sy = (y: number) => H - m.b - (y / ymax) * (H - m.t - m.b);
+    return { pts, xmax, ymax, sx, sy };
+  }, [points, m.l, m.r, m.t, m.b]);
+  const xt = niceTicks(-xmax, xmax), yt = niceTicks(0, ymax);
+  const r = pts.length > 5000 ? 1.8 : 2.6;
+  const order = [...pts.filter((p) => p.sig === "ns"), ...pts.filter((p) => p.sig !== "ns")];
+  return (
+    <div className="rounded-xl border bg-card p-3 grid gap-1">
+      <div className="flex flex-wrap items-center gap-3 text-xs px-1">
+        <span className="font-bold">Volcano</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> up in B (q &lt; 0.05)</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> down in B (q &lt; 0.05)</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-muted-foreground/40" /> not significant</span>
+        <span className="ml-auto font-mono text-muted-foreground min-h-4">{hover ? `${hover.id} · log2FC ${fmt(hover.log2fc, 2)} · p ${hover.neglog10p === null ? "—" : Math.pow(10, -hover.neglog10p).toExponential(2)}` : "hover a point"}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-[760px] mx-auto block" role="img" aria-label="volcano plot: log2 fold change against -log10 p">
+          {yt.map((v) => <line key={`gy${v}`} x1={m.l} x2={W - m.r} y1={sy(v)} y2={sy(v)} className="text-border" stroke="currentColor" strokeWidth={0.5} />)}
+          <line x1={sx(0)} x2={sx(0)} y1={m.t} y2={H - m.b} className="text-muted-foreground" stroke="currentColor" strokeWidth={0.8} strokeDasharray="3 3" />
+          <line x1={m.l} x2={W - m.r} y1={H - m.b} y2={H - m.b} className="text-foreground" stroke="currentColor" />
+          <line x1={m.l} x2={m.l} y1={m.t} y2={H - m.b} className="text-foreground" stroke="currentColor" />
+          {xt.map((v) => (
+            <g key={`x${v}`} className="text-muted-foreground" fill="currentColor" stroke="currentColor">
+              <line x1={sx(v)} x2={sx(v)} y1={H - m.b} y2={H - m.b + 5} />
+              <text x={sx(v)} y={H - m.b + 18} textAnchor="middle" fontSize={11} stroke="none">{v}</text>
+            </g>
+          ))}
+          {yt.map((v) => (
+            <g key={`y${v}`} className="text-muted-foreground" fill="currentColor" stroke="currentColor">
+              <line x1={m.l - 5} x2={m.l} y1={sy(v)} y2={sy(v)} />
+              <text x={m.l - 8} y={sy(v) + 4} textAnchor="end" fontSize={11} stroke="none">{v}</text>
+            </g>
+          ))}
+          <text x={(m.l + W - m.r) / 2} y={H - 10} textAnchor="middle" fontSize={12} className="text-foreground" fill="currentColor">log2 fold change (B − A)</text>
+          <text x={14} y={(m.t + H - m.b) / 2} textAnchor="middle" fontSize={12} transform={`rotate(-90 14 ${(m.t + H - m.b) / 2})`} className="text-foreground" fill="currentColor">−log10 p</text>
+          {order.map((p, i) => (
+            <circle
+              key={`${p.id}-${i}`} cx={sx(p.log2fc)} cy={sy(p.neglog10p)} r={r}
+              className={p.sig === "up" ? "text-peak" : p.sig === "down" ? "text-teal" : "text-muted-foreground"}
+              fill="currentColor" opacity={p.sig === "ns" ? 0.35 : 0.9}
+              onMouseEnter={() => setHover(p)} onMouseLeave={() => setHover(null)}
+            />
+          ))}
+          {hover && hover.log2fc !== null && hover.neglog10p !== null && (
+            <circle cx={sx(hover.log2fc)} cy={sy(hover.neglog10p)} r={r + 3} fill="none" className="text-foreground" stroke="currentColor" strokeWidth={1.2} pointerEvents="none" />
+          )}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+const COL_LABEL: Record<string, string> = { id: "protein", log2fc: "log2FC", p: "p", q: "q", t: "t", mean_a: "mean A", mean_b: "mean B", n_a: "n A", n_b: "n B" };
+
+function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: string[]; uploadId: string }) {
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "p", dir: 1 });
+  const [all, setAll] = useState(false);
+  const [q, setQ] = useState("");
+  const sorted = useMemo(() => {
+    const f = q.toLowerCase();
+    const base = f ? rows.filter((r) => r.id.toLowerCase().includes(f)) : rows;
+    return [...base].sort((a, b) => {
+      const va = a[sort.key], vb = b[sort.key];
+      if (va === null || va === undefined) return 1;
+      if (vb === null || vb === undefined) return -1;
+      return (va < vb ? -1 : va > vb ? 1 : 0) * sort.dir;
+    });
+  }, [rows, sort, q]);
+  const shown = all ? sorted : sorted.slice(0, PAGE);
+  const clickSort = (key: SortKey) => setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: key === "id" ? 1 : key === "p" || key === "q" ? 1 : -1 }));
+  const download = () => {
+    const csv = [columns.join(","), ...rows.map((r) => columns.map((c) => csvCell(r[c as SortKey])).join(","))].join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a"); a.href = url; a.download = `analyse_${uploadId}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <div className="rounded-xl border bg-card grid gap-0">
+      <div className="flex flex-wrap items-center gap-3 p-3 border-b text-sm">
+        <span className="font-bold">Results</span>
+        <span className="text-xs text-muted-foreground">{rows.length.toLocaleString()} rows returned (every q &lt; 0.05 hit plus the top 2,000 by p). Click a header to sort.</span>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="find a protein" className="h-8 rounded-lg border bg-card px-2 text-xs ml-auto" />
+        <button type="button" onClick={download} className="h-8 px-3 rounded-lg border text-xs font-bold">download CSV</button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b">
+              {columns.map((c) => (
+                <th key={c} onClick={() => clickSort(c as SortKey)} className={`p-2 text-xs uppercase tracking-wide text-muted-foreground cursor-pointer select-none whitespace-nowrap ${c === "id" ? "text-left" : "text-right"}`}>
+                  {COL_LABEL[c] ?? c}{sort.key === c ? (sort.dir === 1 ? " ↑" : " ↓") : ""}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((r, i) => {
+              const sig = r.q !== null && r.q < 0.05;
+              const cls = sig ? (r.log2fc ?? 0) > 0 ? "text-peak" : "text-teal" : "";
+              return (
+                <tr key={`${r.id}-${i}`} className="border-b last:border-0">
+                  {columns.map((c) => {
+                    const v = r[c as SortKey];
+                    return (
+                      <td key={c} className={`p-2 tabular whitespace-nowrap ${c === "id" ? "text-left font-mono" : "text-right"} ${c === "log2fc" || c === "q" ? `font-bold ${cls}` : ""}`}>
+                        {c === "id" ? String(v) : typeof v === "number" && (c === "n_a" || c === "n_b") ? v : fmt(v as number | null)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {sorted.length > PAGE && (
+        <button type="button" onClick={() => setAll((v) => !v)} className="p-3 text-xs underline text-muted-foreground text-left">{all ? `show first ${PAGE}` : `show all ${sorted.length.toLocaleString()}`}</button>
+      )}
+    </div>
+  );
+}
+
+const cell = (v: unknown) => (v === null || v === undefined ? "—" : typeof v === "number" ? (Number.isInteger(v) ? v : fmt(v)) : typeof v === "boolean" ? String(v) : String(v));
+
+function OdettaResults({ out }: { out: OdettaOut }) {
+  return (
+    <div className="grid gap-4">
+      <div className={`rounded-xl border p-4 ${out.ok ? "border-ok bg-ok-soft/40" : "border-warn bg-warn-soft/40"}`}>
+        <div className="font-bold text-lg">{out.ok ? "Odetta's pipeline finished" : "Odetta's pipeline failed"}</div>
+        {out.error && <p className="mt-1 text-sm text-warn">{out.error}</p>}
+        {out.stdout && <pre className="mt-2 text-xs whitespace-pre-wrap">{out.stdout}</pre>}
+        {!out.ok && out.stderr && <pre className="mt-2 text-xs whitespace-pre-wrap text-warn">{out.stderr}</pre>}
+        {out.outdir && <p className="mt-2 text-xs text-muted-foreground">Full CSVs are in <code>{out.outdir}/</code>. Sign convention: positive = TESE‑high.</p>}
+      </div>
+      {out.outputs.map((o) => (
+        <div key={o.name} className="rounded-xl border bg-card">
+          <div className="p-3 border-b text-sm"><span className="font-mono font-bold">{o.name}</span> <span className="text-muted-foreground">· {o.rows.toLocaleString()} rows · showing first {o.head.length}</span>{o.error && <span className="text-warn"> · {o.error}</span>}</div>
+          <div className="overflow-x-auto">
+            <table className="text-xs">
+              <thead><tr className="border-b">{o.columns.map((c) => <th key={c} className="p-2 text-left whitespace-nowrap text-muted-foreground uppercase tracking-wide">{c}</th>)}</tr></thead>
+              <tbody>
+                {o.head.map((r, i) => (
+                  <tr key={i} className="border-b last:border-0">{o.columns.map((c) => <td key={c} className="p-2 tabular whitespace-nowrap">{cell(r[c])}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}

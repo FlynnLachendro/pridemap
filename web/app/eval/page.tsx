@@ -31,7 +31,7 @@ export default async function EvalPage() {
 
       <section className="grid gap-3">
         <h2 className="text-2xl">Humans vs model (gold set)</h2>
-        {d?.report ? (
+        {d?.report && d.report.overall.n > 0 ? (
           <>
             <p className="text-sm">Across {d.report.rows} hand‑labelled datasets, the model agreed with the bioinformaticians on <b className="tabular">{pct(d.report.overall.accuracy)}</b> of {d.report.overall.n} labelled tags.</p>
             <div className="rounded-xl border bg-card overflow-x-auto">
