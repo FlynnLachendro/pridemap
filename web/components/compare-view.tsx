@@ -47,14 +47,14 @@ export function CompareView() {
   return (
     <div className="grid gap-5">
       <div>
-        <h1 className="text-3xl font-extrabold">Can I compare these datasets?</h1>
+        <h1 className="text-3xl">Can I compare these datasets?</h1>
         <p className="text-muted-foreground max-w-2xl">Before running group‑A‑vs‑B stats across datasets, the methods have to match. This lines up the tags side by side and says what would break a comparison.</p>
       </div>
       <form className="flex gap-2 flex-col sm:flex-row" onSubmit={(e) => { e.preventDefault(); go(input); }}>
-        <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="PXD007653, PXD002801" className="flex-1 h-11 rounded-xl border bg-card px-4 font-mono text-sm outline-none focus:ring-2 ring-teal" aria-label="accessions, comma separated" />
-        <button type="submit" className="h-11 px-5 rounded-xl bg-teal text-white font-bold">Compare</button>
+        <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="PXD007653, PXD002801" className="input flex-1 h-11 font-mono" aria-label="accessions, comma separated" />
+        <button type="submit" className="btn btn-primary btn-lg">Compare</button>
         {sel.length >= 2 && sel.join(",") !== a && (
-          <button type="button" onClick={() => { setInput(sel.join(",")); go(sel.join(",")); }} className="h-11 px-4 rounded-xl border font-bold">Use my {sel.length} picked</button>
+          <button type="button" onClick={() => { setInput(sel.join(",")); go(sel.join(",")); }} className="btn btn-lg">Use my {sel.length} picked</button>
         )}
       </form>
       {!a && <p className="text-sm text-muted-foreground">Tip: on the Ask page, hit <b>+ shortlist</b> on two or more results, then use the bar at the bottom.</p>}
@@ -63,18 +63,18 @@ export function CompareView() {
       {out && a && (
         <>
           <div className={`rounded-xl border p-4 ${VERDICT[out.verdict].cls}`}>
-            <div className="flex items-center gap-2 font-bold text-lg"><span className={`inline-block w-3 h-3 rounded-full ${VERDICT[out.verdict].dot}`} />{VERDICT[out.verdict].label}</div>
+            <div className="flex items-center gap-2 font-heading font-semibold text-lg"><span className={`inline-block w-3 h-3 rounded-full ${VERDICT[out.verdict].dot}`} />{VERDICT[out.verdict].label}</div>
             <p className="mt-1">{out.summary}</p>
           </div>
 
           {out.issues.length > 0 && (
             <div className="grid gap-2">
-              <h2 className="font-bold">Differences that matter</h2>
+              <h2 className="text-lg">Differences that matter</h2>
               {out.issues.map((i) => (
-                <div key={i.tag} className="rounded-lg border bg-card p-3 text-sm grid sm:grid-cols-[110px_1fr] gap-2">
-                  <span className={`self-start rounded-full px-2 py-0.5 text-xs font-bold ${SEV[i.severity]}`}>{i.severity}</span>
+                <div key={i.tag} className="rounded-md border bg-card p-3 text-sm grid sm:grid-cols-[110px_1fr] gap-2">
+                  <span className={`self-start pill ${SEV[i.severity]}`}>{i.severity}</span>
                   <div>
-                    <div className="font-bold">{TAG_LABEL[i.tag] ?? i.tag}: {out.accessions.map((acc) => `${acc} = ${i.values[acc]}`).join(" · ")}</div>
+                    <div className="font-semibold">{TAG_LABEL[i.tag] ?? i.tag}: {out.accessions.map((acc) => `${acc} = ${i.values[acc]}`).join(" · ")}</div>
                     <div className="text-muted-foreground">{i.why}</div>
                   </div>
                 </div>
@@ -86,7 +86,7 @@ export function CompareView() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">
-                  <th className="text-left p-3 text-xs uppercase tracking-wide text-muted-foreground">tag</th>
+                  <th className="text-left p-3 label">tag</th>
                   {out.accessions.map((acc) => (
                     <th key={acc} className="text-left p-3 align-top min-w-[220px]">
                       <Link href={`/dataset/${acc}`} className="font-mono text-teal hover:underline">{acc}</Link>
@@ -102,12 +102,12 @@ export function CompareView() {
                   const differ = new Set(vals.filter((v) => v !== null && v !== "—")).size > 1;
                   return (
                     <tr key={tag} className={`border-b last:border-0 ${differ ? "bg-peak-soft/20" : ""}`}>
-                      <td className="p-3 text-xs uppercase tracking-wide text-muted-foreground font-bold whitespace-nowrap">{TAG_LABEL[tag] ?? tag}</td>
+                      <td className="p-3 label whitespace-nowrap">{TAG_LABEL[tag] ?? tag}</td>
                       {out.accessions.map((acc) => {
                         const c = cells[acc];
                         return (
                           <td key={acc} className="p-3 align-top">
-                            <div className="font-bold">{c.value === null ? <span className="text-muted-foreground font-normal">—</span> : typeof c.value === "number" ? c.value.toLocaleString() : c.value}</div>
+                            <div className="font-semibold">{c.value === null ? <span className="text-muted-foreground font-normal">—</span> : typeof c.value === "number" ? c.value.toLocaleString() : c.value}</div>
                             {c.evidence && <div className="text-xs text-muted-foreground italic mt-0.5 line-clamp-2">“{c.evidence}”</div>}
                           </td>
                         );

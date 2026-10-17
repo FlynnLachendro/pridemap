@@ -116,13 +116,15 @@ export function Browse({ stats }: { stats: Stats | null }) {
   return (
     <div className="grid gap-5">
       <div>
-        <h1 className="text-3xl">Search PRIDE by how the data was made</h1>
+        <h1 className="text-3xl sm:text-4xl">Search PRIDE by how the data was made</h1>
         <p className="text-muted-foreground max-w-2xl">Keywords, an accession, or a question in plain words. Filters on the left are tags a model read from each dataset&apos;s protocol and paper, with the sentence behind each one.</p>
       </div>
 
-      <form className="flex gap-2 flex-col sm:flex-row" onSubmit={(e) => { e.preventDefault(); submit(q); }}>
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="liver · PXD007653 · or: which datasets could show phosphorylated MFF in mouse liver?" className="input flex-1 h-11" aria-label="search" />
-        <button type="submit" disabled={pending} className="btn btn-primary h-11 px-5">{pending ? "Searching…" : "Search"}</button>
+      <form className="search-box" onSubmit={(e) => { e.preventDefault(); submit(q); }} role="search">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="text-teal shrink-0" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by keyword, accession, or ask a question in plain words" aria-label="search" />
+        {q && <button type="button" onClick={() => { setQ(""); setAskOut(null); push({ sort: filters.sort }); }} className="btn btn-ghost btn-sm" aria-label="clear">clear</button>}
+        <button type="submit" disabled={pending} className="btn btn-primary">{pending ? "Searching…" : "Search"}</button>
       </form>
       <div className="flex flex-wrap gap-1.5 items-center text-xs">
         <span className="text-faint font-mono">Try:</span>

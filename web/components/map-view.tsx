@@ -109,11 +109,11 @@ export function MapView() {
     <div className="grid gap-3">
       <div className="flex flex-wrap gap-1.5 text-xs">
         {PRESETS.map((p) => (
-          <button key={p.by} type="button" onClick={() => choosePreset(p.by)} className={`rounded-full border px-2.5 py-1 ${p.by === by ? "bg-teal-soft text-teal border-teal font-bold" : "hover:bg-secondary"}`}>{p.label}</button>
+          <button key={p.by} type="button" onClick={() => choosePreset(p.by)} className={`rounded-full border px-2.5 py-1 ${p.by === by ? "bg-teal-soft text-teal border-teal font-medium" : "hover:bg-secondary"}`}>{p.label}</button>
         ))}
       </div>
       <div className="flex items-center gap-1 text-sm flex-wrap">
-        <button type="button" className="font-bold hover:underline" onClick={() => setPath([])}>All tagged{tree ? ` (${tree.value})` : ""}</button>
+        <button type="button" className="font-semibold hover:underline" onClick={() => setPath([])}>All tagged{tree ? ` (${tree.value})` : ""}</button>
         {path.map((n, i) => (
           <span key={i} className="flex items-center gap-1">
             <span className="text-muted-foreground">›</span>
@@ -136,7 +136,7 @@ export function MapView() {
                 <g key={i} onClick={() => click(b.depth === 1 ? b.node : grouped[b.parentIdx])} onMouseEnter={() => setHover(`${TAG_LABEL[levels[realDepth + b.depth - 1]] ?? ""}: ${label} · ${b.node.value}`)} onMouseLeave={() => setHover(null)} className="cursor-pointer">
                   <rect x={b.x} y={b.y} width={b.w} height={b.h} fill={col} fillOpacity={isLeafLevel ? 0.28 : 0.12} stroke={col} strokeWidth={isLeafLevel ? 1 : 2} rx={3} />
                   {show && (
-                    <text x={b.x + 6} y={b.y + 13} fontSize={isLeafLevel ? 11 : 13} fontWeight={isLeafLevel ? 400 : 700} fill="currentColor" className="pointer-events-none">
+                    <text x={b.x + 6} y={b.y + 13} fontSize={isLeafLevel ? 11 : 13} fontWeight={isLeafLevel ? 400 : 600} fill="currentColor" className="pointer-events-none">
                       {label.length * (isLeafLevel ? 6.2 : 7.5) > b.w - 10 ? label.slice(0, Math.max(2, Math.floor((b.w - 14) / (isLeafLevel ? 6.2 : 7.5)))) + "…" : label}
                       {!isLeafLevel && b.w > 120 ? ` · ${b.node.value}` : ""}
                     </text>
@@ -151,9 +151,9 @@ export function MapView() {
       {grouped.length > 0 && (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
           {grouped.map((c, i) => (
-            <button key={c.name} type="button" onClick={() => click(c)} className="text-left rounded-lg border bg-card px-3 py-2 hover:bg-secondary flex items-center gap-2">
+            <button key={c.name} type="button" onClick={() => click(c)} className="text-left rounded-md border bg-card px-3 py-2 hover:bg-secondary transition-colors duration-[120ms] flex items-center gap-2">
               <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: PALETTE[i % PALETTE.length] }} />
-              <span className="font-bold truncate">{pretty(c.name)}</span>
+              <span className="font-semibold truncate">{pretty(c.name)}</span>
               <span className="ml-auto tabular text-muted-foreground text-sm">{c.value}</span>
             </button>
           ))}

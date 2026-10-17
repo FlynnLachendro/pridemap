@@ -10,7 +10,7 @@ export function CompareToggle({ accession, className }: { accession: string; cla
       type="button"
       onClick={() => toggle(accession)}
       aria-pressed={on}
-      className={cn("text-xs rounded-full border px-2 py-0.5 font-bold", on ? "bg-peak-soft text-peak border-peak" : "text-muted-foreground hover:bg-secondary", className)}
+      className={cn("pill border bg-transparent transition-colors duration-[120ms]", on ? "bg-peak-soft text-peak border-peak" : "border-border text-muted-foreground hover:bg-secondary", className)}
     >
       {on ? "✓ shortlisted" : "+ shortlist"}
     </button>

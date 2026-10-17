@@ -2,15 +2,17 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-sans);
   --font-serif: var(--font-body);
+  --font-body: var(--font-body);
   --font-mono: var(--font-mono);
   --font-heading: var(--font-display);
+  --font-display: var(--font-display);
+  /* app semantic aliases (kept so existing bg-teal / text-peak / bg-ok-soft keep working) */
   --color-teal: var(--teal);
   --color-teal-soft: var(--teal-soft);
   --color-peak: var(--peak);
@@ -20,9 +22,21 @@
   --color-warn: var(--warn);
   --color-warn-soft: var(--warn-soft);
   --color-faint: var(--faint);
+  --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
   --color-border-light: var(--border-light);
+  --color-on-accent: var(--on-accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-light: var(--accent-light);
+  --color-text-muted: var(--muted-foreground);
+  /* Arbor node colours */
+  --color-node-question: var(--node-question);
+  --color-node-inquiry: var(--node-inquiry);
+  --color-node-source: var(--node-source);
+  --color-node-finding: var(--node-finding);
+  --color-node-synthesis: var(--node-synthesis);
+  /* shadcn */
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -52,96 +66,262 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  /* House style radii: 6px controls, 10px cards, 999px pills */
+  --radius-sm: 6px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 10px;
+  --radius-2xl: 14px;
+  --radius-3xl: 16px;
+  --radius-4xl: 24px;
 }
 
+/* ---------------------------------------------------------------------------
+   Papyrus — Arbor's light scheme, verbatim
+   ------------------------------------------------------------------------- */
+/* Light only. The original PRIDE Map palette (cool off-white, teal accent, amber highlight)
+   expressed through the token names the component classes use. No dark mode by decision. */
 :root {
-  /* Papyrus (ported from Arbor's light scheme) */
-  --background: #f5f0e8;
-  --foreground: #241e19;
-  --card: #faf7f2;
-  --card-foreground: #241e19;
-  --popover: #faf7f2;
-  --popover-foreground: #241e19;
-  --primary: #8b5e3c;
-  --primary-foreground: #ffffff;
-  --secondary: #efe9de;
-  --secondary-foreground: #4a3e30;
-  --muted: #efe9de;
-  --muted-foreground: #5e5347;
-  --accent: #e8e0d2;
-  --accent-foreground: #241e19;
-  --destructive: #a84032;
-  --border: #d4cbbe;
-  --input: #d4cbbe;
-  --ring: #8b5e3c;
-  --chart-1: #8b5e3c;
-  --chart-2: #4a7c8f;
-  --chart-3: #5a7d4c;
-  --chart-4: #6b5b8a;
-  --chart-5: #b08d57;
-  --radius: 0.625rem;
-  /* app semantic tokens: accent (walnut), highlight (inquiry gold), ok, warn */
-  --teal: #8b5e3c; --teal-soft: #efe4d6; --peak: #a9741a; --peak-soft: #f3e8d0;
-  --ok: #5a7d4c; --ok-soft: #e3ead9; --warn: #a84032; --warn-soft: #f1dcd6;
-  --faint: #70665b; --surface-2: #efe9de; --surface-3: #e8e0d2; --border-light: #e2d9cc;
-}
+  --bg: #F4F7F8;
+  --surface: #FFFFFF;
+  --surface-2: #EAF0F2;
+  --surface-3: #DDE6E9;
+  --border: #CFD9DE;
+  --border-light: #E1E8EB;
+  --text: #13202A;
+  --muted-text: #46545F;
+  --faint: #5E6C76;
+  --walnut: #0E7C86;          /* accent (kept the token name so the classes work) */
+  --accent-hover: #0B6670;
+  --accent-light: #7FC5CC;
+  --on-accent: #FFFFFF;
+  --success: #2E7D4F;
+  --warning: #B9711A;
+  --error: #B23A3A;
+  --ink-warm: #2B3A44;
+  --node-source: #0E7C86; --node-question: #6A4C93; --node-inquiry: #D9731A; --node-finding: #2E7D4F; --node-synthesis: #8B5E6B;
 
-.dark {
-  --background: #1a1611;
-  --foreground: #ece4d8;
-  --card: #221d17;
-  --card-foreground: #ece4d8;
-  --popover: #221d17;
-  --popover-foreground: #ece4d8;
-  --primary: #c9a882;
-  --primary-foreground: #241e19;
-  --secondary: #2b241c;
-  --secondary-foreground: #ddd2c2;
-  --muted: #2b241c;
-  --muted-foreground: #b3a795;
-  --accent: #342b21;
-  --accent-foreground: #ece4d8;
-  --destructive: #d97b6c;
-  --border: #453a2c;
-  --input: #453a2c;
-  --ring: #c9a882;
-  --chart-1: #c9a882;
-  --chart-2: #7fb4c8;
-  --chart-3: #8fb87d;
-  --chart-4: #a394c4;
-  --chart-5: #d4b183;
-  --teal: #c9a882; --teal-soft: #342b21; --peak: #d9ab5f; --peak-soft: #3a3020;
-  --ok: #8fb87d; --ok-soft: #26321f; --warn: #d97b6c; --warn-soft: #3d241f;
-  --faint: #968c7c; --surface-2: #2b241c; --surface-3: #342b21; --border-light: #2f2820;
+  --teal: #0E7C86; --teal-soft: #D9EEF0; --peak: #D9731A; --peak-soft: #FBE8D6;
+  --ok: #2E7D4F; --ok-soft: #DCEFE3; --warn: #B23A3A; --warn-soft: #F7DEDE;
+
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--surface);
+  --card-foreground: var(--text);
+  --popover: var(--surface);
+  --popover-foreground: var(--text);
+  --primary: var(--walnut);
+  --primary-foreground: var(--on-accent);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--ink-warm);
+  --muted: var(--surface-2);
+  --muted-foreground: var(--muted-text);
+  --accent: var(--surface-3);
+  --accent-foreground: var(--text);
+  --destructive: var(--error);
+  --input: var(--border);
+  --ring: var(--walnut);
+  --chart-1: #0E7C86; --chart-2: #D9731A; --chart-3: #2E7D4F; --chart-4: #6A4C93; --chart-5: #5E6C76;
+  --radius: 0.6rem;
+  --sidebar: var(--surface); --sidebar-foreground: var(--text); --sidebar-primary: var(--walnut); --sidebar-primary-foreground: var(--on-accent);
+  --sidebar-accent: var(--surface-2); --sidebar-accent-foreground: var(--text); --sidebar-border: var(--border); --sidebar-ring: var(--walnut);
+  --t-feedback: 120ms; --t-enter: 200ms; --t-route: 320ms; --ease: cubic-bezier(0.2, 0, 0, 1);
+  color-scheme: light;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
-  }
   html {
-    @apply font-sans;
+    font-family: var(--font-body);
+  }
+  body { font-family: var(--font-body); font-size: 16px; line-height: 1.55; }
+  /* Arbor's real code: display serif (Crimson Pro) 600 for headings; mono for labels and numbers. */
+  h1, h2, h3, h4 { font-family: var(--font-display); font-weight: 700; text-wrap: balance; letter-spacing: -0.01em; line-height: 1.15; }
+  button, input, select, textarea {
+    font-family: var(--font-sans);
+  }
+  code, pre, kbd, th {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Keyboard focus ring: 2px walnut, offset, no shadow */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--walnut);
+    outline-offset: 2px;
   }
 }
-@media (prefers-color-scheme: dark) { :root:not(.light) { color-scheme: dark; } }
-/* House style: serif display, serif body, mono for labels and numbers; borders not shadows; quiet motion */
-body { font-family: var(--font-body); line-height: 1.6; }
-h1,h2,h3,h4 { font-family: var(--font-display); font-weight: 600; text-wrap: balance; letter-spacing: 0; line-height: 1.15; }
-.tabular, .font-mono, code, pre, th, .label { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); font-weight: 500; }
-button, input, select, textarea { font-family: var(--font-sans); }
-.rounded-xl { border-radius: 10px; }
-.rounded-lg { border-radius: 8px; }
-.shadow-lg { box-shadow: 0 8px 24px -12px rgb(36 30 25 / .35); }
-* { transition-timing-function: cubic-bezier(0.2, 0, 0, 1); }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
+
+/* ---------------------------------------------------------------------------
+   Component classes, ported from Arbor's patterns
+   ------------------------------------------------------------------------- */
+@layer components {
+  .mono, .tabular {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .label {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted-text);
+    font-weight: 600;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+
+  /* Buttons: 6px radius, 1px border, no shadow, 120ms feedback */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted-text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    text-decoration: none;
+    transition: color 120ms, background-color 120ms, border-color 120ms, opacity 120ms;
+    transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  }
+  .btn:hover { color: var(--text); border-color: var(--walnut); }
+  .btn:disabled, .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary {
+    background: var(--walnut);
+    border-color: var(--walnut);
+    color: var(--on-accent);
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--muted-text);
+  }
+  .btn-ghost:hover { background: var(--surface-2); border-color: transparent; color: var(--text); }
+  .btn-sm { height: 30px; padding: 0 10px; font-size: 12px; }
+  .btn-lg { height: 44px; padding: 0 20px; font-size: 14px; }
+
+  /* Inputs: transparent on the surface, 6px, border turns walnut on focus (Arbor's search box) */
+  .input {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    outline: none;
+    transition: border-color 120ms cubic-bezier(0.2, 0, 0, 1), box-shadow 120ms;
+  }
+  .input:focus, .input:focus-visible { border-color: var(--walnut); box-shadow: 0 0 0 3px var(--teal-soft); outline: none; }
+  /* the main search box: big, bordered, impossible to miss */
+  .search-box {
+    display: flex; align-items: center; gap: 10px;
+    height: 56px; padding: 0 8px 0 18px;
+    border: 2px solid var(--walnut); border-radius: 12px; background: var(--surface);
+    box-shadow: 0 1px 0 var(--teal-soft);
+  }
+  .search-box:focus-within { box-shadow: 0 0 0 4px var(--teal-soft); }
+  .search-box input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; font-family: var(--font-sans); font-size: 17px; color: var(--text); }
+  .search-box input::placeholder { color: var(--faint); font-style: normal; }
+  .search-box .btn-primary { height: 40px; padding: 0 20px; font-size: 15px; border-radius: 8px; }
+  .input::placeholder { color: var(--faint); font-style: italic; }
+  .input:focus, .input:focus-visible { border-color: var(--walnut); outline: none; }
+  .input:disabled { opacity: 0.5; }
+  textarea.input { height: auto; padding: 8px 12px; line-height: 1.5; }
+  select.input { padding-right: 28px; }
+
+  /* Pills: 999px, mono 500, surface-2; colour with bg-*-soft text-* utilities */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-family: var(--font-sans);
+    font-variant-numeric: tabular-nums;
+    font-size: 12.5px;
+    font-weight: 700;
+    line-height: 1.4;
+    background: var(--surface-2);
+    color: var(--ink-warm);
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  /* Mobile drawer (Arbor's) */
+  .mobile-drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: 40;
+  }
+  .mobile-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 100vw;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease-out;
+  }
+  .mobile-drawer.open { transform: translateX(0); }
+}
+
+/* Scrollbars: 6px, surface track, border thumb */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--faint); }
+
+/* Motion: 120ms feedback, 200ms entrances, 320ms route changes; opacity + 8px only */
+:root {
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-feedback: 120ms;
+  --t-enter: 200ms;
+  --t-route: 320ms;
+}
+* { transition-timing-function: var(--ease); }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in { animation: fade-in var(--t-enter) var(--ease); }
+
+@keyframes gentle-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-gentle-pulse { animation: gentle-pulse 2s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .mobile-drawer { transition: none; }
+}
+

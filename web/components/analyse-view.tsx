@@ -127,7 +127,7 @@ export function AnalyseView() {
   return (
     <div className="grid gap-5">
       <div>
-        <h1 className="text-3xl font-extrabold">Analyse a protein table</h1>
+        <h1 className="text-3xl">Analyse a protein table</h1>
         <p className="text-muted-foreground max-w-2xl">
           Upload the protein table a search engine gave you (MaxQuant proteinGroups, DIA-NN, Spectronaut…). Pick which samples are group A and group B, and get the standard first look: log2 fold change, a Welch t-test per protein, FDR-corrected q-values and a volcano plot.
         </p>
@@ -141,15 +141,15 @@ export function AnalyseView() {
         onDrop={(e) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files?.[0]; if (f) upload(f); }}
       >
         <div className="flex flex-wrap items-center gap-3">
-          <button type="button" onClick={() => fileRef.current?.click()} disabled={!!busy} className="h-11 px-5 rounded-xl bg-teal text-white font-bold disabled:opacity-50">Choose a file</button>
+          <button type="button" onClick={() => fileRef.current?.click()} disabled={!!busy} className="btn btn-primary btn-lg">Choose a file</button>
           <span className="text-sm text-muted-foreground">or drop a .csv / .tsv / .txt / .xlsx here (up to 200 MB)</span>
           <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = ""; }} />
-          <button type="button" onClick={useExample} disabled={!!busy} className="h-11 px-4 rounded-xl border font-bold disabled:opacity-50">Use the example table (Odetta&apos;s lyso‑IP batch 2)</button>
+          <button type="button" onClick={useExample} disabled={!!busy} className="btn btn-lg">Use the example table (Odetta&apos;s lyso‑IP batch 2)</button>
         </div>
         {inspect && (
           <p className="text-sm">
-            <span className="font-bold">{inspect.file}</span> · <span className="tabular">{inspect.n_rows.toLocaleString()}</span> rows × <span className="tabular">{inspect.n_cols.toLocaleString()}</span> columns · {inspect.suggested_groups.length} sample groups detected
-            {inspect.odetta_compatible && <span className="ml-2 rounded-full px-2 py-0.5 text-xs font-bold bg-ok-soft text-ok">lyso‑IP layout: Odetta&apos;s pipeline available</span>}
+            <span className="font-semibold">{inspect.file}</span> · <span className="tabular">{inspect.n_rows.toLocaleString()}</span> rows × <span className="tabular">{inspect.n_cols.toLocaleString()}</span> columns · {inspect.suggested_groups.length} sample groups detected
+            {inspect.odetta_compatible && <span className="ml-2 pill bg-ok-soft text-ok">lyso‑IP layout: Odetta&apos;s pipeline available</span>}
           </p>
         )}
         {busy && <p className="text-sm text-teal">{busy}</p>}
@@ -173,27 +173,27 @@ export function AnalyseView() {
               </div>
               <div className="grid sm:grid-cols-4 gap-3 text-sm">
                 <label className="grid gap-1">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">protein id column</span>
-                  <select value={idCol} onChange={(e) => setIdCol(e.target.value)} className="h-10 rounded-xl border bg-card px-3">
+                  <span className="label">protein id column</span>
+                  <select value={idCol} onChange={(e) => setIdCol(e.target.value)} className="input h-10">
                     {inspect.id_columns.map((c) => <option key={c} value={c}>{c}</option>)}
                     {!inspect.id_columns.length && <option value="">(no text id column found)</option>}
                   </select>
                 </label>
                 <label className="grid gap-1">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">intensities are</span>
-                  <select value={logT} onChange={(e) => setLogT(e.target.value as typeof logT)} className="h-10 rounded-xl border bg-card px-3">
+                  <span className="label">intensities are</span>
+                  <select value={logT} onChange={(e) => setLogT(e.target.value as typeof logT)} className="input h-10">
                     <option value="auto">auto-detect (log2 if raw)</option>
                     <option value="log2">raw → take log2</option>
                     <option value="none">already log-scale</option>
                   </select>
                 </label>
                 <label className="grid gap-1">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">min values per group</span>
-                  <input type="number" min={2} max={50} value={minValid} onChange={(e) => setMinValid(Math.max(2, Number(e.target.value) || 2))} className="h-10 rounded-xl border bg-card px-3 tabular" />
+                  <span className="label">min values per group</span>
+                  <input type="number" min={2} max={50} value={minValid} onChange={(e) => setMinValid(Math.max(2, Number(e.target.value) || 2))} className="input h-10 tabular" />
                 </label>
                 <label className="grid gap-1">
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">drop contaminants by</span>
-                  <select value={contam} onChange={(e) => setContam(e.target.value)} className="h-10 rounded-xl border bg-card px-3">
+                  <span className="label">drop contaminants by</span>
+                  <select value={contam} onChange={(e) => setContam(e.target.value)} className="input h-10">
                     <option value="">(don&apos;t filter)</option>
                     {inspect.contaminant_columns.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
@@ -203,14 +203,14 @@ export function AnalyseView() {
           ) : (
             <div className="grid sm:grid-cols-[1fr_1fr_2fr] gap-3 text-sm">
               <label className="grid gap-1">
-                <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">column prefix</span>
-                <select value={prefix} onChange={(e) => setPrefix(e.target.value)} className="h-10 rounded-xl border bg-card px-3">
+                <span className="label">column prefix</span>
+                <select value={prefix} onChange={(e) => setPrefix(e.target.value)} className="input h-10">
                   {inspect.odetta_prefixes.map((p) => <option key={p} value={p}>{p}</option>)}
                 </select>
               </label>
               <label className="grid gap-1">
-                <span className="text-xs uppercase tracking-wide text-muted-foreground font-bold">batch name</span>
-                <input value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9_-]/g, "_"))} className="h-10 rounded-xl border bg-card px-3 font-mono" />
+                <span className="label">batch name</span>
+                <input value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9_-]/g, "_"))} className="input h-10 font-mono" />
               </label>
               <p className="text-muted-foreground self-end">
                 Runs <code>analysis/tese_lysoip_analysis.py</code>: tag‑vs‑tag TESE effect, input‑normalised enrichment and the mock‑controlled dod, using the <code>{prefix}_IP_*</code> and <code>{prefix}_WC_*</code> columns. Positive = TESE‑high.
@@ -219,7 +219,7 @@ export function AnalyseView() {
           )}
 
           <div className="flex items-center gap-3">
-            <button type="button" onClick={run} disabled={!canRun} className="h-11 px-6 rounded-xl bg-teal text-white font-bold disabled:opacity-50">{busy ? "Running…" : "Run"}</button>
+            <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6">{busy ? "Running…" : "Run"}</button>
             {mode === "welch" && <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>}
           </div>
         </div>
@@ -234,7 +234,7 @@ export function AnalyseView() {
 
 function ModeButton({ active, disabled, title, onClick, children }: { active: boolean; disabled?: boolean; title?: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button type="button" onClick={onClick} disabled={disabled} title={title} className={`h-9 px-4 rounded-full border text-sm font-bold disabled:opacity-40 ${active ? "bg-teal text-white border-teal" : "bg-card"}`}>{children}</button>
+    <button type="button" onClick={onClick} disabled={disabled} title={title} className={`btn rounded-full ${active ? "btn-primary" : ""}`}>{children}</button>
   );
 }
 
@@ -251,20 +251,20 @@ function GroupPicker({ label, hint, stem, cols, groups, numeric, onStem, onCols 
   return (
     <div className="grid gap-2 text-sm">
       <div>
-        <div className="text-xs uppercase tracking-wide text-muted-foreground font-bold">{label} <span className="normal-case font-normal">· {hint}</span></div>
-        <select value={stem} onChange={(e) => onStem(e.target.value)} className="mt-1 w-full h-10 rounded-xl border bg-card px-3">
+        <div className="label">{label} <span className="normal-case font-normal">· {hint}</span></div>
+        <select value={stem} onChange={(e) => onStem(e.target.value)} className="input mt-1 h-10">
           {groups.map((g) => <option key={g.stem} value={g.stem}>{g.stem} ({g.columns.length} samples, {Math.round(g.fill * 100)}% filled)</option>)}
           <option value={CUSTOM}>custom selection…</option>
         </select>
       </div>
       <div className="flex flex-wrap gap-1">
-        {cols.map((c) => <span key={c} className="rounded-full bg-secondary px-2 py-0.5 text-xs font-mono">{c}</span>)}
+        {cols.map((c) => <span key={c} className="pill">{c}</span>)}
         {!cols.length && <span className="text-xs text-muted-foreground">no columns yet</span>}
       </div>
       <button type="button" onClick={() => setEditing((v) => !v)} className="justify-self-start text-xs underline text-muted-foreground">{editing ? "done" : "edit columns"}</button>
       {editing && (
-        <div className="rounded-lg border p-2 grid gap-1">
-          <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter columns" className="h-8 rounded-lg border bg-card px-2 text-xs" />
+        <div className="rounded-md border p-2 grid gap-1">
+          <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter columns" className="input h-8 px-2 text-xs" />
           <div className="max-h-48 overflow-y-auto grid gap-0.5">
             {shown.map((c) => (
               <label key={c} className="flex items-center gap-2 text-xs font-mono">
@@ -282,8 +282,8 @@ function GroupPicker({ label, hint, stem, cols, groups, numeric, onStem, onCols 
 function Tile({ label, value, cls }: { label: string; value: number; cls?: string }) {
   return (
     <div className={`rounded-xl border p-4 ${cls ?? "bg-card"}`}>
-      <div className="text-3xl font-extrabold tabular">{value.toLocaleString()}</div>
-      <div className="text-xs uppercase tracking-wide text-muted-foreground font-bold">{label}</div>
+      <div className="text-3xl font-semibold tabular">{value.toLocaleString()}</div>
+      <div className="label">{label}</div>
     </div>
   );
 }
@@ -336,7 +336,7 @@ function Volcano({ points }: { points: Pt[] }) {
   return (
     <div className="rounded-xl border bg-card p-3 grid gap-1">
       <div className="flex flex-wrap items-center gap-3 text-xs px-1">
-        <span className="font-bold">Volcano</span>
+        <span className="font-semibold">Volcano</span>
         <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> up in B (q &lt; 0.05)</span>
         <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> down in B (q &lt; 0.05)</span>
         <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-muted-foreground/40" /> not significant</span>
@@ -406,17 +406,17 @@ function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: strin
   return (
     <div className="rounded-xl border bg-card grid gap-0">
       <div className="flex flex-wrap items-center gap-3 p-3 border-b text-sm">
-        <span className="font-bold">Results</span>
+        <span className="font-semibold">Results</span>
         <span className="text-xs text-muted-foreground">{rows.length.toLocaleString()} rows returned (every q &lt; 0.05 hit plus the top 2,000 by p). Click a header to sort.</span>
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="find a protein" className="h-8 rounded-lg border bg-card px-2 text-xs ml-auto" />
-        <button type="button" onClick={download} className="h-8 px-3 rounded-lg border text-xs font-bold">download CSV</button>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="find a protein" className="input h-8 w-auto px-2 text-xs ml-auto" />
+        <button type="button" onClick={download} className="btn btn-sm">download CSV</button>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b">
               {columns.map((c) => (
-                <th key={c} onClick={() => clickSort(c as SortKey)} className={`p-2 text-xs uppercase tracking-wide text-muted-foreground cursor-pointer select-none whitespace-nowrap ${c === "id" ? "text-left" : "text-right"}`}>
+                <th key={c} onClick={() => clickSort(c as SortKey)} className={`p-2 label cursor-pointer select-none whitespace-nowrap ${c === "id" ? "text-left" : "text-right"}`}>
                   {COL_LABEL[c] ?? c}{sort.key === c ? (sort.dir === 1 ? " ↑" : " ↓") : ""}
                 </th>
               ))}
@@ -431,7 +431,7 @@ function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: strin
                   {columns.map((c) => {
                     const v = r[c as SortKey];
                     return (
-                      <td key={c} className={`p-2 tabular whitespace-nowrap ${c === "id" ? "text-left font-mono" : "text-right"} ${c === "log2fc" || c === "q" ? `font-bold ${cls}` : ""}`}>
+                      <td key={c} className={`p-2 tabular whitespace-nowrap ${c === "id" ? "text-left font-mono" : "text-right"} ${c === "log2fc" || c === "q" ? `font-semibold ${cls}` : ""}`}>
                         {c === "id" ? String(v) : typeof v === "number" && (c === "n_a" || c === "n_b") ? v : fmt(v as number | null)}
                       </td>
                     );
@@ -455,7 +455,7 @@ function OdettaResults({ out }: { out: OdettaOut }) {
   return (
     <div className="grid gap-4">
       <div className={`rounded-xl border p-4 ${out.ok ? "border-ok bg-ok-soft/40" : "border-warn bg-warn-soft/40"}`}>
-        <div className="font-bold text-lg">{out.ok ? "Odetta's pipeline finished" : "Odetta's pipeline failed"}</div>
+        <div className="font-heading font-semibold text-lg">{out.ok ? "Odetta's pipeline finished" : "Odetta's pipeline failed"}</div>
         {out.error && <p className="mt-1 text-sm text-warn">{out.error}</p>}
         {out.stdout && <pre className="mt-2 text-xs whitespace-pre-wrap">{out.stdout}</pre>}
         {!out.ok && out.stderr && <pre className="mt-2 text-xs whitespace-pre-wrap text-warn">{out.stderr}</pre>}
@@ -463,10 +463,10 @@ function OdettaResults({ out }: { out: OdettaOut }) {
       </div>
       {out.outputs.map((o) => (
         <div key={o.name} className="rounded-xl border bg-card">
-          <div className="p-3 border-b text-sm"><span className="font-mono font-bold">{o.name}</span> <span className="text-muted-foreground">· {o.rows.toLocaleString()} rows · showing first {o.head.length}</span>{o.error && <span className="text-warn"> · {o.error}</span>}</div>
+          <div className="p-3 border-b text-sm"><span className="font-mono font-semibold">{o.name}</span> <span className="text-muted-foreground">· {o.rows.toLocaleString()} rows · showing first {o.head.length}</span>{o.error && <span className="text-warn"> · {o.error}</span>}</div>
           <div className="overflow-x-auto">
             <table className="text-xs">
-              <thead><tr className="border-b">{o.columns.map((c) => <th key={c} className="p-2 text-left whitespace-nowrap text-muted-foreground uppercase tracking-wide">{c}</th>)}</tr></thead>
+              <thead><tr className="border-b">{o.columns.map((c) => <th key={c} className="p-2 text-left whitespace-nowrap label">{c}</th>)}</tr></thead>
               <tbody>
                 {o.head.map((r, i) => (
                   <tr key={i} className="border-b last:border-0">{o.columns.map((c) => <td key={c} className="p-2 tabular whitespace-nowrap">{cell(r[c])}</td>)}</tr>

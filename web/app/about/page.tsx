@@ -54,7 +54,7 @@ export default async function About() {
 
       <section className="grid gap-2">
         <h2 className="text-2xl">Run it yourself</h2>
-        <pre className="rounded-lg border bg-card p-3 text-xs overflow-x-auto">{`git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
+        <pre className="rounded-md border bg-card p-3 text-xs overflow-x-auto">{`git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
 uv run load_demo.py      # bundled tagged slice, no crawl needed
 ./dev.sh                 # API :8000/docs, web :3000`}</pre>
       </section>

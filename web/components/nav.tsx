@@ -1,43 +1,37 @@
 "use client";
-import Link from "next/link";
+import { useState } from "react";
 import { usePathname } from "next/navigation";
-import { cn } from "@/lib/utils";
+import { Sidebar } from "@/components/sidebar";
+import { MobileDrawer, MobileHeader } from "@/components/mobile-header";
 
-const links = [
-  { href: "/", label: "Ask" },
-  { href: "/map", label: "Map" },
-  { href: "/compare", label: "Compare" },
-  { href: "/analyse", label: "Analyse" },
-  { href: "/flow", label: "Workflow" },
-  { href: "/eval", label: "Eval" },
-  { href: "/about", label: "About" },
-];
-
-export function Nav() {
+/**
+ * The app shell, laid out like Arbor's App.tsx: on desktop a fixed-height
+ * column with the sidebar (w-52, border-r) beside a scrolling content area;
+ * below 768px a 48px top header with a menu button that opens the same
+ * sidebar in a full-width drawer.
+ */
+export function Shell({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
   const path = usePathname();
+  // Close the drawer when the route changes (state adjusted during render, not in an effect).
+  const [seenPath, setSeenPath] = useState(path);
+  if (path !== seenPath) { setSeenPath(path); setOpen(false); }
+
   return (
-    <header className="border-b bg-card sticky top-0 z-20">
-      <div className="max-w-6xl mx-auto px-5 h-14 flex items-center gap-6">
-        <Link href="/" className="font-heading font-semibold text-xl tracking-tight flex items-center gap-2">
-          <span className="inline-block w-2.5 h-2.5 rounded-full bg-teal" aria-hidden />
-          PRIDE Map
-        </Link>
-        <nav className="flex gap-0.5 text-sm font-mono">
-          {links.map((l) => (
-            <Link
-              key={l.href}
-              href={l.href}
-              className={cn(
-                "px-2.5 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors duration-150",
-                (path === l.href || (l.href !== "/" && path.startsWith(l.href))) && "bg-secondary text-foreground"
-              )}
-            >
-              {l.label}
-            </Link>
-          ))}
-        </nav>
-        <span className="ml-auto text-xs text-faint hidden md:block font-mono">a front door to 42,000 mass‑spec datasets</span>
+    <div className="h-dvh flex flex-col overflow-hidden">
+      <MobileHeader className="md:hidden" onOpenDrawer={() => setOpen(true)} />
+      <div className="md:hidden">
+        <MobileDrawer open={open} onClose={() => setOpen(false)}>
+          <Sidebar className="flex w-full h-full border-r-0" />
+        </MobileDrawer>
       </div>
-    </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar className="hidden md:flex w-52" />
+        <main className="flex-1 min-w-0 overflow-y-auto bg-background">
+          <div className="w-full max-w-6xl mx-auto px-5 py-8 pb-24">{children}</div>
+        </main>
+      </div>
+    </div>
   );
 }

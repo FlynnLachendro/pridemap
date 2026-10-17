@@ -648,8 +648,14 @@ uv run tag.py --limit 2000                                               # ~$12 
     </tbody>
   </table></div>
 
+  <h3>Landing page, second pass (after Flynn's review)</h3>
+  <p>The home page is now PRIDE‑style browse, not a question box: one search field that takes keywords, an accession, or a plain‑English question (it detects which), a filter sidebar always visible with checkboxes and counts (organism, tissue, sample type, enrichment, acquisition, labelling, enzyme, fractionation, instrument, year), results listed immediately, cards or table, sort by relevance / most reused / newest / most proteins, paging. Untagged datasets show too, with a "not tagged yet" badge and PRIDE's own fields, so all 41,545 are reachable while tagging runs.</p>
+
+  <h3>Analysis report bundle (Odetta's request)</h3>
+  <p>From the Analyse page you can download a zip made for uploading next to a paper: <code>report.md</code> (a Methods paragraph written from the parameters, the summary, the top hits), <code>results.csv</code> (every tested protein), <code>params.json</code>, <code>reproduce.py</code> (a standalone script with the same maths; tested: it regenerates the identical result from the input file), and <code>provenance.json</code> (software versions, app commit, input file hash, timestamp).</p>
+
   <h3>Look</h3>
-  <p>Restyled to Arbor's papyrus scheme: warm off‑white ground, 1 px borders instead of shadows, Crimson Pro headings, Source Serif body, JetBrains Mono for labels and numbers, walnut accent. Dark mode derived from the same palette.</p>
+  <p>Restyled to Arbor's scheme, lifted from Arbor's own CSS rather than approximated: papyrus ground, 1 px borders instead of shadows, Arbor's fonts, walnut accent, left sidebar navigation on desktop, three‑state theme toggle, dark mode derived from the same palette.</p>
 
   <h3>Sunday pitch, 3 minutes, updated</h3>
   <ol>

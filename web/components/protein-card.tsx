@@ -25,10 +25,10 @@ export function ProteinCard({ name, organism, tissue }: { name: string; organism
         <span className="font-mono text-xs text-muted-foreground">{p.gene} · {p.organism} · {p.length} aa · {p.mass_kda} kDa · <a className="underline" href={p.url} target="_blank" rel="noreferrer">UniProt {p.accession}</a></span>
       </div>
       <div className="flex flex-wrap gap-1.5 text-xs">
-        <span className={`rounded-full px-2 py-0.5 font-semibold ${level === "good" ? "bg-ok-soft text-ok" : level === "fair" ? "bg-peak-soft text-peak" : "bg-warn-soft text-warn"}`}>detectability {p.detectability}</span>
-        {tissueHit === true && <span className="rounded-full bg-ok-soft text-ok px-2 py-0.5 font-semibold">UniProt reports expression in {tissue}</span>}
-        {tissueHit === false && <span className="rounded-full bg-peak-soft text-peak px-2 py-0.5 font-semibold">UniProt&apos;s tissue note doesn&apos;t mention {tissue}</span>}
-        {p.locations?.map((l) => <span key={l} className="rounded-full bg-secondary px-2 py-0.5">{l}</span>)}
+        <span className={`pill ${level === "good" ? "bg-ok-soft text-ok" : level === "fair" ? "bg-peak-soft text-peak" : "bg-warn-soft text-warn"}`}>detectability {p.detectability}</span>
+        {tissueHit === true && <span className="pill bg-ok-soft text-ok">UniProt reports expression in {tissue}</span>}
+        {tissueHit === false && <span className="pill bg-peak-soft text-peak">UniProt&apos;s tissue note doesn&apos;t mention {tissue}</span>}
+        {p.locations?.map((l) => <span key={l} className="pill">{l}</span>)}
       </div>
       {p.tissue_specificity && <p className="text-muted-foreground"><span className="label mr-2">Tissue</span>{p.tissue_specificity}</p>}
       {p.function && <p className="text-muted-foreground line-clamp-2"><span className="label mr-2">Function</span>{p.function}</p>}

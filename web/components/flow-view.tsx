@@ -43,7 +43,7 @@ function Candidate({ acc, q, confirmed, onConfirm }: { acc: string; q: string; c
         <span className="text-sm text-muted-foreground line-clamp-1">{r?.summary ?? r?.title ?? "…"}</span>
       </div>
       <div className="flex flex-wrap gap-1.5 text-xs font-mono">
-        {["organism", "tissue", "enrichment", "acquisition", "labelling", "enzyme", "instrument_family"].map((k) => t[k] ? <span key={k} className="rounded-full bg-secondary px-2 py-0.5"><span className="text-faint">{TAG_LABEL[k]} </span>{pretty(t[k])}</span> : null)}
+        {["organism", "tissue", "enrichment", "acquisition", "labelling", "enzyme", "instrument_family"].map((k) => t[k] ? <span key={k} className="pill"><span className="text-faint">{TAG_LABEL[k]} </span>{pretty(t[k])}</span> : null)}
       </div>
       <div className="text-sm leading-relaxed">
         <span className="label mr-2">Why this one</span>
@@ -82,7 +82,7 @@ export function FlowView() {
 
       <Step n={1} title="Find candidates" done={sel.length > 0}>
         <p className="text-sm text-muted-foreground">Ask in plain words. Tags read from each dataset&apos;s protocol and paper do the filtering. Hit <b>+ shortlist</b> on anything promising.</p>
-        <div className="flex gap-2 flex-wrap"><Link href={q ? `/?q=${encodeURIComponent(q)}` : "/"} className="rounded-md bg-teal text-primary-foreground px-3 py-1.5 text-sm font-sans font-semibold">Open Ask →</Link><Link href="/map" className="rounded-md border px-3 py-1.5 text-sm font-sans">or browse the Map</Link></div>
+        <div className="flex gap-2 flex-wrap"><Link href={q ? `/?q=${encodeURIComponent(q)}` : "/"} className="btn btn-primary">Open Ask →</Link><Link href="/map" className="btn">or browse the Map</Link></div>
         <p className="text-xs font-mono text-faint">{sel.length} shortlisted</p>
       </Step>
 
@@ -95,19 +95,19 @@ export function FlowView() {
       <Step n={3} title="Set up the database search" done={false}>
         <p className="text-sm text-muted-foreground">If the submitter uploaded results you can skip the search. Otherwise the dataset page gives you the file list and the search parameters (tool, enzyme, fixed and variable modifications, quantification, FASTA) derived from the tags, each with the sentence it came from. Load them into MaxQuant, FragPipe or DIA‑NN and run it on your machine; we can&apos;t run it for you.</p>
         <div className="flex flex-wrap gap-2">
-          {confirmedList.map((a) => <Link key={a} href={`/dataset/${a}#reanalyse`} className="rounded-md border px-3 py-1.5 text-sm font-mono hover:bg-secondary">{a} set‑up sheet →</Link>)}
+          {confirmedList.map((a) => <Link key={a} href={`/dataset/${a}#reanalyse`} className="btn font-mono">{a} set‑up sheet →</Link>)}
           {confirmedList.length === 0 && <span className="text-sm text-faint">Confirm a candidate first.</span>}
         </div>
       </Step>
 
       <Step n={4} title="Analyse the protein table" done={false}>
         <p className="text-sm text-muted-foreground">Upload the protein table (the submitter&apos;s results file, or your own MaxQuant / DIA‑NN output), pick group A and group B, and get log2 fold changes, t‑tests, FDR and a volcano plot. Odetta&apos;s lyso‑IP pipeline runs when the columns match it.</p>
-        <Link href="/analyse" className="rounded-md bg-teal text-primary-foreground px-3 py-1.5 text-sm font-sans font-semibold w-fit">Open Analyse →</Link>
+        <Link href="/analyse" className="btn btn-primary w-fit">Open Analyse →</Link>
       </Step>
 
       <Step n={5} title="Check the machine's work" done={false}>
         <p className="text-sm text-muted-foreground">Every tag shows its confidence and evidence, and &quot;wrong?&quot; records a correction. The Eval page compares the model to hand labels and to other models, so you know how much to trust steps 1 to 3.</p>
-        <Link href="/eval" className="rounded-md border px-3 py-1.5 text-sm font-sans w-fit">Open Eval →</Link>
+        <Link href="/eval" className="btn w-fit">Open Eval →</Link>
       </Step>
     </div>
   );

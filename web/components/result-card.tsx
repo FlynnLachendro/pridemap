@@ -14,7 +14,7 @@ function Chip({ r, kind }: { r: Reason; kind: "fit" | "watch" }) {
         type="button"
         onClick={() => has && setOpen((o) => !o)}
         className={cn(
-          "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-bold text-left",
+          "pill gap-1.5 px-2.5 text-left whitespace-normal",
           kind === "fit" ? "bg-ok-soft text-ok" : "bg-peak-soft text-peak",
           has && "cursor-pointer hover:brightness-95"
         )}
@@ -39,7 +39,7 @@ export function ResultCard({ r, rank }: { r: Result; rank: number }) {
   return (
     <article className="rounded-xl border bg-card p-4 sm:p-5 grid gap-3">
       <div className="flex items-baseline gap-3 flex-wrap">
-        <span className="text-xs font-bold text-muted-foreground tabular w-5">{rank}</span>
+        <span className="text-xs font-medium text-muted-foreground tabular w-5">{rank}</span>
         <Link href={`/dataset/${r.accession}`} className="font-mono text-sm font-semibold text-teal hover:underline">
           {r.accession}
         </Link>
@@ -51,19 +51,19 @@ export function ResultCard({ r, rank }: { r: Result; rank: number }) {
           <a href={`https://europepmc.org/article/MED/${r.pubmed_id}`} target="_blank" rel="noreferrer" className="text-xs underline text-muted-foreground">paper ↗</a>
         )}
       </div>
-      <h3 className="text-base sm:text-lg font-bold leading-snug">
+      <h3 className="text-base sm:text-lg leading-snug">
         <Link href={`/dataset/${r.accession}`} className="hover:underline">{r.summary ?? r.title}</Link>
       </h3>
       {r.summary && <p className="text-sm text-muted-foreground -mt-1 line-clamp-2">{r.title}</p>}
       <div className="flex flex-wrap gap-1.5 text-xs">
         {["organism", "tissue", "cell_line", "disease", "sample_type"].map((k) =>
           t[k] ? (
-            <span key={k} className="rounded-full bg-teal-soft text-teal px-2 py-0.5 font-bold">{pretty(t[k])}</span>
+            <span key={k} className="pill bg-teal-soft text-teal">{pretty(t[k])}</span>
           ) : null
         )}
         {METHOD_TAGS.map((k) =>
           t[k] ? (
-            <span key={k} className="rounded-full bg-secondary text-secondary-foreground px-2 py-0.5">
+            <span key={k} className="pill">
               <span className="opacity-60">{TAG_LABEL[k]} </span>{pretty(t[k])}
             </span>
           ) : null

@@ -37,7 +37,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
             {d.paper_url && <a className="underline text-muted-foreground" href={d.paper_url} target="_blank" rel="noreferrer">paper ↗</a>}
             {d.tagged && <CompareToggle accession={p.accession} />}
           </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold mt-1">{p.title}</h1>
+          <h1 className="text-2xl sm:text-3xl mt-1">{p.title}</h1>
           {d.tags.summary_one_line && <p className="mt-2 text-lg text-muted-foreground">{String(d.tags.summary_one_line)}</p>}
         </div>
 
@@ -50,7 +50,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
         {d.tagged && (
           <section className="rounded-xl border bg-card overflow-hidden">
             <div className="px-4 py-3 border-b flex items-center justify-between">
-              <h2 className="font-bold">Tags, with the sentence each came from</h2>
+              <h2 className="text-lg">Tags, with the sentence each came from</h2>
               <span className="text-xs text-muted-foreground">tagged by {String(d.tags.model ?? "Claude")}</span>
             </div>
             <div className="divide-y">
@@ -59,12 +59,12 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
                 const v = d.tags[k];
                 return (
                   <div key={k} className="grid sm:grid-cols-[150px_1fr] gap-x-4 gap-y-1 px-4 py-3">
-                    <div className="text-xs uppercase tracking-wide text-muted-foreground font-bold pt-0.5">{TAG_LABEL[k] ?? k}</div>
+                    <div className="label pt-0.5">{TAG_LABEL[k] ?? k}</div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-3 flex-wrap">
-                        <span className={`font-bold ${v === null || v === undefined ? "text-muted-foreground" : ""}`}>{k === "depth_proteins" && typeof v === "number" ? v.toLocaleString() : pretty(v)}</span>
+                        <span className={`font-semibold ${v === null || v === undefined ? "text-muted-foreground" : ""}`}>{k === "depth_proteins" && typeof v === "number" ? v.toLocaleString() : pretty(v)}</span>
                         {e && <Bar c={e.confidence} />}
-                        {e && <span className="text-xs rounded-full bg-secondary px-2 py-0.5">{e.source}</span>}
+                        {e && <span className="pill">{e.source}</span>}
                         <Correct accession={p.accession} tag={k} current={v === null || v === undefined ? "" : String(v)} />
                       </div>
                       {e?.evidence && <p className="text-sm text-muted-foreground italic mt-1 border-l-2 pl-3">“{e.evidence}”</p>}
@@ -79,7 +79,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
         <div id="reanalyse"><Reanalyse accession={p.accession} /></div>
 
         <section className="grid gap-3">
-          <h2 className="font-bold">What PRIDE says</h2>
+          <h2 className="text-lg">What PRIDE says</h2>
           <div className="rounded-xl border bg-card p-4 grid gap-3 text-sm">
             <Field label="Description" text={p.description} />
             <Field label="Sample processing protocol" text={p.sample_protocol} />
@@ -87,9 +87,9 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
             <div className="grid sm:grid-cols-2 gap-3 pt-1">
               {["organisms", "organism_parts", "diseases", "instruments", "experiment_types", "quant_methods", "softwares", "keywords"].map((k) => (
                 <div key={k}>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground font-bold">{k.replace("_", " ")}</div>
+                  <div className="label">{k.replace("_", " ")}</div>
                   <div className="flex flex-wrap gap-1 mt-1">
-                    {list(k).length ? list(k).map((x) => <span key={x} className="rounded-full bg-secondary px-2 py-0.5 text-xs">{x}</span>) : <span className="text-xs text-muted-foreground">empty</span>}
+                    {list(k).length ? list(k).map((x) => <span key={x} className="pill">{x}</span>) : <span className="text-xs text-muted-foreground">empty</span>}
                   </div>
                 </div>
               ))}
@@ -100,7 +100,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
 
       <aside className="grid gap-4 content-start">
         <div className="rounded-xl border bg-card p-4 text-sm grid gap-2">
-          <h2 className="font-bold">Paper</h2>
+          <h2 className="text-lg">Paper</h2>
           {d.paper ? (
             <>
               <p>{d.paper.title ?? "—"}</p>
@@ -115,11 +115,11 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
           )}
         </div>
         <div className="rounded-xl border bg-card p-4 text-sm grid gap-2">
-          <h2 className="font-bold">Find similar</h2>
+          <h2 className="text-lg">Find similar</h2>
           <div className="flex flex-wrap gap-1.5">
             {["organism", "tissue", "enrichment", "acquisition", "labelling"].map((k) =>
               d.tags[k] ? (
-                <Link key={k} href={`/?${k}=${encodeURIComponent(String(d.tags[k]))}`} className="rounded-full bg-teal-soft text-teal px-2.5 py-1 text-xs font-bold hover:brightness-95">
+                <Link key={k} href={`/?${k}=${encodeURIComponent(String(d.tags[k]))}`} className="pill bg-teal-soft text-teal px-2.5 py-1 hover:brightness-95">
                   {TAG_LABEL[k]}: {pretty(d.tags[k])}
                 </Link>
               ) : null
@@ -128,7 +128,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
         </div>
         {d.corrections.length > 0 && (
           <div className="rounded-xl border bg-card p-4 text-sm grid gap-2">
-            <h2 className="font-bold">Corrections reported</h2>
+            <h2 className="text-lg">Corrections reported</h2>
             {d.corrections.map((c) => (
               <p key={c.id} className="text-xs"><b>{TAG_LABEL[c.tag] ?? c.tag}</b> → {c.suggested_value ?? "?"} {c.note && <span className="text-muted-foreground">· {c.note}</span>}</p>
             ))}
@@ -143,7 +143,7 @@ function Field({ label, text }: { label: string; text: string | null | undefined
   if (!text) return null;
   return (
     <div>
-      <div className="text-xs uppercase tracking-wide text-muted-foreground font-bold">{label}</div>
+      <div className="label">{label}</div>
       <p className="mt-1 whitespace-pre-wrap leading-relaxed">{text}</p>
     </div>
   );

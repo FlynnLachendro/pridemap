@@ -28,16 +28,16 @@ export function Correct({ accession, tag, current }: { accession: string; tag: s
           }}
         >
           <label className="grid gap-1 text-sm">
-            <span className="font-bold">Should be</span>
-            <input value={value} onChange={(e) => setValue(e.target.value)} className="h-10 rounded-lg border bg-background px-3" />
+            <span className="font-medium">Should be</span>
+            <input value={value} onChange={(e) => setValue(e.target.value)} className="input h-10" />
           </label>
           <label className="grid gap-1 text-sm">
-            <span className="font-bold">Why (optional)</span>
-            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} className="rounded-lg border bg-background px-3 py-2" placeholder="e.g. the paper says TiO2 enrichment was used" />
+            <span className="font-medium">Why (optional)</span>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} className="input" placeholder="e.g. the paper says TiO2 enrichment was used" />
           </label>
           <DialogFooter>
             <DialogClose render={<Button variant="outline" type="button" />}>Cancel</DialogClose>
-            <Button type="submit" className="bg-teal text-white hover:bg-teal/90">Send correction</Button>
+            <Button type="submit" className="bg-teal text-primary-foreground hover:bg-accent-hover">Send correction</Button>
           </DialogFooter>
         </form>
       </DialogContent>
