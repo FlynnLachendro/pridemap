@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useCompare } from "@/lib/compare-store";
 import { API } from "@/lib/api";
 import { markAnalysed } from "@/lib/progress-store";
+import { RunRemote } from "@/components/run-remote";
 
 type Group = { stem: string; columns: string[]; fill: number };
 type MzTab = {
@@ -76,7 +77,7 @@ type RunStatus = {
 const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
 
 /** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
-function RunHere({ accession }: { accession: string }) {
+function RunHere({ accession, remoteAvailable }: { accession: string; remoteAvailable: boolean }) {
   const router = useRouter();
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -127,6 +128,12 @@ function RunHere({ accession }: { accession: string }) {
           ? <span className="pill">running · {done}/{stages.length - 1} stages</span>
           : status?.finished ? <span className="pill bg-ok-soft text-ok">finished</span>
           : status?.failed ? <span className="pill text-warn">stopped</span> : null}
+        {remoteAvailable && (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2.5 py-0.5 text-xs font-medium text-ok">
+            <span className="size-1.5 rounded-full bg-ok animate-pulse" />
+            Remote MaxQuant connected
+          </span>
+        )}
         <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={starting || !!status?.running} onClick={start}>
           {status?.running ? <><span className="spinner mr-2" />Running…</> : starting ? "Starting…" : status?.exists ? "Resume" : "Run the whole pipeline"}
         </button>
@@ -186,7 +193,7 @@ function OneLiner({ accession }: { accession: string }) {
 }
 
 /** Raw-only dataset: name the engine that can actually run, say why, and hand over a kit for it. */
-function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string }) {
+function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; accession: string; remoteAvailable: boolean }) {
   const tracks = plan.tracks ?? [];
   const stages = plan.stages ?? [];
   const label = tracks.length > 1 ? "search kit" : `${plan.engine_label} kit`;
@@ -200,7 +207,8 @@ function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string })
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
 
-      <RunHere accession={accession} />
+      <RunHere accession={accession} remoteAvailable={remoteAvailable} />
+      {remoteAvailable && plan.maxquant_offered && <RunRemote accession={accession} />}
 
       <p className="text-xs text-muted-foreground">
         All {auto} stages — tool and disk check, download, {plan.convert ? "conversion, " : ""}
@@ -269,6 +277,10 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
   const [res, setRes] = useState<PrideResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [remoteAvailable, setRemoteAvailable] = useState(false);
+  useEffect(() => {
+    fetch(`${API}/remote-mq`).then((r) => r.ok ? r.json() : null).then((d) => { if (d) setRemoteAvailable(d.available); }).catch(() => {});
+  }, []);
   const look = async (a: string) => {
     const x = a.trim().toUpperCase();
     if (!x) return;
@@ -289,7 +301,7 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
       </div>
       {err && <p className="text-warn text-sm">{err}</p>}
       {res && res.note && <p className="note text-sm"><span aria-hidden>ⓘ</span><span>{res.note} {res.raw_files > 0 && <Link href={`/dataset/${res.accession}#reanalyse`} className="underline">Open the set‑up sheet →</Link>}</span></p>}
-      {res && res.plan && res.plan.engine && <SearchKit plan={res.plan} accession={res.accession} />}
+      {res && res.plan && res.plan.engine && <SearchKit plan={res.plan} accession={res.accession} remoteAvailable={remoteAvailable} />}
       {res && all.length > 0 && (
         <ul className="grid gap-1">
           {all.slice(0, 8).map((t) => (

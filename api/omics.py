@@ -2040,6 +2040,10 @@ def remote_mq_info():
 # Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to a remote Linux machine running the Devin-provisioned
 # mq_server. Temporary: tear down by unsetting MQ_SERVER_URL.
 
+# In-process store: accession -> job_id.  Survives UI close/reopen; cleared on DELETE or server restart.
+_active_remote_jobs: dict[str, str] = {}
+
+
 def _mq_remote_url() -> str:
     url = os.environ.get("MQ_SERVER_URL", "").rstrip("/")
     if not url:
@@ -2050,6 +2054,24 @@ def _mq_remote_url() -> str:
 def _mq_auth_headers() -> dict:
     token = os.environ.get("MQ_TOKEN", "")
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+@router.get("/dataset/{accession}/pipeline/remote/active")
+def pipeline_remote_active(accession: str):
+    """Return the active job for this accession (if any) so the UI can resume after a page reload."""
+    job_id = _active_remote_jobs.get(accession)
+    if not job_id:
+        return {"job_id": None, "status": None}
+    base_url = _mq_remote_url()
+    req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        if data.get("status") in ("done", "error"):
+            _active_remote_jobs.pop(accession, None)
+        return {"job_id": job_id, **data}
+    except Exception:
+        return {"job_id": job_id, "status": "running", "log": ""}
 
 
 @router.post("/dataset/{accession}/pipeline/remote")
@@ -2070,7 +2092,9 @@ def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
+            result = json.loads(resp.read())
+        _active_remote_jobs[accession] = result["job_id"]
+        return result
     except urllib.error.HTTPError as e:
         raise HTTPException(e.code, e.read().decode(errors="replace"))
     except Exception as e:
@@ -2110,6 +2134,7 @@ def pipeline_remote_results(accession: str, job_id: str):
 @router.delete("/dataset/{accession}/pipeline/remote/{job_id}")
 def pipeline_remote_delete(accession: str, job_id: str):
     """Clean up a finished job's temp directory on the remote server."""
+    _active_remote_jobs.pop(accession, None)
     base_url = _mq_remote_url()
     req = urllib.request.Request(f"{base_url}/job/{job_id}", headers=_mq_auth_headers(), method="DELETE")
     try:
