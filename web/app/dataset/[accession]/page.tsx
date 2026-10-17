@@ -5,6 +5,7 @@ import { CompareToggle } from "@/components/compare-toggle";
 import { Reanalyse } from "@/components/reanalyse";
 import { Collapsible, Expandable } from "@/components/expandable";
 import { CompareFromHere } from "@/components/compare-from-here";
+import { OmicsLinks } from "@/components/omics-links";
 
 
 const ORDER = ["organism", "sample_type", "tissue", "cell_line", "disease", ...METHOD_TAGS, "depth_proteins"];
@@ -132,6 +133,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
             )}
           </div>
         </div>
+        <OmicsLinks accession={p.accession} />
         {d.corrections.length > 0 && (
           <div className="rounded-xl border bg-card p-4 text-sm grid gap-2">
             <h2 className="text-lg">Corrections reported</h2>

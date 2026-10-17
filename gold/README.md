@@ -17,3 +17,10 @@ Allowed values:
 - **depth_proteins**: integer
 
 Then: `uv run eval_tags.py`
+
+## Corrections from users
+
+`uv run apply_corrections.py` reads the corrections table (the "wrong?" button on every tag), writes `gold/from_corrections.csv`
+in this same column layout (only the corrected tags filled), and re-tags each corrected dataset with the corrections pinned as
+ground truth (model name gets a "(corrected)" suffix). `--dry` prints what it would do without calling the API or writing.
+Then: `uv run eval_tags.py gold/from_corrections.csv`

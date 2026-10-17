@@ -96,6 +96,22 @@ export function Reanalyse({ accession }: { accession: string }) {
         </div>
       )}
 
+      {out.files.total > 0 && (
+        <div className="rounded-xl border bg-card overflow-hidden" data-tour="quantms">
+          <div className="px-4 py-3 border-b flex items-center justify-between gap-3 flex-wrap">
+            <h3 className="text-base">Reanalyse in the cloud with quantms</h3>
+            <a className="btn btn-primary btn-sm" href={`${API}/dataset/${accession}/quantms.zip`} download={`${accession}_quantms.zip`}>Download kit (zip)</a>
+          </div>
+          <div className="px-4 py-3 grid gap-1 text-sm">
+            <div className="label">What you get</div>
+            <ul className="grid gap-0.5 text-xs text-muted-foreground">
+              <li>• <code>sdrf.tsv</code>: one row per raw file with organism, tissue, enzyme, modifications and FTP link filled from the tags</li>
+              <li>• <code>params.yml</code>: quantms settings (FASTA, DDA/DIA, labelling, 1% FDR) {r ? "from the recipe above" : "with unknowns marked not available"}</li>
+              <li>• <code>run.sh</code>: <code>nextflow run bigbio/quantms</code>; runs on your machine or cloud, not here</li>
+            </ul>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

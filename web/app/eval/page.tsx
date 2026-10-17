@@ -1,8 +1,12 @@
-import { API } from "@/lib/api";
+import Link from "next/link";
+import { API, TAG_LABEL } from "@/lib/api";
 
 type Bench = Record<string, { ok: number; fail: number; cost: number; median_seconds: number; agreement: Record<string, number>; avg_agreement: number; null_rate: number | null }>;
 type Report = { rows: number; overall: { n: number; agree: number; accuracy: number | null }; per_tag: Record<string, { n: number; agree: number; accuracy: number; misses: { accession: string; gold: string; model: string | null }[] }> };
 type Out = { bench: Bench | null; report: Report | null; tagged_by_model: Record<string, number> };
+type Correction = { id: number; accession: string; title: string | null; tag: string; suggested_value: string | null; note: string | null; created_at: string; current_value: string | number | null; model: string | null };
+type Corrections = { total: number; corrections: Correction[]; command: string };
+type CorrStats = { total: number; accessions: number; by_tag: Record<string, number>; applied: number };
 
 const TAGS = ["organism", "sample_type", "enrichment", "acquisition", "labelling", "enzyme", "fractionation", "instrument_family", "search_engine"];
 const pct = (x: number | null | undefined) => (x === null || x === undefined ? "—" : `${Math.round(x * 100)}%`);
@@ -10,6 +14,14 @@ const pct = (x: number | null | undefined) => (x === null || x === undefined ? "
 export default async function EvalPage() {
   let d: Out | null = null;
   try { d = await (await fetch(`${API}/eval`, { cache: "no-store" })).json(); } catch { d = null; }
+  let corr: Corrections | null = null;
+  let cstats: CorrStats | null = null;
+  try {
+    [corr, cstats] = await Promise.all([
+      fetch(`${API}/corrections?limit=200`, { cache: "no-store" }).then((r) => r.json()),
+      fetch(`${API}/corrections/stats`, { cache: "no-store" }).then((r) => r.json()),
+    ]);
+  } catch { corr = null; cstats = null; }
   return (
     <div className="grid gap-8 max-w-5xl">
       <div>
@@ -42,6 +54,51 @@ export default async function EvalPage() {
         ) : (
           <p className="text-sm text-muted-foreground">Not run yet. Charlotte and Juri fill <code>gold/gold_50.csv</code>, then <code>uv run eval_tags.py</code> writes the report that appears here.</p>
         )}
+      </section>
+
+      <section className="grid gap-3" data-tour="corrections">
+        <div className="flex items-baseline justify-between gap-3 flex-wrap">
+          <h2 className="text-2xl">Corrections from users</h2>
+          {cstats && (
+            <span className="text-sm text-muted-foreground tabular">
+              {cstats.total} correction{cstats.total === 1 ? "" : "s"} on {cstats.accessions} dataset{cstats.accessions === 1 ? "" : "s"}
+              {cstats.applied > 0 && <> · {cstats.applied} re-tagged</>}
+            </span>
+          )}
+        </div>
+        {cstats && cstats.total > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(cstats.by_tag).map(([t, n]) => <span key={t} className="pill">{TAG_LABEL[t] ?? t} <b className="tabular">{n}</b></span>)}
+          </div>
+        )}
+        {corr && corr.corrections.length > 0 ? (
+          <div className="rounded-xl border bg-card overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="border-b"><th className="text-left p-3 label">dataset</th><th className="text-left p-3 label">tag</th><th className="text-left p-3 label">model said</th><th className="text-left p-3 label">user said</th><th className="text-left p-3 label">note</th><th className="text-right p-3 label">when</th></tr></thead>
+              <tbody>
+                {corr.corrections.map((c) => (
+                  <tr key={c.id} className="border-b last:border-0 align-top">
+                    <td className="p-3 font-mono text-xs"><Link className="underline" href={`/dataset/${c.accession}`}>{c.accession}</Link></td>
+                    <td className="p-3 text-xs">{TAG_LABEL[c.tag] ?? c.tag}</td>
+                    <td className="p-3 text-xs text-muted-foreground">{c.current_value === null || c.current_value === undefined ? "null" : String(c.current_value)}{c.model?.endsWith("(corrected)") && <span className="pill ml-1">re-tagged</span>}</td>
+                    <td className="p-3 text-xs font-semibold">{c.suggested_value ?? "null"}</td>
+                    <td className="p-3 text-xs text-muted-foreground max-w-xs">{c.note ?? ""}</td>
+                    <td className="p-3 text-xs text-muted-foreground tabular text-right whitespace-nowrap">{c.created_at.slice(0, 10)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">{corr ? "No corrections yet. Every tag on a dataset page has a “wrong?” button." : "API not reachable."}</p>
+        )}
+        <div className="note">
+          <div className="grid gap-1">
+            <b>Re-tag with corrections pinned</b>
+            <code className="text-xs">{corr?.command ?? "uv run apply_corrections.py"}</code>
+            <span className="text-xs text-muted-foreground">writes <code>gold/from_corrections.csv</code>, re-tags each corrected dataset with the corrections as ground truth; <code>--dry</code> to preview</span>
+          </div>
+        </div>
       </section>
 
       <section className="grid gap-3">
