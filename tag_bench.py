@@ -111,7 +111,7 @@ def call(client: httpx.Client, model: str, p: dict, use_schema=True):
 
 
 def cmd_select(n):
-    con = sqlite3.connect(DB)
+    con = sqlite3.connect(DB, timeout=120)
     accs = [r[0] for r in con.execute(
         "SELECT t.accession FROM tags t JOIN projects p USING(accession) JOIN papers pp ON pp.pubmed_id=p.pubmed_id "
         "WHERE t.model='claude-sonnet-5' AND length(pp.methods_text) > 500 ORDER BY t.accession LIMIT ?", (n,))]
@@ -122,7 +122,7 @@ def cmd_select(n):
 def cmd_run(model, workers, limit):
     key = os.environ.get("OPENROUTER_API_KEY")
     assert key, "OPENROUTER_API_KEY missing"
-    con = sqlite3.connect(DB, check_same_thread=False)
+    con = sqlite3.connect(DB, check_same_thread=False, timeout=120)
     ensure_table(con)
     accs = [a for a in BENCH.read_text().split() if a]
     done = {r[0] for r in con.execute("SELECT accession FROM tags_bench WHERE model=? AND ok=1", (model,))}
@@ -180,7 +180,7 @@ def norm(v):
 
 
 def cmd_report():
-    con = sqlite3.connect(DB)
+    con = sqlite3.connect(DB, timeout=120)
     con.row_factory = sqlite3.Row
     ensure_table(con)
     accs = [a for a in BENCH.read_text().split() if a]

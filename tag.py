@@ -174,7 +174,7 @@ def main():
     ap.add_argument("--render-dir", help="write system prompt + one rendered input per dataset to this dir and exit")
     a = ap.parse_args()
 
-    con = sqlite3.connect(DB, check_same_thread=False)
+    con = sqlite3.connect(DB, check_same_thread=False, timeout=120)
     rows = load(con, a.accessions, a.limit, a.force)
     print(f"to tag: {len(rows)} model={a.model}", flush=True)
     if a.dry:

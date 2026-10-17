@@ -11,7 +11,7 @@ from tag import Tags, DB, VOCAB  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("dir"); ap.add_argument("--model", default="claude-sonnet-5")
-    a = ap.parse_args(); con = sqlite3.connect(DB); n = bad = 0
+    a = ap.parse_args(); con = sqlite3.connect(DB, timeout=120); n = bad = 0
     for f in sorted(pathlib.Path(a.dir).glob("PXD*.json")):
         acc = f.stem
         try:

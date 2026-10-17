@@ -88,7 +88,7 @@ async def one(client: httpx.AsyncClient, sem: asyncio.Semaphore, pmid: int):
 
 
 async def main(limit, accessions, concurrency):
-    con = sqlite3.connect(DB)
+    con = sqlite3.connect(DB, timeout=120)
     q = "SELECT DISTINCT p.pubmed_id FROM projects p LEFT JOIN papers pp ON pp.pubmed_id=p.pubmed_id WHERE p.pubmed_id IS NOT NULL AND pp.pubmed_id IS NULL"
     params = ()
     if accessions:

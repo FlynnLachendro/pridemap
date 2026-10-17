@@ -158,7 +158,7 @@ def main():
     if not keys:
         sys.exit(f"set {prov['keys_env']} (comma-separated) or {prov['key_env']} in .env")
     keyring = Keys(keys)
-    con = sqlite3.connect(DB, check_same_thread=False)
+    con = sqlite3.connect(DB, check_same_thread=False, timeout=120)
     rows = load(con, a.accessions, a.limit, a.force)
     print(f"{a.provider}/{model}: {len(rows)} to tag, {len(keys)} key(s), {a.workers} workers", flush=True)
     if not rows:
