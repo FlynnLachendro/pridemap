@@ -300,7 +300,7 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
         )}
         {!status?.running && (
           <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={starting} onClick={start}>
-            {starting ? "Starting…" : status?.exists ? "Resume" : "Run the whole pipeline"}
+            {starting ? "Starting…" : status?.failed ? "Start" : status?.exists ? "Resume" : "Run the whole pipeline"}
           </button>
         )}
       </div>
@@ -310,7 +310,15 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
       </p>
       {starting && <p className="text-xs text-teal">Initialising pipeline…</p>}
       {err && <p className="text-xs text-warn">{err}</p>}
-      {stages.length > 0 && (status?.running || status?.finished || status?.failed) && (
+      {status?.failed && !status?.running && (() => {
+        const failedStage = stages.find((s) => s.state === "failed");
+        return (
+          <p className="text-xs text-warn">
+            Last run: failed{failedStage ? ` · ${failedStage.label}${failedStage.message ? ` — ${failedStage.message}` : ""}` : ""}
+          </p>
+        );
+      })()}
+      {stages.length > 0 && (status?.running || status?.finished) && (
         <ol className="grid gap-0.5 text-xs">
           {stages.map((s) => (
             <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
@@ -318,14 +326,18 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
               {s.label}
               {s.seconds != null && <span className="text-faint"> · {Math.floor(s.seconds / 60)}m {s.seconds % 60}s</span>}
               {s.message && <span className="text-faint"> · {s.message}</span>}
-              {s.state === "running" && s.steps.length > 0 && (
-                <div className="pl-6 text-faint">{s.steps[s.steps.length - 1]}</div>
+              {(s.state === "running" || s.state === "failed") && s.steps.length > 0 && (
+                <div className="pl-6 text-faint">
+                  {s.state === "failed"
+                    ? s.steps.map((t, i) => <div key={i}>{t}</div>)
+                    : s.steps[s.steps.length - 1]}
+                </div>
               )}
             </li>
           ))}
         </ol>
       )}
-      {status?.log && status.log.length > 0 && (
+      {status?.log && status.log.length > 0 && !status?.failed && (
         status?.running
           ? <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">{status.log.slice(-10).join("\n")}</pre>
           : (
