@@ -20,3 +20,5 @@ data/chunks/
 analysis/data/*.csv
 analysis/out*/
 data/uploads/
+demo/node_modules/
+demo/videos/
