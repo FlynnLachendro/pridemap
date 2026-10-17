@@ -10,7 +10,7 @@ const PRESETS: { label: string; by: string }[] = [
   { label: "organism → tissue → disease", by: "organism,tissue,disease" },
 ];
 
-const PALETTE = ["#0E7C86", "#D9731A", "#2E7D4F", "#6A4C93", "#B23A3A", "#2B6CB0", "#8C6D1F", "#5A7D7C", "#A0522D", "#4B5B68"];
+const PALETTE = ["#8b5e3c", "#4a7c8f", "#5a7d4c", "#6b5b8a", "#b08d57", "#a84032", "#7a5030", "#8b5e6b", "#5a8da0", "#6e6354"]; // Arbor node colours
 
 type Box = { node: MapNode; x: number; y: number; w: number; h: number };
 
