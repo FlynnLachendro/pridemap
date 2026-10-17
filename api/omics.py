@@ -970,6 +970,28 @@ MSMS_PARAMS: list[tuple[str, str, str, str, str, str, str, str, str]] = [
 # vary here. Looked up the same way as the analysers, so the array has to be present for the same reason.
 FRAGMENTATION_TYPES = ["CID", "HCD", "ETD", "PQD", "ETHCD", "ETCID", "UVPD", "Unknown"]
 
+# Modifications MaxQuant allows on a peptide that still counts towards protein quantification. An absent
+# element parses as null and MaxQuant dereferences it while preparing the combined folder — 30 minutes in,
+# with the search already done. Empty would parse, but it is not the same thing: it would silently change
+# which peptides are quantified. These are MaxQuant's own defaults, read from the GUI parameter
+# "Modifications used in protein quantification" on a default parameter tree.
+RESTRICT_MODS = ["Oxidation (M)", "Acetyl (Protein N-term)"]
+
+# Settings for workflows this kit does not generate: isobaric labelling, crosslinking and DIA. They are
+# emitted as present-but-empty so that any code path reading them finds a list rather than null, which is
+# cheap here because empty is what they genuinely are for a label-free DDA search.
+#
+# Deliberately NOT listed: enzymesFirstSearch and variableModificationsFirstSearch. Those belong to the
+# first search, which this kit does run, and a run has shown MaxQuant handles them absent. "Empty" and
+# "absent" are not interchangeable — absent can mean "inherit the main search" while empty can mean "none
+# at all" — so on an active path the version that is known to work wins over the tidier-looking one.
+EMPTY_GROUP_LISTS = [
+    "isobaricLabels",
+    "additionalVariableModifications", "additionalVariableModificationProteins",
+    "crosslinkModifications", "crosslinkSites", "crosslinkNetworkFiles",
+    "diaLibraryPaths", "diaMsmsPaths", "diaPeptidePaths", "diaEvidencePaths",
+]
+
 
 def _msms_params_xml() -> list[str]:
     """The two per-analyser arrays MaxQuant indexes by name. Mandatory, so they are generated, not optional."""
@@ -1065,8 +1087,13 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         f"         <matchBetweenRuns>{'True' if lfq else 'False'}</matchBetweenRuns>",
         # Labelling. Not optional even when there is no label: MaxQuant's deisotoping stage calls
         # GetLmods() unconditionally, which dereferences labelMods, so omitting these three throws
-        # NullReferenceException ~13 minutes in, after feature detection has already succeeded. A
-        # label-free group is multiplicity 1 with a single empty label, not an absent one.
+        # NullReferenceException ~13 minutes in, after feature detection has already succeeded.
+        #
+        # labelMods must hold exactly <multiplicity> entries, so a label-free group carries ONE empty
+        # <string/> rather than no children. MaxQuant allocates its apl name table as
+        # [fragmentationTypes x massAnalysers, multiplicity] and then indexes the label list by the
+        # multiplicity counter, so an empty list means l[0] on an empty array: "Index was outside the
+        # bounds of the array" during MS/MS preparation.
         "         <multiplicity>1</multiplicity>",
         "         <maxLabeledAa>0</maxLabeledAa>",
         _xml_list("labelMods", [""]).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
@@ -1074,9 +1101,14 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         "         <maxMissedCleavages>2</maxMissedCleavages>",
         _xml_list("variableModifications", variable).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
         _xml_list("fixedModifications", fixed or ["Carbamidomethyl (C)"]).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
+        *[_xml_list(tag, []).replace("      <", "         <") for tag in EMPTY_GROUP_LISTS],
         "      </parameterGroup>",
         "   </parameterGroups>",
         *_msms_params_xml(),
+        "   <restrictProteinQuantification>True</restrictProteinQuantification>",
+        _xml_list("restrictMods", RESTRICT_MODS),
+        _xml_list("massDifferenceMods", []),
+        _xml_list("referenceChannel", []),
         "   <peptideFdr>0.01</peptideFdr>",
         "   <proteinFdr>0.01</proteinFdr>",
         "   <minPepLen>7</minPepLen>",

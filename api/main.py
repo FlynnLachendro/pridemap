@@ -1300,6 +1300,7 @@ def dataset_results(accession: str):
     plan = search_plan(dict(con.execute("SELECT * FROM tags WHERE accession=?", (accession,)).fetchone() or {}),
                        [f.get("file_name") or "" for f in files if (f.get("category") or "").upper() == "RAW"])
     plan["kit_url"] = f"/dataset/{accession}/searchkit.zip"
+    plan["raw_names"] = sorted(f.get("file_name") or "" for f in files if (f.get("category") or "").upper() == "RAW" and f.get("file_name"))
     out["plan"] = plan
     if not (tables or archives):
         # Raw only: surface a note explaining what's there and why a search is needed.
