@@ -15,13 +15,16 @@ find_free_port() {
 echo "▶ PRIDE Map dev startup"
 echo ""
 
-# 1. Demo data
+# 1. Data. Default is the bundled data/demo shards: no download, ~20 s, every tagged dataset.
+#    PRIDEMAP_DATA_SOURCE=release (or auto) pulls the full 41,548-project pride.db.zst from the
+#    GitHub release instead — 276 MB down, 1.3 GB on disk; auto falls back to the shards offline.
+DATA_SOURCE=${PRIDEMAP_DATA_SOURCE:-demo}
 if [ ! -f data/pride.db ]; then
-  echo "📦 Loading demo data (296 datasets) into data/pride.db..."
-  uv run load_demo.py
-  echo "✅ Demo data loaded"
+  echo "📦 Building data/pride.db (source: $DATA_SOURCE)..."
+  uv run fetch_db.py --source "$DATA_SOURCE"
+  echo "✅ Data loaded"
 else
-  echo "✅ data/pride.db already exists — skipping demo load"
+  echo "✅ data/pride.db already exists — skipping load"
 fi
 echo ""
 

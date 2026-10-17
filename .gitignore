@@ -1,5 +1,7 @@
 data/raw/
 data/*.db
+data/*.zst
+data/*.part
 !data/demo/
 data/*.db-journal
 data/*.db-wal

@@ -18,13 +18,22 @@ git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
 
 ### Option A — demo in 2 minutes (no API key, no crawl)
 
-Uses the bundled data in `data/demo/` (every tagged dataset, 41k, gzipped shards; loaded on first run in ~8 s).
+Uses the bundled data in `data/demo/` (every tagged dataset, 41k, gzipped shards; loaded on first run in ~20 s).
 
 ```bash
 ./dev.sh
 ```
 
-That's it. `dev.sh` loads the demo data automatically if `data/pride.db` doesn't exist, then starts both servers.
+That's it. `dev.sh` builds `data/pride.db` if it doesn't exist (via `uv run fetch_db.py`), then starts both servers.
+
+Want the *complete* database — the ~190 untagged projects, the cached PRIDE file listings and the raw PRIDE
+JSON per project — instead of the bundled shards? Point `dev.sh` at the GitHub release:
+
+```bash
+PRIDEMAP_DATA_SOURCE=release ./dev.sh     # 276 MB download, 1.3 GB on disk
+```
+
+See [Getting the data](#getting-the-data) for the standalone command and the other sources.
 
 | Service | URL |
 |---------|-----|
@@ -47,14 +56,19 @@ HF_TOKENS=hf_a,hf_b,...        # for tag_oai.py --provider hf (optional, rotated
 NEXT_PUBLIC_API_URL=http://localhost:8000   # web → API base (default if omitted)
 ```
 
-**2. Crawl all PRIDE project metadata** (~250 MB JSON, ~60 min)
+**2. Get `data/pride.db`** — one of three ways, cheapest first:
 
 ```bash
-uv run crawl_pride.py    # → data/raw/page_*.json
-uv run build_db.py       # → data/pride.db
+uv run fetch_db.py                     # release if reachable, else the bundled shards  (recommended)
+uv run fetch_db.py --source release    # full DB from the GitHub release: 276 MB, ~2 min
+uv run crawl_pride.py && uv run build_db.py   # rebuild from PRIDE: ~250 MB JSON, ~60 min
 ```
 
-Smoke‑check: `sqlite3 data/pride.db "select count(*) from projects;"` should print ~42 000.
+Only the third one re‑reads PRIDE, and it's the only one that picks up datasets added since the release.
+Everything below works the same whichever you pick.
+
+Smoke‑check: `sqlite3 data/pride.db "select count(*) from projects;"` — ~42 000 from the release or a crawl,
+41 361 from the bundled shards.
 
 **3. Pick a slice and fetch paper Methods**
 
@@ -86,6 +100,37 @@ cd web && npm i && npm run dev
 
 ---
 
+### Getting the data
+
+Everything the app serves lives in one SQLite file, `data/pride.db`. There are three ways to get it, and
+`uv run fetch_db.py` owns the first two:
+
+| Source | Command | Cost | What you get |
+|---|---|---|---|
+| **GitHub release** | `uv run fetch_db.py --source release` | 276 MB download, 1.3 GB on disk, ~2 min | All 41,548 projects (incl. the ~190 untagged), 41,361 tagged, 26,724 papers, 537,693 evidence rows, plus the cached PRIDE file listings, collections, saved searches and raw PRIDE JSON per project |
+| **Bundled shards** | `uv run fetch_db.py --source demo` | no download, ~20 s | The 41,361 tagged datasets, 26,618 papers, 537,693 evidence rows — from `data/demo/*.jsonl.gz` (18 shards, 177 MB, in the repo) |
+| **Crawl PRIDE** | `uv run crawl_pride.py && uv run build_db.py` | ~250 MB JSON, ~60 min | Current project metadata straight from PRIDE, including anything added since the release. No tags until you run a tagger |
+
+`uv run fetch_db.py` with no arguments is `--source auto`: the release if it is reachable, the bundled shards
+if it isn't, so a fresh clone works offline. It is safe to re-run — it leaves an existing `data/pride.db`
+alone unless you pass `--force`.
+
+```bash
+uv run fetch_db.py --dry-run            # what it would do, downloads nothing
+uv run fetch_db.py --tag latest         # newest release instead of the pinned v1.0-hackathon
+uv run fetch_db.py --force              # replace the database you have
+uv run fetch_db.py --keep-archive       # keep pride.db.zst after expanding it
+```
+
+The download resumes if the connection drops (just re-run it), the expanded file is checked with SQLite
+before it replaces anything, and a corrupt archive is discarded rather than cached. `./dev.sh` calls this
+script; `PRIDEMAP_DATA_SOURCE=release ./dev.sh` picks the release instead of the default shards.
+
+`select_slice.py`, `fetch_methods.py`, the taggers and the API all read whichever database you built — no
+flags to change.
+
+---
+
 ### MCP server (Claude Desktop / Claude Code / Cursor)
 
 ```bash
@@ -101,7 +146,7 @@ The `/mcp` page in the running web UI explains the available tools and has a liv
 
 - **[HANDOVER.html](HANDOVER.html)** — everything: run it in 15 minutes, repo map, pipeline, API, UI, MCP, the tour, gotchas, numbers, the pitch script and judge Q&A, submission checklist.
 - **[mani-claude-handover.md](mani-claude-handover.md)** — the same for an AI assistant; point Claude Code at it first.
-- Data: `data/demo/*.jsonl.gz` in the repo (every tagged dataset, loaded by `./dev.sh`) and the full `pride.db.zst` plus the backup tour video on the [v1.0-hackathon release](https://github.com/FlynnLachendro/pridemap/releases/tag/v1.0-hackathon).
+- Data: `uv run fetch_db.py` gets you `data/pride.db` either way — the full `pride.db.zst` from the [v1.0-hackathon release](https://github.com/FlynnLachendro/pridemap/releases/tag/v1.0-hackathon) (which also has the backup tour video), or the `data/demo/*.jsonl.gz` shards in the repo if you're offline. `./dev.sh` runs it for you.
 - `.env` (API keys) comes from Flynn directly, never via the repo.
 
 ## What it does
@@ -150,7 +195,9 @@ Needs [uv](https://docs.astral.sh/uv/) and Node 20+. No venvs, no Postgres; ever
 ```bash
 git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
 
-# 1. all PRIDE project metadata (no raw files; ~250 MB JSON, ~60 min) → data/pride.db
+# 1. data/pride.db: the GitHub release (276 MB, ~2 min), else the bundled shards (no download, ~20 s)
+uv run fetch_db.py
+#    ... or rebuild it from PRIDE yourself (~250 MB JSON, ~60 min), which also picks up new datasets:
 uv run crawl_pride.py && uv run build_db.py
 
 # 2. a diverse slice to tag first, and their papers' Methods sections from Europe PMC
@@ -167,7 +214,10 @@ uv run api/main.py                                  # http://localhost:8000/docs
 cd web && npm i && npm run dev                      # http://localhost:3000
 ```
 
-Skip steps 1–3 and use the bundled data: `data/demo/*.jsonl.gz` holds every tagged dataset (27k projects, their papers' Methods text, tags and evidence, 113 MB). `./dev.sh` loads it on first run (`uv run load_demo.py`, ~5 s) and starts both servers. Only the not‑yet‑tagged projects are missing from a fresh clone; step 1 adds them.
+Skip steps 1–3 with `uv run fetch_db.py`: it pulls the complete `pride.db.zst` (41,548 projects) from the
+GitHub release, or loads the bundled `data/demo/*.jsonl.gz` shards (41,361 tagged datasets, their papers'
+Methods text, tags and 537,693 evidence rows, 177 MB in the repo) when the release is out of reach.
+`./dev.sh` does this on first run and starts both servers. See [Getting the data](#getting-the-data).
 
 `/ask` uses Claude to turn the question into filters when `ANTHROPIC_API_KEY` is set, and falls back to a rule‑based parser when it isn't, so the demo never depends on a key.
 
@@ -192,7 +242,8 @@ tag_oai.py            same tagger via Hugging Face router / OpenRouter (DeepSeek
 tag_bench.py          benchmark several models on the same 200 datasets → eval/bench.json
 make_gold_template.py / eval_tags.py   human gold set + agreement report
 analysis/             Odetta's R/Python downstream scripts + example data
-load_demo.py          load bundled demo data without crawling
+fetch_db.py           data/pride.db from the GitHub release, falling back to data/demo (used by dev.sh)
+load_demo.py          load the bundled data/demo shards without crawling
 api/main.py           FastAPI (+ collections_api.py, omics.py, agent_api.py routers)
 api/terms.py          expert terminology map (concept → phrases, implied filters, boosts, conflicts)
 api/tools.py          the agent tools, shared by the MCP server and the in-app console
@@ -205,7 +256,7 @@ HANDOVER.html         the full handover (run, architecture, pitch, gotchas); man
 
 ## Status and honesty
 
-- Tagged: 41,361 of 41,548 datasets (1,661 by Claude Sonnet 5, the rest by DeepSeek V4.1 Flash through Hugging Face's router, ~$33 + ~$50); ~180 failed the model call and ~800 were added to PRIDE after the crawl. The bundle in `data/demo/` (gzipped shards, loaded by `./dev.sh`) carries every tagged dataset; the full SQLite file is attached to the GitHub release as `pride.db.zst` (`zstd -d` it into `data/`). See Eval for the model comparison.
+- Tagged: 41,361 of 41,548 datasets (1,661 by Claude Sonnet 5, the rest by DeepSeek V4.1 Flash through Hugging Face's router, ~$33 + ~$50); ~180 failed the model call and ~800 were added to PRIDE after the crawl. The bundle in `data/demo/` (gzipped shards) carries every tagged dataset; the full SQLite file is attached to the GitHub release as `pride.db.zst`. `uv run fetch_db.py` installs either one. See Eval for the model comparison.
 - The first 291 were tagged by Claude Sonnet 5 through Claude Code sessions using the exact prompt and schema in `tag.py`; every row records which model tagged it.
 - Methods sections were available for ~64% of datasets (open‑access only). The rest were tagged from PRIDE metadata alone and say so.
 - Tags are model output. Confidence and evidence are shown everywhere so you can judge; "wrong?" on any tag records a correction.

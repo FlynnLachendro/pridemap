@@ -22,12 +22,20 @@ PRIDE (EBI's proteomics archive) holds 41,548 mass‑spectrometry datasets, but 
 git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
 # paste the .env Flynn sends you into ./.env (4 lines, KEY=value). Without it: /ask falls back to a rule parser,
 # the agent console on /mcp does not work, tagging does not work. Everything else runs.
-./dev.sh          # first run: loads data/demo/*.jsonl.gz into data/pride.db (5 s), installs web deps, starts API :8000 + web :3000
+./dev.sh          # first run: builds data/pride.db from data/demo/*.jsonl.gz (~20 s), installs web deps, starts API :8000 + web :3000
+
+# want the complete DB (all 41,548 projects, PRIDE file listings, raw PRIDE JSON) instead of the shards?
+PRIDEMAP_DATA_SOURCE=release ./dev.sh     # 276 MB download from the GitHub release, 1.3 GB on disk
 ```
 
 - `./dev.sh` kills anything on ports 8000/3000, starts `uv run api/main.py` and `npm run dev` in `web/`, Ctrl‑C stops both.
 - Needs `uv` (https://docs.astral.sh/uv/) and Node 20+. The API's first `/browse` is slow (~2 s) while a warmer thread fills the cache; after that the landing page is ~10 ms.
-- **What a fresh clone contains vs Flynn's laptop:** the bundle in `data/demo/` (113 MB, 12 gzipped shards) has every *tagged* dataset (27,063 projects, their 18,824 papers' Methods text, the tags and 351,923 evidence rows). Flynn's laptop also has the 14.5k untagged projects (crawled from PRIDE) and the tagger keeps adding to it. If you want all 41.5k rows: `uv run crawl_pride.py && uv run build_db.py` (~60 min, no keys needed) then `uv run load_demo.py` again. Not needed for the demo.
+- **Three ways to get `data/pride.db`, all through `uv run fetch_db.py`** (`./dev.sh` runs it for you):
+  - `--source demo` (the `./dev.sh` default): the bundle in `data/demo/` — 18 gzipped shards, 177 MB in the repo — holds every *tagged* dataset (41,361 projects, 26,618 papers' Methods text, the tags and 537,693 evidence rows). No download, ~20 s, 1.05 GB on disk. Missing only the ~190 untagged projects, the cached PRIDE file listings and the raw PRIDE JSON per project.
+  - `--source release`: `pride.db.zst` off the [v1.0-hackathon release](https://github.com/FlynnLachendro/pridemap/releases/tag/v1.0-hackathon) — the whole 41,548-project SQLite file Flynn built. 276 MB download, 1.36 GB on disk, ~2 min. Resumes if the wifi drops; verified with SQLite before it replaces anything; a corrupt download is discarded, not cached.
+  - no flag (`--source auto`): release if reachable, shards if not. Use this if you don't want to think about it.
+  - Still want it from PRIDE itself (the only way to pick up datasets added since the release)? `uv run crawl_pride.py && uv run build_db.py` (~60 min, no keys needed), then a tagger.
+- `uv run fetch_db.py --dry-run` tells you what it would do without downloading anything. It never touches an existing `data/pride.db` unless you pass `--force`.
 - Ask Flynn for the latest `data/demo/` or `data/pride.db` (1.2 GB) when the tagging run finishes (see §7); or just `git pull`, Flynn will push the refreshed bundle.
 
 Verify: http://localhost:3000 shows "Search PRIDE by how the data was made" with facet counts; http://localhost:8000/docs lists the API; click **▶ Take the tour** in the sidebar and let it run end to end (≈2.5 min, 25 steps, ends on `/tour/done`).
@@ -51,6 +59,9 @@ make_gold_template.py gold/gold_50.csv with blank columns for human labels   eva
 apply_corrections.py  turns "wrong?" corrections into gold rows + re-tags those datasets with corrections pinned as truth
 check_alerts.py       pulls the last N days of PRIDE projects and re-checks every saved search (for cron)
 export_demo.py        every tagged dataset → data/demo/*.jsonl.gz shards (<40 MB each)   load_demo.py loads them
+fetch_db.py           THE way to get data/pride.db without crawling: GitHub release asset (resumable, verified)
+                      with the data/demo shards as fallback. --source auto|release|demo, --dry-run, --force.
+                      Composes load_demo.main() for the demo path; dev.sh calls it (PRIDEMAP_DATA_SOURCE).
 dev.sh                run API + web together
 api/main.py           FastAPI app: /stats /vocab /search /ask /browse /map /compare /dataset/{acc} (+/why /reanalyse
                       /files.txt /methods /correct) /export.sdrf.tsv /eval /protein /analyse/* ; SCORE_SQL ranking,
@@ -126,7 +137,7 @@ Git‑ignored and therefore **not on a fresh clone**: `data/raw/`, `data/pride.d
 - Analyse from PRIDE: `GET /dataset/{acc}/results` (candidate tables; raw-only datasets get a note) and `POST /analyse/from_pride {accession, file_name}` (fetches from PRIDE FTP over https into `data/uploads/<ACC>_<file>.<ext>`, unzips the best table from archives, 400 MB cap). UI: `FromPride` panel at the top of `/analyse` (`?acc=PXD…` prefills), Workflow step 4 links `Analyse PXD… →` per confirmed dataset.
 - Eval page: three explainer cards (what a tag is, what agreement means and against what, what is missing) + captions on both tables.
 - Dataset page `BackLink`; sidebar collections list collapsible (`pridemap.side-collections`), count badge on the entry.
-- Full data: tagging finished Saturday evening (41,361 of 41,548; ~180 model failures, ~800 projects newer than the crawl). `data/demo/*.jsonl.gz` carries all of it; `pride.db.zst` is a GitHub release asset for a one-file install: `zstd -d pride.db.zst -o data/pride.db`.
+- Full data: tagging finished Saturday evening (41,361 of 41,548; ~180 model failures, ~800 projects newer than the crawl). `data/demo/*.jsonl.gz` carries all of it; `pride.db.zst` is a GitHub release asset with the untagged projects and caches too. `uv run fetch_db.py` installs either (or `zstd -d pride.db.zst -o data/pride.db` by hand).
 
 ## 8. Open work, in priority order
 
