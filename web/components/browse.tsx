@@ -2,16 +2,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { API, ask, pretty, remember, TAG_LABEL, TOUR_Q_HISTORY_KEY, type AskOut, type Dropped, type Result } from "@/lib/api";
+import { API, ask, pretty, remember, TAG_LABEL, TOUR_Q_HISTORY_KEY, type AskOut, type Dropped, type Result, type TermInfo } from "@/lib/api";
 import { ResultCard } from "@/components/result-card";
 import { ProteinCard } from "@/components/protein-card";
 import { CompareToggle } from "@/components/compare-toggle";
 import { CardSkeleton } from "@/components/skeleton";
 import { SaveSearch } from "@/components/save-search";
+import { AskProgress } from "@/components/ask-progress";
 
 type Facets = Record<string, [string, number][]>;
 type BrowseRow = Result & { tagged: boolean; raw?: { organisms: string[]; organism_parts: string[]; instruments: string[]; experiment_types: string[] } };
-type BrowseOut = { filters: Record<string, string | number | boolean>; sort: string; page: number; size: number; total: number; counts: { tagged: number; untagged: number }; results: BrowseRow[]; facets: Facets };
+type BrowseOut = { filters: Record<string, string | number | boolean>; sort: string; page: number; size: number; total: number; counts: { tagged: number; untagged: number }; terms_info?: TermInfo[]; avoid_info?: TermInfo[]; results: BrowseRow[]; facets: Facets };
 
 const FACETS: { key: string; label: string; search?: boolean }[] = [
   { key: "organism", label: "Organism", search: true },
@@ -49,6 +50,7 @@ export function Browse() {
   const [facetFind, setFacetFind] = useState<Record<string, string>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [recent, setRecent] = useState<string[]>([]);
+  const [asking, setAsking] = useState(false);
   const lastUrl = useRef("");
 
   // all state lives in the URL so links from the map / dataset pages and sharing just work
@@ -94,6 +96,7 @@ export function Browse() {
     if (!t) { push({}); setAskOut(null); return; }
     remember(t);
     if (looksLikeQuestion(t)) {
+      setAsking(true);
       start(async () => {
         try {
           const a = await ask(t);
@@ -101,7 +104,7 @@ export function Browse() {
           const next: Record<string, string | undefined> = { ask: t };
           Object.entries(a.filters).forEach(([k, v]) => { if (v !== null && v !== undefined && v !== false && typeof v !== "boolean") next[k === "since" ? "since" : k] = String(v); });
           push(next);
-        } catch (e) { setErr(String(e)); }
+        } catch (e) { setErr(String(e)); } finally { setAsking(false); }
       });
     } else {
       setAskOut(null);
@@ -116,7 +119,15 @@ export function Browse() {
     push({ ...filters, [pk]: next.join(sep(key)) || undefined, page: undefined });
   }
   const isOn = (key: string, value: string) => (filters[paramKey(key)] ?? "").split(sep(key)).includes(value);
-  const activeChips = Object.entries(filters).filter(([k]) => !["page", "size", "sort", "tagged", "view", "ask", "q", "tour"].includes(k));
+  const activeChips = Object.entries(filters).filter(([k]) => !["page", "size", "sort", "tagged", "view", "ask", "q", "tour", "terms", "avoid", "prefer"].includes(k));
+  const termInfo = [...(askOut?.terms_info ?? out?.terms_info ?? []), ...(askOut?.avoid_info ?? out?.avoid_info ?? [])];
+  const termIds = (filters.terms ?? "").split(",").filter(Boolean);
+  const avoidIds = (filters.avoid ?? "").split(",").filter(Boolean);
+  const prefers = (filters.prefer ?? "").split(",").filter(Boolean);
+  const setTerms = (ids: string[], avoid: string[]) => push({ ...filters, terms: ids.join(",") || undefined, avoid: avoid.join(",") || undefined, page: undefined });
+  const includeConcept = (id: string) => setTerms([...termIds.filter((x) => x !== id), id], avoidIds.filter((x) => x !== id));
+  const dropConcept = (id: string) => setTerms(termIds.filter((x) => x !== id), avoidIds);
+  const labelOf = (id: string) => termInfo.find((t) => t.id === id)?.label ?? id.replace(/_/g, " ");
 
   const total = out?.total ?? 0;
   const page = Number(filters.page ?? 1);
@@ -146,10 +157,28 @@ export function Browse() {
       </div>
 
       {err && <p className="text-warn text-sm">API error: {err}</p>}
+      <AskProgress active={asking} />
 
-      {askOut && (
+      {askOut && !asking && (
         <div className="card p-4 grid gap-2 text-sm" data-tour="ask">
           <p><span className="label mr-2">How I read it</span>{askOut.interpretation} <span className="text-faint font-mono text-xs">({askOut.parser === "llm" ? "Claude" : "rules"})</span></p>
+          {(termIds.length > 0 || avoidIds.length > 0) && (
+            <div className="grid gap-1.5" data-tour="terms">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="label mr-1">Expert terms</span>
+                {termIds.map((id) => { const t = termInfo.find((x) => x.id === id); return (
+                  <span key={id} className="term-chip" title={t?.note ?? ""}>{labelOf(id)}<button type="button" className="opacity-60 hover:opacity-100" aria-label={`drop ${labelOf(id)}`} onClick={() => dropConcept(id)}>×</button></span>
+                ); })}
+                {avoidIds.map((id) => (
+                  <span key={id} className="term-chip avoid" title="mentioned alongside what you asked for; such datasets are ranked lower and flagged, not hidden">not {labelOf(id)}<button type="button" className="underline opacity-80 hover:opacity-100 font-normal" onClick={() => includeConcept(id)}>include</button></span>
+                ))}
+              </div>
+              {termInfo.filter((t) => termIds.includes(t.id)).map((t) => (
+                <p key={t.id} className="text-xs text-muted-foreground"><b className="text-foreground">{t.label}:</b> {t.note}{t.phrases.length > 0 && <> · searched the text for <span className="font-mono">{t.phrases.slice(0, 6).join(" · ")}{t.phrases.length > 6 ? ` · +${t.phrases.length - 6}` : ""}</span></>}{Object.keys(t.filters).length > 0 && <> · filter {Object.entries(t.filters).map(([k, v]) => `${TAG_LABEL[k] ?? k}: ${pretty(v)}`).join(", ")}</>}</p>
+              ))}
+              {prefers.length > 0 && <p className="text-xs text-faint">Ranked up, not filtered: {prefers.map((kv) => { const [k, v] = kv.split("="); return `${TAG_LABEL[k] ?? k} ${pretty(v)}`; }).join(", ")} (the question didn&apos;t name the method, so these stay as preferences).</p>}
+            </div>
+          )}
           {askOut.dropped && askOut.dropped.length > 0 && (
             <div className="grid gap-1.5">
               {askOut.dropped.map((d: Dropped) => (
@@ -225,8 +254,10 @@ export function Browse() {
               {(activeChips.length > 0 || filters.q) && out && <SaveSearch key={JSON.stringify(activeChips) + (filters.q ?? "")} filters={filters} total={total} />}
             </div>
           </div>
-          {activeChips.length > 0 && (
+          {(activeChips.length > 0 || termIds.length > 0 || avoidIds.length > 0) && (
             <div className="flex flex-wrap gap-1.5">
+              {termIds.map((id) => <button key={"t" + id} type="button" onClick={() => dropConcept(id)} className="pill bg-teal-soft text-teal"><span className="opacity-70">term</span> {labelOf(id)} <span className="opacity-60">×</span></button>)}
+              {avoidIds.map((id) => <button key={"a" + id} type="button" onClick={() => includeConcept(id)} className="pill bg-peak-soft text-peak" title="click to include"><span className="opacity-70">not</span> {labelOf(id)}</button>)}
               {activeChips.map(([k, v]) => v.split(sep(k === "years" ? "year" : k)).map((one) => (
                 <button key={k + one} type="button" onClick={() => toggleFacet(k === "years" ? "year" : k, one)} className="pill bg-teal-soft text-teal">
                   <span className="opacity-70">{TAG_LABEL[k] ?? (k === "years" ? "year" : k)}</span> {pretty(one)} <span className="opacity-60">×</span>

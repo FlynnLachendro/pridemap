@@ -30,7 +30,7 @@ git clone https://github.com/FlynnLachendro/pridemap && cd pridemap
 - **What a fresh clone contains vs Flynn's laptop:** the bundle in `data/demo/` (113 MB, 12 gzipped shards) has every *tagged* dataset (27,063 projects, their 18,824 papers' Methods text, the tags and 351,923 evidence rows). Flynn's laptop also has the 14.5k untagged projects (crawled from PRIDE) and the tagger keeps adding to it. If you want all 41.5k rows: `uv run crawl_pride.py && uv run build_db.py` (~60 min, no keys needed) then `uv run load_demo.py` again. Not needed for the demo.
 - Ask Flynn for the latest `data/demo/` or `data/pride.db` (1.2 GB) when the tagging run finishes (see §7); or just `git pull`, Flynn will push the refreshed bundle.
 
-Verify: http://localhost:3000 shows "Search PRIDE by how the data was made" with facet counts; http://localhost:8000/docs lists the API; click **▶ Take the tour** in the sidebar and let it run end to end (≈2.5 min, 24 steps, ends on `/tour/done`).
+Verify: http://localhost:3000 shows "Search PRIDE by how the data was made" with facet counts; http://localhost:8000/docs lists the API; click **▶ Take the tour** in the sidebar and let it run end to end (≈2.5 min, 25 steps, ends on `/tour/done`).
 
 ## 4. Repo map
 
@@ -57,6 +57,11 @@ api/main.py           FastAPI app: /stats /vocab /search /ask /browse /map /comp
                       fts_query(), facets() single pass + 60 s cache, _BROWSE_CACHE 120 s + startup warmer thread
 api/collections_api.py  /collections CRUD + export.sdrf.tsv + download.sh + accessions.txt ; /saved CRUD + /check + /seen
 api/omics.py          /dataset/{acc}/omics (OmicsDI, cached in DB) ; /dataset/{acc}/quantms.zip ; /corrections, /corrections/stats
+api/terms.py          EXPERT TERMINOLOGY MAP: ~45 concepts (immunopeptidomics, class I/II, interactome, diGly, DIA, TMT, timsTOF, biofluid…) each with
+                      detect regex, FTS phrases, implied hard filters, soft boosts, conflicts, note. detect()/info()/mentions()/glossary_for_prompt().
+                      main.py: fts_expr() ANDs one OR-group per text-only concept; apply_terms() sets filters/terms/avoid/prefer; soften_unstated() turns
+                      parser guesses about methods the question never named into `prefer` (ranking boost) instead of filters; search() adds bm25 (title x8)
+                      + CASE boosts (boost params are PREPENDED to the WHERE params: SELECT placeholders bind first) + 'mentions X' fits / 'also mentions Y' watch.
 api/tools.py          ONE list of agent tools (search_datasets, ask_question, get_dataset, compare_datasets, setup_sheet,
                       protein_info, why_candidate) + call() ; used by both the MCP server and the in-app agent
 api/mcp_server.py     MCP server over api/tools.py: `uv run api/mcp_server.py` (stdio) or `--http` (streamable HTTP :8010/mcp).
@@ -85,7 +90,7 @@ Git‑ignored and therefore **not on a fresh clone**: `data/raw/`, `data/pride.d
 - Sidebar: `NAV_GROUPS` (Find / Work / Yours / Trust) with lucide icons; classes `.nav-group .nav-link .nav-sub .nav-sub-link .switch` in globals.css. Landing hero band `.hero`. Empty states `components/empty-state.tsx` (`.empty`).
 - Client state in localStorage: `pridemap.compare` (shortlist), `pridemap.confirmed`, `pridemap.setup-seen`, `pridemap.analysed`, `pridemap.checked`, `pridemap.rail`, `pridemap.history` (recent searches). Collections and saved searches are server‑side tables in `pride.db`.
 - `lib/api.ts` has `API` (`NEXT_PUBLIC_API_URL`, default http://localhost:8000) and all types/fetchers.
-- `lib/tour.ts` the 24 tour steps (route, `data-tour` selector, title, text, optional `before` action, `next` href, popover side/align, scroll mode). `components/tour.tsx` is the driver.js runner: reads `?tour=N`, runs the steps for the current route, performs `ACTIONS` (typing the question, ticking DIA, shortlisting, saving a search/collection via the API, confirming a candidate, loading the example table, running the analysis, running the agent), scrolls the **nearest scrollable ancestor** (the app scrolls inside `<main>`, not the window), hides the popover while an action runs (`body.tour-busy`), hops routes with `router.push(href?tour=N)`. `TourButton` clears localStorage and does a full page load of `/?tour=0`.
+- `lib/tour.ts` the 25 tour steps (route, `data-tour` selector, title, text, optional `before` action, `next` href, popover side/align, scroll mode). `components/tour.tsx` is the driver.js runner: reads `?tour=N`, runs the steps for the current route, performs `ACTIONS` (typing the question, ticking DIA, shortlisting, saving a search/collection via the API, confirming a candidate, loading the example table, running the analysis, running the agent), scrolls the **nearest scrollable ancestor** (the app scrolls inside `<main>`, not the window), hides the popover while an action runs (`body.tour-busy`), hops routes with `router.push(href?tour=N)`. `TourButton` clears localStorage and does a full page load of `/?tour=0`.
 - Anchors are `data-tour="…"` attributes across components (search, ask, mentions, rail, facet‑acquisition, facet‑acquisition‑DIA, result‑0, save‑search, shortlist‑0, compare‑bar, verdict, collection, candidate‑0, confirm‑PXD…, why‑ready, setup‑links, reanalyse, quantms, omics, loaded, groups, group‑b, run, results, report, map, bench, agent‑run, agent‑log, agent‑done).
 
 ## 6. Things that bit us (so you don't repeat them)
@@ -115,12 +120,21 @@ Git‑ignored and therefore **not on a fresh clone**: `data/raw/`, `data/pride.d
   then update the numbers in README.md "Status" and in HANDOVER.html §"Numbers".
 - Cost so far: Sonnet 5 for the first 1,661 (~$33), DeepSeek V4.1 Flash for the rest (~$1.5 per 1,000; whole archive ≈ $60). Every `tags` row stores `model`.
 
+## 7b. Saturday 16:00–17:00 additions (team feedback round)
+
+- Search quality: `api/terms.py` + `/terms`; Ask card shows understood terms with notes, phrases searched, include/drop, and 'ranked up, not filtered' preferences; a staged progress list while the question runs (borrowed from the partner site *locus*). URL params `terms`, `avoid`, `prefer` carry it, so saved searches and the browse page keep it.
+- Analyse from PRIDE: `GET /dataset/{acc}/results` (candidate tables; raw-only datasets get a note) and `POST /analyse/from_pride {accession, file_name}` (fetches from PRIDE FTP over https into `data/uploads/<ACC>_<file>.<ext>`, unzips the best table from archives, 400 MB cap). UI: `FromPride` panel at the top of `/analyse` (`?acc=PXD…` prefills), Workflow step 4 links `Analyse PXD… →` per confirmed dataset.
+- Eval page: three explainer cards (what a tag is, what agreement means and against what, what is missing) + captions on both tables.
+- Dataset page `BackLink`; sidebar collections list collapsible (`pridemap.side-collections`), count badge on the entry.
+- Full data: tagging finished Saturday evening (~40.5k of 41.5k; ~180 model failures, ~800 projects newer than the crawl). `data/demo/*.jsonl.gz` carries all of it; `pride.db.zst` is a GitHub release asset for a one-file install: `zstd -d pride.db.zst -o data/pride.db`.
+
 ## 8. Open work, in priority order
 
 1. **Gold set → humans vs model number.** `gold/gold_50.csv` has 50 datasets with empty human columns. Charlotte Ellison and Juri Westendorf (the bioinformaticians) were going to fill it. When any rows are filled: `uv run eval_tags.py` → `eval/report.json` → the Eval page's "Humans vs model" section and the pitch's trust line. Without it the pitch uses the 5‑model benchmark only (which is fine, but a human number is better).
 2. **Dry‑run the pitch** against the script in §10 and time it. Decide who speaks. Run the tour once on the demo laptop with Wi‑Fi off to confirm it works offline (everything is local except: UniProt protein card, Europe PMC links, OmicsDI panel, and the `/ask` LLM parse + agent console, which need internet + the key). The tour's `/ask` step falls back to the rule parser offline; the agent step will fail offline → have `demo/videos/*.webm` ready (record one on the demo laptop: `cd demo && npm i && npx playwright install chromium && node record_tour.mjs`).
 3. **README "Status" numbers** are stale (says 1,671 tagged). Update when the run finishes.
-4. Nice‑to‑haves if time: a `/health` endpoint; email delivery for `check_alerts.py`; mobile layout polish; a one‑page "architecture" diagram in README.
+4. Retry the ~180 tagging failures: `uv run tag_oai.py --provider hf --limit 1000` (resume-safe) once HF credit allows; re-crawl to pick up the ~800 projects PRIDE added since Friday (`uv run crawl_pride.py && uv run build_db.py`, then tag).
+5. Nice‑to‑haves if time: a `/health` endpoint; email delivery for `check_alerts.py`; mobile layout polish; a one‑page "architecture" diagram in README.
 
 ## 9. Numbers you can quote
 
@@ -133,7 +147,7 @@ Git‑ignored and therefore **not on a fresh clone**: `data/raw/`, `data/pride.d
 | tags per dataset | 14 (organism, taxon_id, sample_type, tissue, cell_line, disease, enrichment, acquisition, labelling, enzyme, fractionation, instrument_family, depth_proteins, search_engine) + one‑line summary |
 | benchmark (200 datasets, agreement with Sonnet 5 / $ per 1,000 / fails) | DeepSeek V4.1 Flash 93% / $1.47 / 6 · Haiku 5.5 90% / $1.33 / 1 · Kimi K2.6 92% / $4.29 / 30 · GPT‑5.4 mini 89% / $6.24 / 7 · Gemini 3.8 Flash 93% / $9.31 / 2 · Sonnet 5 reference $24 |
 | landing page latency | ~10 ms cached, 10–400 ms filtered (SQL‑side ranking/paging, covering indexes) |
-| tour | 24 steps, 10 pages, ≈2.5 min, fully automatic |
+| tour | 25 steps, 10 pages, ≈2.5 min, fully automatic |
 | MCP tools | 7 (search_datasets, ask_question, get_dataset, compare_datasets, setup_sheet, protein_info, why_candidate) |
 
 ## 10. The pitch (3 min demo + 2 min judge Q; judged Impact / Technical / Presentation, 10 each)

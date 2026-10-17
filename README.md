@@ -13,18 +13,19 @@ Built at *Reinvent the Wheel: a tools‑for‑science hack* (Science Works / Inh
 The loop a researcher actually runs, with a human tick at each step:
 
 - **Ask** — "phosphorylated MFF in mouse liver, low abundance" → filter chips (Claude, rule‑based fallback) → ranked datasets with green *fits* and amber *watch* chips that expand to the sentence in the protocol or paper that justifies them. Facet counts down the side. If nothing matches exactly it drops a filter, says which and why, and offers to put it back.
+- **Expert terminology** (`api/terms.py`) — ~45 concepts researchers actually say, mapped to the words authors write: *immunopeptidomics* = HLA/MHC ligandome, eluted peptides, W6/32; *presented on all cells* = class I (HLA‑A/B/C), not class II (HLA‑DR, L243, antigen‑presenting cells); *interactome* = AP‑MS / co‑IP / pull‑down; *diGly* = ubiquitin remnant; DIA/SWATH/diaPASEF, TMT/iTRAQ/SILAC/LFQ, timsTOF/Orbitrap… Each concept adds phrase groups to the full‑text search, a tag filter where one is implied, a ranking boost where only favoured, and flags datasets that mention the conflicting concept ("also mentions class II"). The Ask card shows every term it understood, what it searched for, and lets you drop or include them. Methods the question didn't name (e.g. "validate" ≠ targeted) become ranking preferences, never filters.
 - **Map** — a treemap of every tagged dataset by organism → sample type → enrichment → acquisition (or other orders). Click to drill, click a leaf to search it.
 - **Dataset card** — every tag with confidence bar, source (PRIDE metadata / paper / inferred) and quote; the raw PRIDE fields; the paper; "wrong?" on every tag records a correction.
 - **Compare** — two or more datasets side by side with a verdict (comparable / with caution / not) and the exact method difference that breaks it. The check you need before group stats across datasets.
 - **Reanalyse** — on each dataset: the files PRIDE holds (raw, peak lists, submitter results; sizes and links) and the database‑search parameters derived from the tags (tool, enzyme, fixed and variable mods, quantification, FDR, FASTA), each with the sentence it came from. We can't run MaxQuant/Mascot for you; this is the set‑up sheet.
-- **Analyse** — upload a protein table, pick group A and B, get log2 fold change, Welch t‑test, Benjamini‑Hochberg FDR and a volcano plot. Odetta Antico's lyso‑IP pipeline (`analysis/`) runs as an option when the columns match.
+- **Analyse** — start from a confirmed PRIDE dataset (it lists the submitter's result tables on PRIDE: MaxQuant proteinGroups, DIA‑NN reports, Spectronaut/FragPipe tables, even inside a zip, and opens one straight from the FTP) or upload your own; pick group A and B, get log2 fold change, Welch t‑test, Benjamini‑Hochberg FDR and a volcano plot. Odetta Antico's lyso‑IP pipeline (`analysis/`) runs as an option when the columns match. If PRIDE only holds raw files it says so and points at the set‑up sheet.
 - **Workflow** — Find → Confirm (a written case per shortlisted candidate, you tick it) → Set up the search → Analyse → Check. The same five steps sit as a rail at the top of every page, lit by where you are and ticked by what you've done (switch it off in the sidebar).
-- **Eval** — humans vs model on a 50‑dataset gold set; five models vs each other on 200 datasets (cost, speed, agreement).
-- **Take the tour** — a 24‑step guided run of the whole loop (it types, clicks, shortlists, saves and runs the agent for you); `demo/record_tour.mjs` records it as a video.
+- **Eval** — humans vs model on a 50‑dataset gold set; five models vs each other on 200 datasets (cost, speed, agreement), with a plain explanation of what each number is and isn't (agreement is with Claude Sonnet 5, not with human truth).
+- **Take the tour** — a 25‑step guided run of the whole loop (it types, clicks, shortlists, saves and runs the agent for you); `demo/record_tour.mjs` records it as a video.
 - **MCP server + agent console** — `uv run api/mcp_server.py` exposes the same search / ask / dataset / compare / set‑up sheet / protein tools to Claude Desktop, Claude Code, Cursor or any MCP client (stdio, or `--http` for streamable HTTP on :8010). The `/mcp` page explains it and has a live console where Claude uses the tools in front of you, each call and result streamed.
 - **Collections** — named, shareable shortlists with SDRF export and a download script for all the files. Add from the folder button on any result card or dataset page, name your shortlist in the bar at the bottom, or start one empty from the sidebar. **Saved searches** — save a question, see how many new datasets match since (`check_alerts.py` for cron).
 - **Cross‑omics links** (OmicsDI) on every dataset, a **quantms reanalysis kit** (SDRF + params + run.sh) on the set‑up sheet, and **corrections that feed the model** (`apply_corrections.py` re‑tags with human corrections as ground truth).
-- **API** — FastAPI with OpenAPI at `/docs`: `/search`, `/ask`, `/map`, `/compare`, `/dataset/{acc}` (+ `/why`, `/reanalyse`, `/files.txt`), `/analyse/*`, `/export.sdrf.tsv`, `/eval`. Scripts and agents can use everything without the UI.
+- **API** — FastAPI with OpenAPI at `/docs`: `/search`, `/ask`, `/browse`, `/terms`, `/map`, `/compare`, `/dataset/{acc}` (+ `/why`, `/reanalyse`, `/results`, `/files.txt`), `/analyse/*` (incl. `/analyse/from_pride`), `/export.sdrf.tsv`, `/eval`. Scripts and agents can use everything without the UI.
 
 ## The tags
 
@@ -97,6 +98,7 @@ make_gold_template.py / eval_tags.py   human gold set + agreement report
 analysis/             Odetta's R/Python downstream scripts + example data
 load_demo.py          load bundled demo data without crawling
 api/main.py           FastAPI (+ collections_api.py, omics.py, agent_api.py routers)
+api/terms.py          expert terminology map (concept → phrases, implied filters, boosts, conflicts)
 api/tools.py          the agent tools, shared by the MCP server and the in-app console
 api/mcp_server.py     MCP server (stdio / streamable HTTP)
 demo/record_tour.mjs  Playwright: plays and records the in-app tour
@@ -107,7 +109,7 @@ HANDOVER.html         the full handover (run, architecture, pitch, gotchas); man
 
 ## Status and honesty
 
-- Tagged so far: 27,063 of 41,548 datasets at the Saturday‑evening handover (1,661 by Claude Sonnet 5, the rest by DeepSeek V4.1 Flash through Hugging Face's router), run continuing to the full archive; the bundle in `data/demo/` is refreshed with `uv run export_demo.py`. See Eval for the model comparison.
+- Tagged: 40,500+ of 41,548 datasets (1,661 by Claude Sonnet 5, the rest by DeepSeek V4.1 Flash through Hugging Face's router, ~$33 + ~$50); ~180 failed the model call and ~800 were added to PRIDE after the crawl. The bundle in `data/demo/` (gzipped shards, loaded by `./dev.sh`) carries every tagged dataset; the full SQLite file is attached to the GitHub release as `pride.db.zst` (`zstd -d` it into `data/`). See Eval for the model comparison.
 - The first 291 were tagged by Claude Sonnet 5 through Claude Code sessions using the exact prompt and schema in `tag.py`; every row records which model tagged it.
 - Methods sections were available for ~64% of datasets (open‑access only). The rest were tagged from PRIDE metadata alone and say so.
 - Tags are model output. Confidence and evidence are shown everywhere so you can judge; "wrong?" on any tag records a correction.

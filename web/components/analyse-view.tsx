@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { useCompare } from "@/lib/compare-store";
 import { API } from "@/lib/api";
 import { markAnalysed } from "@/lib/progress-store";
 
@@ -38,10 +40,59 @@ async function jfetch<T>(r: Promise<Response>): Promise<T> {
 const fmt = (v: number | null | undefined, d = 3) => (v === null || v === undefined ? "—" : Math.abs(v) < 1e-3 && v !== 0 ? v.toExponential(2) : v.toFixed(d));
 const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 
+type PrideTable = { file_name: string; category: string; size_bytes: number | null; kind: string; openable: boolean };
+type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTable[]; raw_files: number; has_results: boolean; note: string | null };
+
+/** Open a submitter result table straight from a confirmed PRIDE dataset: no download, no file picker. */
+function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; onOpen: (acc: string, file: string) => void }) {
+  const { sel } = useCompare();
+  const [acc, setAcc] = useState(initial);
+  const [res, setRes] = useState<PrideResults | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const look = async (a: string) => {
+    const x = a.trim().toUpperCase();
+    if (!x) return;
+    setLoading(true); setErr(null); setRes(null);
+    try { setRes(await jfetch<PrideResults>(fetch(`${API}/dataset/${encodeURIComponent(x)}/results`))); } catch (e) { setErr(String(e)); } finally { setLoading(false); }
+  };
+  useEffect(() => { if (initial) { const id = window.setTimeout(() => { setAcc(initial); look(initial); }, 0); return () => window.clearTimeout(id); } }, [initial]);
+  const all = res ? [...res.tables, ...res.archives] : [];
+  return (
+    <div className="rounded-xl border bg-card p-5 grid gap-3" data-tour="from-pride">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="font-semibold">Start from a PRIDE dataset</span>
+        <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); look(acc); }}>
+          <input value={acc} onChange={(e) => setAcc(e.target.value)} className="input h-9 w-40 font-mono text-sm" placeholder="PXD…" aria-label="accession" />
+          <button type="submit" className="btn h-9" disabled={loading || !acc.trim()}>{loading ? <><span className="spinner mr-2" />Looking…</> : "Find its result tables"}</button>
+        </form>
+        {sel.length > 0 && <span className="flex flex-wrap gap-1 text-xs items-center"><span className="text-faint font-mono">shortlist:</span>{sel.map((a) => <button key={a} type="button" className="pill font-mono" onClick={() => { setAcc(a); look(a); }}>{a}</button>)}</span>}
+      </div>
+      {err && <p className="text-warn text-sm">{err}</p>}
+      {res && res.note && <p className="note text-sm"><span aria-hidden>ⓘ</span><span>{res.note} {res.raw_files > 0 && <Link href={`/dataset/${res.accession}#reanalyse`} className="underline">Open the set‑up sheet →</Link>}</span></p>}
+      {res && all.length > 0 && (
+        <ul className="grid gap-1">
+          {all.slice(0, 8).map((t) => (
+            <li key={t.file_name} className="flex flex-wrap items-center gap-3 text-sm rounded-md border px-3 py-2">
+              <span className="font-mono text-xs truncate max-w-md" title={t.file_name}>{t.file_name}</span>
+              <span className="pill">{t.kind}</span>
+              {t.size_bytes ? <span className="text-faint tabular text-xs">{(t.size_bytes / 1e6).toFixed(1)} MB</span> : null}
+              <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={busy || !t.openable} onClick={() => onOpen(res.accession, t.file_name)} title={t.openable ? "" : "too large to fetch here; download from PRIDE and upload"}>Open in Analyse</button>
+            </li>
+          ))}
+          {all.length > 8 && <li className="text-xs text-faint">…and {all.length - 8} more on PRIDE</li>}
+        </ul>
+      )}
+      <p className="text-xs text-muted-foreground">Uses the submitter&apos;s own search output on PRIDE (MaxQuant proteinGroups, DIA‑NN report, FragPipe tables, any CSV/TSV/XLSX). PRIDE Map can&apos;t run MaxQuant or Mascot itself; if a dataset only has raw files, the set‑up sheet tells you what to run.</p>
+    </div>
+  );
+}
+
 export function AnalyseView() {
   const params = useSearchParams();
   const router = useRouter();
   const uploadParam = params.get("upload");
+  const accParam = params.get("acc");
 
   const [inspect, setInspect] = useState<Inspect | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -96,6 +147,12 @@ export function AnalyseView() {
       open(await jfetch<Inspect>(fetch(`${API}/analyse/inspect`, { method: "POST", body: fd })));
     } catch (e) { setErr(String(e)); } finally { setBusy(null); }
   };
+  const fromPride = async (accession: string, file_name: string) => {
+    setErr(null); setBusy(`Fetching ${file_name} from PRIDE for ${accession} and reading the columns…`);
+    try {
+      open(await jfetch<Inspect>(fetch(`${API}/analyse/from_pride`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ accession, file_name }) })));
+    } catch (e) { setErr(String(e)); } finally { setBusy(null); }
+  };
   const useExample = async () => {
     setErr(null); setBusy("Loading Odetta's lyso-IP batch 2 (9k proteins × 1.9k columns)…");
     try {
@@ -133,6 +190,9 @@ export function AnalyseView() {
       <div>
         <h1 className="text-3xl">Analyse a protein table</h1>
       </div>
+
+      {/* (a0) straight from a PRIDE dataset */}
+      <FromPride initial={accParam ?? ""} busy={!!busy} onOpen={fromPride} />
 
       {/* (a) upload */}
       <div

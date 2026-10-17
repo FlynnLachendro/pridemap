@@ -7,6 +7,7 @@ import { Collapsible, Expandable } from "@/components/expandable";
 import { CompareFromHere } from "@/components/compare-from-here";
 import { OmicsLinks } from "@/components/omics-links";
 import { AddToCollection } from "@/components/add-to-collection";
+import { BackLink } from "@/components/back-link";
 
 
 const ORDER = ["organism", "sample_type", "tissue", "cell_line", "disease", ...METHOD_TAGS, "depth_proteins"];
@@ -33,6 +34,7 @@ export default async function DatasetPage({ params }: { params: Promise<{ access
     <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
       <div className="grid gap-5 min-w-0">
         <div>
+          <div className="mb-2"><BackLink /></div>
           <div className="flex gap-3 items-baseline flex-wrap text-sm">
             <span className="font-mono font-semibold text-teal">{p.accession}</span>
             <span className="text-muted-foreground tabular">{p.publication_date}</span>

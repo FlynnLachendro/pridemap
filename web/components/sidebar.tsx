@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Search, Map, GitCompareArrows, FlaskConical, Route, ShieldCheck, FolderOpen, Bell, Bot, Info, Plus, Play, type LucideIcon } from "lucide-react";
+import { Search, Map, GitCompareArrows, FlaskConical, Route, ShieldCheck, FolderOpen, Bell, Bot, Info, Plus, Play, ChevronRight, type LucideIcon } from "lucide-react";
 import { TourButton } from "@/components/tour";
 import { useCollections } from "@/lib/collections-store";
 import { useCompare } from "@/lib/compare-store";
@@ -66,6 +66,9 @@ export function Sidebar({ className }: { className?: string }) {
   const { sel } = useCompare();
   const progress = useProgress();
   const [newOpen, setNewOpen] = useState(false);
+  const [showCols, setShowCols] = useState(false);
+  useEffect(() => { const id = window.setTimeout(() => { try { setShowCols(localStorage.getItem("pridemap.side-collections") === "open"); } catch {} }, 0); return () => window.clearTimeout(id); }, []);
+  const toggleCols = () => { setShowCols((v) => { try { localStorage.setItem("pridemap.side-collections", v ? "closed" : "open"); } catch {} return !v; }); };
   return (
     <aside className={cn("flex-col shrink-0 bg-card border-r border-border", className)}>
       <div className="px-4 h-14 flex items-center border-b border-border shrink-0">
@@ -78,8 +81,16 @@ export function Sidebar({ className }: { className?: string }) {
             <div className="nav-group">{g.title}</div>
             {g.items.map((item) => (
               <div key={item.href}>
-                <NavLink item={item} path={path} />
-                {item.href === "/collections" && (
+                {item.href === "/collections" ? (
+                  <div className="flex items-center">
+                    <NavLink item={item} path={path} />
+                    <button type="button" className="nav-fold" onClick={toggleCols} aria-expanded={showCols} aria-label={showCols ? "hide your collections" : "show your collections"}>
+                      {rows && rows.length > 0 && <span className="tabular font-mono">{rows.length}</span>}
+                      <ChevronRight size={14} strokeWidth={2.2} className={showCols ? "rotate-90" : ""} aria-hidden />
+                    </button>
+                  </div>
+                ) : <NavLink item={item} path={path} />}
+                {item.href === "/collections" && showCols && (
                   <ul className="nav-sub">
                     {(rows ?? []).slice(0, 6).map((c) => (
                       <li key={c.id}>

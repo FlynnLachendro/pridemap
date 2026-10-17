@@ -474,6 +474,21 @@ b, strong, .font-bold, .font-semibold { font-weight: 600; }
   .hero-chips .pill { background: var(--surface); border: 1px solid var(--border-light); color: var(--muted-text); font-weight: 600; }
   .hero-chips .pill:hover { border-color: var(--walnut); color: var(--walnut); }
 
+  .nav-fold { display: inline-flex; align-items: center; gap: 3px; flex: none; white-space: nowrap; margin-left: auto; padding: 4px 4px 4px 6px; border-radius: 5px; color: var(--faint); font-size: 11px; }
+  .nav-fold:hover { background: var(--surface-2); color: var(--text); }
+  .nav-fold svg { transition: transform 160ms var(--ease); }
+  .nav-link { flex: 1; }
+
+  /* while a question runs */
+  .ask-progress { list-style: none; margin: 0; padding: 10px 14px; display: grid; gap: 6px; border: 1px dashed var(--border); border-radius: 10px; font-size: 13.5px; color: var(--faint); background: color-mix(in srgb, var(--surface) 60%, transparent); }
+  .ask-progress li { display: flex; align-items: center; gap: 10px; }
+  .ask-progress .dot { width: 16px; height: 16px; border-radius: 999px; border: 1.5px solid var(--border); display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--surface); }
+  .ask-progress .dot .spinner { width: 9px; height: 9px; border-width: 1.5px; }
+  .ask-progress li.done { color: var(--muted-text); } .ask-progress li.done .dot { background: var(--ok); border-color: var(--ok); color: var(--on-accent); }
+  .ask-progress li.now { color: var(--text); font-weight: 600; } .ask-progress li.now .dot { border-color: var(--walnut); }
+  .term-chip { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 10px 3px 8px; background: var(--teal-soft); color: var(--walnut); font-size: 13px; font-weight: 700; border: 1px solid transparent; cursor: help; }
+  .term-chip.avoid { background: var(--peak-soft); color: var(--peak); }
+
   /* empty states that teach */
   .empty { display: grid; justify-items: start; gap: 14px; padding: 28px; border: 1px dashed var(--border); border-radius: 12px; background: color-mix(in srgb, var(--surface) 60%, transparent); }
   .empty h3 { font-family: var(--font-display); }

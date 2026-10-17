@@ -41,14 +41,15 @@ export const STEPS: TourStep[] = [
   { route: `/dataset/${TOUR_B}`, el: '[data-tour="quantms"]', title: "Or run it in the cloud", text: "A quantms kit: SDRF, parameters and a Nextflow command, generated from the same tags." },
   { route: `/dataset/${TOUR_B}`, el: '[data-tour="omics"]', title: "Other omics on the same system", text: "Transcriptomics, genomics and metabolomics datasets for the same organism and tissue, from OmicsDI.", side: "left", next: "/analyse?tour=16" },
   // Analyse
+  { route: "/analyse", el: '[data-tour="from-pride"]', title: "Start from the dataset you confirmed", text: "Open the submitter's own result table straight from PRIDE (MaxQuant, DIA‑NN, Spectronaut, FragPipe). If PRIDE only holds raw files, the set‑up sheet says what to run first.", scroll: "start" },
   { route: "/analyse", el: '[data-tour="loaded"]', title: "Analyse the protein table", text: "Your search gave you a protein table. You load it (here, an example lyso‑IP table): 9,312 rows, sample groups detected from the column names.", before: "load-example" },
   { route: "/analyse", el: '[data-tour="groups"]', title: "Pick group A and group B", text: "Lyso‑IP against mock beads. You run it.", before: "set-groups-run" },
   { route: "/analyse", el: '[data-tour="results"]', title: "Your first look", text: "8,223 proteins tested, 225 significant, volcano plot, sortable table.", scroll: "start", side: "top", align: "end" },
-  { route: "/analyse", el: '[data-tour="report"]', title: "Take it to the paper", text: "One zip: a Methods paragraph from these exact parameters, every tested protein, the parameters, a script that reproduces the result, software versions.", next: "/map?tour=20" },
+  { route: "/analyse", el: '[data-tour="report"]', title: "Take it to the paper", text: "One zip: a Methods paragraph from these exact parameters, every tested protein, the parameters, a script that reproduces the result, software versions.", next: "/map?tour=21" },
   // Map
-  { route: "/map", el: '[data-tour="map"]', title: "The whole archive at a glance", text: "Every tagged dataset by organism, sample type, enrichment and acquisition. Click to drill in, click a leaf to search it.", next: "/eval?tour=21" },
+  { route: "/map", el: '[data-tour="map"]', title: "The whole archive at a glance", text: "Every tagged dataset by organism, sample type, enrichment and acquisition. Click to drill in, click a leaf to search it.", next: "/eval?tour=22" },
   // Eval
-  { route: "/eval", el: '[data-tour="bench"]', title: "Know how much to trust it", text: "Five models on the same 200 datasets: cost, speed, agreement. Humans vs model on a hand‑labelled set. Corrections you file feed the next run.", next: "/mcp?tour=22" },
+  { route: "/eval", el: '[data-tour="bench"]', title: "Know how much to trust it", text: "Five models on the same 200 datasets: cost, speed, agreement. Humans vs model on a hand‑labelled set. Corrections you file feed the next run.", next: "/mcp?tour=23" },
   // MCP
   { route: "/mcp", el: '[data-tour="agent-log"]', title: "Let your own assistant do all of this", text: "Every step is also a tool an AI agent can call through MCP. Claude is answering a question right now: each tool call and its result appears as it happens.", before: "run-agent", scroll: "start", side: "top", align: "end" },
   { route: "/mcp", el: '[data-tour="agent-done"]', title: "The answer, with the same evidence", text: "Searched, read the dataset, compared. Your assistant can do this mid‑conversation instead of you clicking through PRIDE.", before: "wait-agent", side: "top", align: "end", next: "/tour/done" },

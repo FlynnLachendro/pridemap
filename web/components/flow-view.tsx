@@ -105,8 +105,11 @@ export function FlowView() {
       </Step>
 
       <Step n={4} title="Analyse the protein table" done={false}>
-        <p className="text-sm text-muted-foreground">Upload the protein table, pick group A and B, get fold changes, FDR and a volcano plot.</p>
-        <Link href="/analyse" className="btn btn-primary w-fit">Open Analyse →</Link>
+        <p className="text-sm text-muted-foreground">Open a confirmed dataset&apos;s result table straight from PRIDE, or upload your own; pick group A and B, get fold changes, FDR and a volcano plot.</p>
+        <div className="flex flex-wrap gap-2">
+          {confirmedList.map((a) => <Link key={a} href={`/analyse?acc=${a}`} className="btn btn-primary font-mono">Analyse {a} →</Link>)}
+          <Link href="/analyse" className="btn w-fit">{confirmedList.length ? "or upload a table" : "Open Analyse →"}</Link>
+        </div>
       </Step>
 
       <Step n={5} title="Check the machine's work" done={false}>

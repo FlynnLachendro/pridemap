@@ -216,6 +216,13 @@
     <li><b>Landing hero</b>: one teal band with the search box, examples and recent searches on it. Everything below it unchanged.</li>
     <li><b>Empty states that teach</b> (<code>components/empty-state.tsx</code>) on Collections, Saved searches and the Workflow page.</li>
   </ul>
+  <h3>Saturday 16:00–17:00: the team‑feedback round</h3>
+  <ul>
+    <li><b>Expert terminology → better search.</b> <code>api/terms.py</code> maps ~45 concepts researchers say to the words authors write: <i>immunopeptidomics</i> = HLA/MHC ligandome, eluted peptides, W6/32; <i>presented on all cells</i> = class I (HLA‑A/B/C), not class II (HLA‑DR, L243); <i>interactome</i> = AP‑MS / co‑IP / pull‑down; <i>diGly</i> = ubiquitin remnant; DIA/SWATH/diaPASEF, TMT/iTRAQ/SILAC/LFQ, timsTOF/Orbitrap, biofluids… Each concept adds an OR‑group of phrases to the full‑text search (AND‑ed between concepts), a tag filter where one is implied, a ranking boost where only favoured, and a flag on datasets that mention the conflicting concept ("also mentions class II": ranked lower, never hidden). Ranking now includes bm25 with the title weighted 8×. Methods the question never named (the model turned "validate" into targeted acquisition) become <code>prefer=</code> ranking preferences instead of filters. The Ask card shows every understood term with its note, what it searched for, drop/include buttons, and a staged progress list while the question runs (idea borrowed from the partner tool <i>locus</i>). <code>GET /terms</code> exposes the whole map.</li>
+    <li><b>Analyse from a PRIDE dataset.</b> The Analyse page starts with "Start from a PRIDE dataset": it lists the submitter's result tables on PRIDE (<code>GET /dataset/{acc}/results</code>: MaxQuant proteinGroups, DIA‑NN reports, Spectronaut/FragPipe tables, inside zips too) and opens one straight from the FTP (<code>POST /analyse/from_pride</code>, 400 MB cap, cached in <code>data/uploads/</code>). Workflow step 4 links <i>Analyse PXD… →</i> per confirmed dataset. Datasets with raw files only get a clear note pointing at the set‑up sheet. MaxQuant/Mascot themselves still cannot run here.</li>
+    <li><b>Eval explained.</b> Three cards at the top (what a tag is; what "agreement" means and that the reference is Sonnet 5, not human truth; what is still missing: the gold set) and captions on both tables.</li>
+    <li><b>Navigation.</b> A Back button on dataset pages; the collections list in the sidebar folds away (count badge on the entry).</li>
+  </ul>
   <h3>Client state</h3>
   <p>localStorage: <code>pridemap.compare</code> (shortlist), <code>pridemap.confirmed</code>, <code>pridemap.setup-seen</code>, <code>pridemap.analysed</code>, <code>pridemap.checked</code>, <code>pridemap.rail</code>, <code>pridemap.history</code> (recent searches). Collections and saved searches are server‑side in the DB. "Take the tour" clears the progress keys and does a full page load of <code>/?tour=0</code>.</p>
   <h3>Verify after a change</h3>
@@ -234,7 +241,7 @@ uv run api/mcp_server.py --http                                          # strea
 
 <section id="tour">
   <h2>The tour (this is the demo)</h2>
-  <p>24 steps across Browse, Compare, a collection, Workflow, a dataset's set‑up sheet, Analyse, Map, Eval and MCP. It types the question, ticks DIA, shortlists two datasets, saves a search and a collection, confirms a candidate, loads the example table, runs the analysis, runs the agent. Steps are data in <code>web/lib/tour.ts</code>; the runner is <code>web/components/tour.tsx</code>; anchors are <code>data-tour="…"</code> attributes.</p>
+  <p>25 steps across Browse, Compare, a collection, Workflow, a dataset's set‑up sheet, Analyse, Map, Eval and MCP. It types the question, ticks DIA, shortlists two datasets, saves a search and a collection, confirms a candidate, loads the example table, runs the analysis, runs the agent. Steps are data in <code>web/lib/tour.ts</code>; the runner is <code>web/components/tour.tsx</code>; anchors are <code>data-tour="…"</code> attributes.</p>
   <ul>
     <li>It depends on <b>PXD055942</b> and <b>PXD029247</b> being in the DB and PXD029247 surviving the DIA filter. Do not delete or re‑tag them.</li>
     <li>Offline: the question step falls back to the rule parser (fine); the UniProt card, OmicsDI panel and the agent step need internet. Have the backup video ready: <code>cd demo &amp;&amp; npm i &amp;&amp; npx playwright install chromium &amp;&amp; node record_tour.mjs</code> → <code>demo/videos/*.webm</code>.</li>
@@ -244,7 +251,8 @@ uv run api/mcp_server.py --http                                          # strea
 </section>
 
 <section id="tagging">
-  <h2>The tagging run (still running on Flynn's laptop)</h2>
+  <h2>The tagging run</h2>
+  <div class="callout ok"><b>Finished Saturday ~17:00.</b> 40,500+ of 41,548 tagged. ~180 datasets failed the model call (retry: <code>uv run tag_oai.py --provider hf --limit 1000</code>, resume‑safe) and ~800 were added to PRIDE after Friday's crawl (re‑crawl + tag if you want them). The data ships two ways: <code>data/demo/*.jsonl.gz</code> in the repo (every tagged dataset; <code>./dev.sh</code> loads it) and <code>pride.db.zst</code> on the GitHub release (the whole SQLite file incl. untagged projects, files cache, collections: <code>zstd -d pride.db.zst -o data/pride.db</code>).</div>
   <p>Command: <code>caffeinate -i uv run tag_oai.py --provider hf --limit 40000 --workers 16</code>, log <code>tag_hf2.log</code> (one line per 50: done/total, fails, cost, ETA). At handover ~14k of the remaining 28k were done at ~166 per minute, ~$15 of the HF credits spent, ETA about 18:45. It is resume‑safe: rerun the same command and it skips what is tagged.</p>
   <p>When it finishes (Flynn will do this if he is around; otherwise you, with the DB):</p>
   <pre><code>uv run export_demo.py                                     # ~15 s, refreshes data/demo/*.jsonl.gz
@@ -272,13 +280,13 @@ git add data/demo &amp;&amp; git commit -m "data: full tagged archive" &amp;&amp
   <div class="tablewrap"><table>
     <tr><th>thing</th><th>value</th></tr>
     <tr><td>PRIDE projects crawled</td><td class="n">41,548</td></tr>
-    <tr><td>tagged at handover</td><td class="n">27,063 (1,661 Sonnet 5, rest DeepSeek V4.1 Flash; run continuing)</td></tr>
+    <tr><td>tagged</td><td class="n">40,500+ of 41,548 (1,661 Sonnet 5, rest DeepSeek V4.1 Flash); ~180 model failures, ~800 newer than the crawl</td></tr>
     <tr><td>papers with Methods text</td><td class="n">26,724</td></tr>
     <tr><td>evidence rows</td><td class="n">351,923</td></tr>
     <tr><td>tags per dataset</td><td class="n">14 + a one‑line summary</td></tr>
     <tr><td>cost</td><td class="n">Sonnet ~$24 / 1,000 · DeepSeek ~$1.5 / 1,000 · whole archive ≈ $60</td></tr>
     <tr><td>landing page latency</td><td class="n">~10 ms cached · 10–400 ms filtered</td></tr>
-    <tr><td>tour</td><td class="n">24 steps · 10 pages · ≈2.5 min · automatic</td></tr>
+    <tr><td>tour</td><td class="n">25 steps · 10 pages · ≈2.5 min · automatic</td></tr>
     <tr><td>MCP tools</td><td class="n">7</td></tr>
   </table></div>
   <h3>Model benchmark (200 datasets, same inputs)</h3>

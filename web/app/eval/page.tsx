@@ -26,9 +26,13 @@ export default async function EvalPage() {
   return (
     <div className="grid gap-8 max-w-5xl">
       <MarkChecked />
-      <div>
+      <div className="grid gap-3">
         <h1 className="text-4xl">How much to trust the tags</h1>
-
+        <div className="grid sm:grid-cols-3 gap-3 text-sm">
+          <div className="card p-4 grid gap-1"><div className="font-semibold">What a tag is</div><p className="text-muted-foreground">A model read each dataset&apos;s PRIDE protocol text and the paper&apos;s Methods, then filled 14 fixed fields (enrichment, acquisition, labelling…). Every value carries a confidence and the sentence it came from. Nothing here is PRIDE&apos;s own metadata.</p></div>
+          <div className="card p-4 grid gap-1"><div className="font-semibold">What “agreement” means</div><p className="text-muted-foreground">Two models given the same 200 datasets: the share of datasets where they chose the same value for a field. The reference is Claude Sonnet 5 (the most careful model we ran), not human truth. 93% agreement means 7 in 100 datasets would get a different enrichment or acquisition label from the cheaper model.</p></div>
+          <div className="card p-4 grid gap-1"><div className="font-semibold">What is still missing</div><p className="text-muted-foreground">A human benchmark. 50 datasets are laid out in <code>gold/gold_50.csv</code> for two bioinformaticians to label by hand; once filled, the “humans vs model” table below becomes the number to quote. Until then, treat the tags as a strong first pass and check the quoted sentence.</p></div>
+        </div>
       </div>
 
       {!d && <p className="text-warn">API not reachable.</p>}
@@ -45,6 +49,7 @@ export default async function EvalPage() {
 
       <section className="grid gap-3">
         <h2 className="text-2xl">Humans vs model (gold set)</h2>
+        <p className="text-sm text-muted-foreground">50 datasets chosen to cover every vocabulary value. Humans label each field without seeing the model&apos;s answer; accuracy = share of fields where the model matches the human. Misses are listed per field so you can see <i>how</i> it is wrong (e.g. DIA called DDA) rather than only how often.</p>
         {d?.report && d.report.overall.n > 0 ? (
           <>
             <p className="text-sm">Across {d.report.rows} hand‑labelled datasets, the model agreed with the bioinformaticians on <b className="tabular">{pct(d.report.overall.accuracy)}</b> of {d.report.overall.n} labelled tags.</p>
@@ -107,7 +112,7 @@ export default async function EvalPage() {
         <h2 className="text-2xl" data-tour="bench">Model vs model (200 datasets, same inputs)</h2>
         {d?.bench ? (
           <>
-            <p className="text-sm text-muted-foreground">Agreement with Claude Sonnet 5&apos;s tags on the same 200 datasets.</p>
+            <p className="text-sm text-muted-foreground">Five models tagged the same 200 datasets from the same inputs. Each percentage is agreement with Claude Sonnet 5 on that field; <b>avg</b> is the mean over the nine fields. <b>ok</b> = datasets that returned a valid schema; <b>cost / 1k</b> = what tagging 1,000 datasets costs at list price; <b>s / item</b> = median seconds per dataset. The cheapest model within a few points of the reference did the bulk of the archive.</p>
             <div className="rounded-xl border bg-card overflow-x-auto">
               <table className="w-full text-sm">
                 <thead><tr className="border-b"><th className="text-left p-3 label">model</th><th className="text-right p-3 label">ok</th><th className="text-right p-3 label">cost / 1k</th><th className="text-right p-3 label">s / item</th>{TAGS.map((t) => <th key={t} className="text-right p-3 label">{t.replace("_", " ").slice(0, 8)}</th>)}<th className="text-right p-3 label">avg</th></tr></thead>

@@ -28,6 +28,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 DB = ROOT / "data" / "pride.db"
 from tag import VOCAB  # noqa: E402  (also loads .env)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import terms as TERMS  # noqa: E402  expert terminology → search expansion
 
 app = FastAPI(
     title="PRIDE Map API",
@@ -72,6 +74,9 @@ class Filters(BaseModel):
     since: Optional[int] = None
     years: Optional[str] = None  # comma list of publication years (browse facet)
     q: Optional[str] = None
+    terms: Optional[str] = None   # comma list of concept ids from terms.py (expanded into AND-ed phrase groups)
+    avoid: Optional[str] = None   # concept ids that argue against the question (demoted + flagged, not excluded)
+    prefer: Optional[str] = None  # 'tag=value,tag=value': soft preferences (ranked up, never filtered out)
     # intent flags that change "watch" warnings
     wants_absolute_quant: bool = False
     low_abundance: bool = False
@@ -124,14 +129,33 @@ def search(con, f: Filters, limit=25, offset=0, sort="relevance"):
     total = con.execute(f"SELECT count(*) {base}", params).fetchone()[0]
     if total == 0 or limit <= 0:
         return total, []
-    # fetch a little more than a page so the watch-penalty can reorder within it without hiding results
-    # rank on a narrow projection first (no wide text columns in the sort), then hydrate the page
-    page = con.execute(f"SELECT t.accession, {SCORE_SQL} AS score {base} ORDER BY {SORT_SQL.get(sort, SORT_SQL['relevance'])}, p.accession LIMIT ? OFFSET ?",
+    # rank on a narrow projection first (no wide text columns in the sort), then hydrate the page.
+    # With free text, FTS5's bm25 (negative = better) joins the score and the best-matching passage comes back as a snippet.
+    term_ids = TERMS.parse_ids(f.terms)
+    boost_sql = ""
+    boosts = {k: list(v) for k, v in TERMS.boosts(term_ids).items()}
+    for kv in (f.prefer or "").split(","):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            if k in TAG_COLS and v and v not in boosts.get(k, []):
+                boosts.setdefault(k, []).append(v)
+    boost_params: list = []
+    for tag, vals in boosts.items():
+        if tag in TAG_COLS and not getattr(f, tag):
+            boost_sql += f" + (CASE WHEN t.{tag} IN ({','.join('?' * len(vals))}) THEN 0.35 ELSE 0 END)"
+            boost_params += vals
+    params = boost_params + params   # CASE placeholders come first in the statement (SELECT), before the WHERE ones
+    # bm25 is negative (more negative = better); the title counts 8x, keywords 3x, so a dataset ABOUT the concept outranks one that mentions it in passing
+    score_sql = SCORE_SQL + boost_sql + (" - 0.06 * bm25(projects_fts, 0.0, 8.0, 1.0, 1.0, 1.0, 3.0)" if join else "")
+    snippet_sql = "snippet(projects_fts, -1, '[', ']', '…', 18)" if join else "NULL"
+    sort_sql = "score DESC" if sort == "relevance" else SORT_SQL.get(sort, SORT_SQL["relevance"])   # alias: the CASE placeholders bind once
+    page = con.execute(f"SELECT t.accession, {score_sql} AS score, {snippet_sql} AS snip {base} ORDER BY {sort_sql}, p.accession LIMIT ? OFFSET ?",
                        params + [limit, offset]).fetchall()
     order_idx = {r[0]: i for i, r in enumerate(page)}
     scores = {r[0]: r[1] for r in page}
+    snips = {r[0]: r[2] for r in page}
     accs = list(order_idx)
-    cols = "p.accession, p.title, p.publication_date, p.organic_downloads, p.downloads, p.pubmed_id, p.doi, " + ", ".join(f"t.{c}" for c in TAG_COLS + ["depth_proteins", "taxon_id", "summary_one_line", "model"])
+    cols = "p.accession, p.title, p.description, p.sample_protocol, p.data_protocol, p.keywords, p.publication_date, p.organic_downloads, p.downloads, p.pubmed_id, p.doi, " + ", ".join(f"t.{c}" for c in TAG_COLS + ["depth_proteins", "taxon_id", "summary_one_line", "model"])
     rows = [dict(r) for r in con.execute(f"SELECT {cols} FROM tags t JOIN projects p ON p.accession = t.accession WHERE t.accession IN ({','.join('?' * len(accs))})", accs)]
     rows.sort(key=lambda r: order_idx[r["accession"]])
     for r in rows:
@@ -145,8 +169,17 @@ def search(con, f: Filters, limit=25, offset=0, sort="relevance"):
         ev = conf.get(r["accession"], {})
         avg_conf = sum(ev.get(k, {}).get("confidence", 0.5) for k in matched) / len(matched) if matched else 0.6
         fits, watch = reasons(r, ev, f)
-        score = r["score"] + 0.3 * avg_conf
-        score -= 0.25 * sum(1 for w in watch if not w["text"].endswith("is a low-confidence tag"))
+        text = " ".join(str(r.get(c) or "") for c in ("title", "description", "sample_protocol", "data_protocol", "keywords"))
+        hit = TERMS.mentions(text, term_ids)
+        for i, ph in hit.items():
+            fits.append({"tag": "text", "text": f"mentions {TERMS.TERMS[i]['label']}", "confidence": None, "evidence": snips.get(r["accession"]) or ph, "source": "PRIDE text"})
+        if f.q and not hit and snips.get(r["accession"]):
+            fits.append({"tag": "text", "text": f"mentions {f.q}", "confidence": None, "evidence": snips.get(r["accession"]), "source": "PRIDE text"})
+        avoid_hit = TERMS.mentions(text, TERMS.parse_ids(f.avoid))
+        for i, ph in avoid_hit.items():
+            watch.append({"tag": "text", "text": f"also mentions {TERMS.TERMS[i]['label']}", "confidence": None, "evidence": ph, "source": "PRIDE text"})
+        score = r["score"] + 0.3 * avg_conf - 0.3 * len(avoid_hit)
+        score -= 0.25 * sum(1 for w in watch if not w["text"].endswith("is a low-confidence tag") and not w["text"].startswith("also mentions"))
         score -= 0.05 * sum(1 for w in watch if w["text"].endswith("is a low-confidence tag"))
         results.append({
             "accession": r["accession"], "title": r["title"], "summary": r.get("summary_one_line"),
@@ -160,13 +193,30 @@ def search(con, f: Filters, limit=25, offset=0, sort="relevance"):
     return total, results
 
 
+def _phrase(a: str) -> str:
+    return '"' + " ".join(re.findall(r"[A-Za-z0-9\-]+", a)) + '"'
+
+
 def fts_query(q: str) -> str:
     # 'a|b c' means alternatives, each matched as a phrase; otherwise OR the tokens for recall. Quoting keeps FTS5 syntax safe.
     if "|" in q:
         alts = [a.strip() for a in q.split("|") if a.strip()]
-        return " OR ".join('"' + " ".join(re.findall(r"[A-Za-z0-9\-]+", a)) + '"' for a in alts) or '""'
+        return " OR ".join(_phrase(a) for a in alts) or '""'
     toks = [t for t in re.findall(r"[A-Za-z0-9\-]+", q) if len(t) > 2]
     return " OR ".join(f'"{t}"' for t in toks) or '""'
+
+
+def fts_expr(f: "Filters") -> Optional[str]:
+    """Free text plus every concept the question named: (q tokens) AND (concept 1 phrases) AND (concept 2 phrases)...
+    Each concept group is an OR of the phrases experts actually write, so 'immunopeptidomics' finds 'HLA ligandome'."""
+    groups = []
+    if f.q:
+        groups.append(fts_query(f.q))
+    for g in TERMS.fts_groups([i for i in TERMS.parse_ids(f.terms) if not TERMS.TERMS[i].get("filters")]):
+        groups.append(" OR ".join(_phrase(x) for x in g))   # concepts with a tag filter are matched by the tag, not the prose
+    if not groups:
+        return None
+    return " AND ".join(f"({g})" for g in groups) if len(groups) > 1 else groups[0]
 
 
 PRETTY = {"label_free": "label-free", "trypsin_lysc": "trypsin + Lys-C", "high_ph_rp": "high-pH RP fractionation",
@@ -239,10 +289,11 @@ def where_for(f: Filters, exclude: str | None = None):
         where.append(f"substr(p.publication_date,1,4) IN ({','.join('?' * len(ys))})")
         params += ys
     join = ""
-    if f.q:
+    expr = fts_expr(f)
+    if expr:
         join = " JOIN projects_fts fts ON fts.accession = p.accession"
         where.append("projects_fts MATCH ?")
-        params.append(fts_query(f.q))
+        params.append(expr)
     return join, (" WHERE " + " AND ".join(where) if where else ""), params
 
 
@@ -336,7 +387,52 @@ def rule_parse(q: str) -> Filters:
     # anything not consumed becomes free text (protein names etc.)
     leftovers = [w for w in re.findall(r"[A-Za-z0-9\-]{3,}", q) if w.isupper() or re.match(r"^[A-Z][A-Za-z0-9]+\d", w)]
     f.q = " ".join(leftovers) or None
+    apply_terms(f, TERMS.detect(q))
     return f
+
+
+STATED = {  # a method filter from the parser is only kept as a hard filter if the question names that kind of method
+    "acquisition": r"\bDIA\b|\bDDA\b|\bPRM\b|\bSRM\b|\bMRM\b|targeted|SWATH|PASEF|top.?down|MALDI|data.(in)?dependent|shotgun",
+    "labelling": r"\bTMT|iTRAQ|SILAC|label.free|\bLFQ\b|dimethyl|isobaric|multiplex",
+    "enzyme": r"tryps|lys-?c|chymotryp|glu-?c|asp-?n|digest|undigested|enzyme|no digestion",
+    "fractionation": r"fraction|high.?ph|\bSCX\b|gel|off-?line|single.?shot",
+    "instrument_family": r"orbitrap|exactive|exploris|lumos|astral|tims|bruker|q-?tof|tripletof|sciex|waters|synapt|triple.?quad|qtrap|instrument",
+    "search_engine": r"maxquant|fragpipe|dia-?nn|spectronaut|mascot|proteome discoverer|msfragger|comet|sage\b|search engine",
+}
+
+
+def soften_unstated(f: Filters, question: str):
+    """The parser may infer a method from intent words ("validate" → targeted). Keep such guesses as ranking
+    preferences, not filters, unless the question actually mentions that kind of method."""
+    prefs = [kv for kv in (f.prefer or "").split(",") if kv]
+    for tag, pat in STATED.items():
+        v = getattr(f, tag)
+        if v and not re.search(pat, question, re.I):
+            setattr(f, tag, None)
+            prefs.append(f"{tag}={v}")
+    f.prefer = ",".join(prefs) or None
+
+
+def apply_terms(f: Filters, ids: list[str]):
+    """Concepts named in the question: hard filters where the question implies one, phrase groups for the text search,
+    and the conflicting concepts to demote (class II when class I was asked for)."""
+    ids = [i for i in ids if i in TERMS.TERMS]
+    if "proximity" in ids and "interactome" in ids:
+        ids.remove("interactome")   # proximity labelling is the more specific method; its filter wins
+    for k, v in TERMS.hard_filters(ids).items():
+        if getattr(f, k) is None:
+            setattr(f, k, v)
+    for k in TERMS.boosts(ids):
+        v = getattr(f, k)
+        if v and k not in TERMS.hard_filters(ids):   # a concept that only favours values must not be narrowed by a guess
+            setattr(f, k, None)
+            f.prefer = ",".join([x for x in (f.prefer or "").split(",") if x] + [f"{k}={v}"])
+    # free text that is just a concept's own name adds nothing; keep q for protein/gene names only
+    if f.q and ids:
+        words = [w for w in f.q.split() if not any(re.search(TERMS.TERMS[i]["detect"], w, re.I) for i in ids)]
+        f.q = " ".join(words) or None
+    f.terms = ",".join(ids) or None
+    f.avoid = ",".join(TERMS.avoid_for(ids)) or None
 
 
 ASK_SYSTEM = f"""You turn a researcher's question about finding proteomics datasets into filters.
@@ -344,7 +440,12 @@ Allowed values: {json.dumps(VOCAB)}. organism is an NCBI scientific name. tissue
 since is a 4-digit year or null. q is free text for protein/gene names only (not tissues or methods), or null.
 Set low_abundance=true if the protein is described as rare/low abundance; wants_absolute_quant=true if they need absolute amounts;
 wants_unmodified=true if they want total/unmodified protein rather than a modification. Leave a filter null unless the question implies it.
-Also write interpretation: one sentence saying how you read the question."""
+Also write interpretation: one sentence saying how you read the question.
+Never infer acquisition, labelling, enzyme, fractionation or instrument from intent words (validate, confirm, check, quantify): leave them null unless the question names the method.
+concepts: a comma list of ids from this glossary of expert terms that the question names or clearly implies (or null). Read it
+carefully: a researcher saying "presented on all cells" means mhc_class_i, not mhc_class_ii; "interactome" means interactome, etc.
+Glossary:
+""" + TERMS.glossary_for_prompt()
 
 
 DROP_WHY = {
@@ -375,6 +476,7 @@ class AskOut(BaseModel):
     wants_absolute_quant: bool
     wants_unmodified: bool
     interpretation: str
+    concepts: Optional[str]
 
 
 def llm_parse(q: str) -> Optional[AskOut]:
@@ -420,6 +522,12 @@ def vocab():
     return VOCAB
 
 
+@app.get("/terms")
+def terms_route():
+    """The expert-terminology map the search uses: what each concept means, the phrases it searches for, what it implies."""
+    return {k: {"label": v["label"], "note": v["note"], "phrases": v.get("fts", []), "filters": v.get("filters", {}), "conflicts": v.get("conflicts", [])} for k, v in TERMS.TERMS.items()}
+
+
 @app.get("/search")
 def search_route(
     organism: Optional[str] = None, sample_type: Optional[str] = None, tissue: Optional[str] = None,
@@ -438,7 +546,13 @@ def search_route(
 def ask(body: AskIn):
     parsed = llm_parse(body.q)
     if parsed:
-        f = Filters(**parsed.model_dump(exclude={"interpretation"}))
+        f = Filters(**parsed.model_dump(exclude={"interpretation", "concepts"}))
+        soften_unstated(f, body.q)
+        ids = TERMS.parse_ids(parsed.concepts)
+        for i in TERMS.detect(body.q):
+            if i not in ids:
+                ids.append(i)
+        apply_terms(f, ids)
         interp, how = parsed.interpretation, "llm"
     else:
         f = rule_parse(body.q)
@@ -449,17 +563,27 @@ def ask(body: AskIn):
     total, results = search(con, f)
     dropped = []
     # relaxation ladder: free text (protein names) first, then tissue, then the rest, so the user always sees something
-    for drop in ["q", "tissue", "cell_line", "disease", "since", "labelling", "acquisition", "instrument_family", "fractionation", "enzyme"]:
+    for drop in ["q", "terms", "tissue", "cell_line", "disease", "since", "labelling", "acquisition", "instrument_family", "fractionation", "enzyme"]:
         if total:
             break
         v = getattr(f, drop)
         if v in (None, False):
             continue
+        if drop == "terms":
+            # loosen one concept at a time, last-named first, before giving up on the wording altogether
+            ids = TERMS.parse_ids(v)
+            while ids and not total:
+                gone = ids.pop()
+                f.terms = ",".join(ids) or None
+                dropped.append({"key": "terms", "value": TERMS.TERMS[gone]["label"], "why": "no dataset text matched it together with the other terms"})
+                total, results = search(con, f)
+            continue
         setattr(f, drop, None)
         dropped.append({"key": drop, "value": v, "why": DROP_WHY.get(drop, "no tagged dataset matched it together with the other filters")})
         total, results = search(con, f)
     return {"question": body.q, "parser": how, "interpretation": interp, "dropped": dropped,
-            "filters": f.model_dump(exclude_none=True), "total": total, "results": results, "facets": facets(con, f)}
+            "filters": f.model_dump(exclude_none=True), "terms_info": TERMS.info(TERMS.parse_ids(f.terms)),
+            "avoid_info": TERMS.info(TERMS.parse_ids(f.avoid)), "total": total, "results": results, "facets": facets(con, f)}
 
 
 @app.get("/map")
@@ -961,6 +1085,111 @@ else:
         raise HTTPException(503, "upload needs python-multipart: restart the API (uv run api/main.py) to pick up the new dependencies")
 
 
+RESULT_NAME_RE = re.compile(r"proteingroups|protein_groups|report\.pg_matrix|pg_matrix|report\.tsv|report\.pr_matrix|protein.?quant|proteins?\.(tsv|txt|csv|xlsx)|combined_protein|abundance|intensit|lfq|quant|results?|peptides?\.(tsv|txt)|evidence\.txt|psm", re.I)
+TABLE_EXTS = (".txt", ".tsv", ".csv", ".xlsx", ".xls", ".zip", ".gz")
+MAX_PRIDE_FETCH = 400 * 1024 * 1024
+
+
+@app.get("/dataset/{accession}/results")
+def dataset_results(accession: str):
+    """Result tables PRIDE holds for a dataset that the Analyse step could open: submitter result/search files that look
+    like a protein or peptide table (MaxQuant proteinGroups.txt, DIA-NN report.pg_matrix.tsv, Spectronaut reports,
+    FragPipe combined_protein.tsv, any .csv/.tsv/.xlsx), with sizes. Raw instrument files are listed separately so the UI
+    can say 'no table: run the search first'."""
+    con = db()
+    files = pride_files(con, accession)
+    tables, archives, raw = [], [], 0
+    for fobj in files:
+        name = fobj.get("file_name") or ""
+        cat = (fobj.get("category") or "").upper()
+        low = name.lower()
+        if cat == "RAW":
+            raw += 1
+            continue
+        if not low.endswith(TABLE_EXTS):
+            continue
+        looks = bool(RESULT_NAME_RE.search(low)) or cat in ("RESULT", "SEARCH")
+        if not looks:
+            continue
+        entry = {"file_name": name, "category": cat, "size_bytes": fobj.get("size_bytes"), "ftp": fobj.get("ftp"),
+                 "openable": low.endswith((".txt", ".tsv", ".csv", ".xlsx", ".zip", ".gz")) and (fobj.get("size_bytes") or 0) <= MAX_PRIDE_FETCH,
+                 "kind": "MaxQuant proteinGroups" if "proteingroups" in low else "DIA-NN protein matrix" if "pg_matrix" in low else "DIA-NN report" if "report" in low and low.endswith((".tsv", ".parquet")) else "FragPipe protein table" if "combined_protein" in low else "archive (will look inside)" if low.endswith((".zip", ".gz")) else "table"}
+        (archives if low.endswith((".zip", ".gz")) else tables).append(entry)
+    tables.sort(key=lambda e: (0 if "proteingroups" in e["file_name"].lower() or "pg_matrix" in e["file_name"].lower() or "combined_protein" in e["file_name"].lower() else 1, e["size_bytes"] or 0))
+    return {"accession": accession, "tables": tables, "archives": archives, "raw_files": raw, "has_results": bool(tables or archives),
+            "note": None if (tables or archives) else ("PRIDE holds only raw instrument files for this dataset. Run the database search from the set-up sheet (or the quantms kit), then upload the protein table it produces." if raw else "PRIDE lists no files for this dataset.")}
+
+
+class FromPrideIn(BaseModel):
+    accession: str
+    file_name: str
+
+
+def _best_table_in_zip(zpath: pathlib.Path) -> Optional[str]:
+    import zipfile
+    with zipfile.ZipFile(zpath) as z:
+        names = [n for n in z.namelist() if n.lower().endswith((".txt", ".tsv", ".csv", ".xlsx")) and not n.endswith("/")]
+    if not names:
+        return None
+    names.sort(key=lambda n: (0 if RESULT_NAME_RE.search(n.lower()) else 1, 0 if "proteingroups" in n.lower() or "pg_matrix" in n.lower() else 1, len(n)))
+    return names[0]
+
+
+@app.post("/analyse/from_pride")
+def analyse_from_pride(body: FromPrideIn):
+    """Fetch a submitter result table straight from PRIDE's FTP into data/uploads and open it like an upload, so the
+    Analyse step can start from a confirmed dataset instead of a file on your laptop. Cached per accession+file."""
+    con = db()
+    files = {f["file_name"]: f for f in pride_files(con, body.accession)}
+    fobj = files.get(body.file_name)
+    if not fobj or not fobj.get("ftp"):
+        raise HTTPException(404, "that file is not listed for this dataset")
+    if (fobj.get("size_bytes") or 0) > MAX_PRIDE_FETCH:
+        raise HTTPException(413, "file larger than 400 MB; download it from PRIDE and upload the table instead")
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_\-]", "_", f"{body.accession}_{pathlib.Path(body.file_name).stem}")[:70]
+    low = body.file_name.lower()
+    ext = next((e for e in (".xlsx", ".csv", ".tsv", ".txt") if low.endswith(e)), None)
+    if ext and (UPLOADS / f"{safe}{ext}").exists():
+        return {"upload_id": safe, "file": body.file_name, "cached": True, **inspect_df(safe)}
+    url = fobj["ftp"].replace("ftp://", "https://", 1)
+    raw_dest = UPLOADS / f"{safe}.download"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "pridemap/1.0"})
+        with urllib.request.urlopen(req, timeout=120) as r, open(raw_dest, "wb") as out:
+            shutil.copyfileobj(r, out, 1 << 20)
+    except Exception as e:
+        raw_dest.unlink(missing_ok=True)
+        raise HTTPException(502, f"could not fetch from PRIDE: {e}")
+    inner = None
+    if low.endswith(".zip"):
+        import zipfile
+        inner = _best_table_in_zip(raw_dest)
+        if not inner:
+            raw_dest.unlink(missing_ok=True)
+            raise HTTPException(400, "no protein/peptide table inside that archive")
+        ext = pathlib.Path(inner).suffix.lower()
+        with zipfile.ZipFile(raw_dest) as z, z.open(inner) as src, open(UPLOADS / f"{safe}{ext}", "wb") as out:
+            shutil.copyfileobj(src, out)
+        raw_dest.unlink(missing_ok=True)
+    elif low.endswith(".gz"):
+        import gzip
+        ext = pathlib.Path(low[:-3]).suffix or ".txt"
+        if ext not in (".txt", ".tsv", ".csv"):
+            ext = ".txt"
+        with gzip.open(raw_dest, "rb") as src, open(UPLOADS / f"{safe}{ext}", "wb") as out:
+            shutil.copyfileobj(src, out)
+        raw_dest.unlink(missing_ok=True)
+    else:
+        raw_dest.rename(UPLOADS / f"{safe}{ext}")
+    try:
+        return {"upload_id": safe, "file": inner or body.file_name, "cached": False, **inspect_df(safe)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"fetched, but could not read it as a table: {e}")
+
+
 @app.get("/analyse/example")
 def analyse_example():
     """Register Odetta's lyso-IP batch 2 export as an upload (symlink) so the UI has a one-click example."""
@@ -1321,6 +1550,7 @@ def browse(
     cell_line: Optional[str] = None, disease: Optional[str] = None, enrichment: Optional[str] = None, acquisition: Optional[str] = None,
     labelling: Optional[str] = None, enzyme: Optional[str] = None, fractionation: Optional[str] = None, instrument_family: Optional[str] = None,
     search_engine: Optional[str] = None, years: Optional[str] = None, since: Optional[int] = None,
+    terms: Optional[str] = None, avoid: Optional[str] = None, prefer: Optional[str] = None,
     tagged: str = "all", sort: str = "relevance", page: int = 1, size: int = Query(20, le=100), facet_top: int = 12,
 ):
     """Faceted browse over everything. Tagged datasets get ranking + reasons; untagged ones (until tagging finishes) are
@@ -1334,9 +1564,9 @@ def browse(
     # untagged: keyword / organism / year only, SQL-paged
     u_where, u_params, u_join = ["t.accession IS NULL"], [], ""
     if include_untagged:
-        if f.q:
+        if fts_expr(f):
             u_join = " JOIN projects_fts fts ON fts.accession = p.accession"
-            u_where.append("projects_fts MATCH ?"); u_params.append(fts_query(f.q))
+            u_where.append("projects_fts MATCH ?"); u_params.append(fts_expr(f))
         if f.organism:
             vals = norm_org(f.organism).split("|")
             u_where.append("(" + " OR ".join("lower(p.organisms) LIKE ?" for _ in vals) + ")"); u_params += [f"%{v.lower()}%" for v in vals]
@@ -1369,7 +1599,7 @@ def browse(
     total = tagged_total + untagged_total
     tagged_rows, untagged_rows = [r for r in allrows if r["tagged"]], [r for r in allrows if not r["tagged"]]
     return {"filters": f.model_dump(exclude_none=True), "sort": sort, "page": page, "size": size, "total": total,
-            "counts": {"tagged": tagged_total, "untagged": untagged_total},
+            "counts": {"tagged": tagged_total, "untagged": untagged_total}, "terms_info": TERMS.info(TERMS.parse_ids(f.terms)), "avoid_info": TERMS.info(TERMS.parse_ids(f.avoid)),
             "results": allrows, "facets": facets(con, f, top=facet_top)}
 
 
