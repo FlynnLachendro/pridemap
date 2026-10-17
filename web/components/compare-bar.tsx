@@ -8,7 +8,7 @@ export function CompareBar() {
   const path = usePathname();
   if (!sel.length || path === "/compare" || path === "/flow") return null;
   return (
-    <div className="fixed bottom-4 left-1/2 md:left-[calc(50%+104px)] -translate-x-1/2 z-30 rounded-full border bg-card shadow-lg px-4 py-2 flex items-center gap-3 text-sm max-w-[95vw] md:max-w-[calc(100vw-13rem-2rem)]">
+    <div data-tour="compare-bar" className="fixed bottom-4 left-1/2 md:left-[calc(50%+104px)] -translate-x-1/2 z-30 rounded-full border bg-card shadow-lg px-4 py-2 flex items-center gap-3 text-sm max-w-[95vw] md:max-w-[calc(100vw-13rem-2rem)]">
       <span className="font-semibold whitespace-nowrap font-mono text-xs">Shortlist {sel.length}</span>
       <span className="flex gap-1 overflow-x-auto">
         {sel.map((a) => (

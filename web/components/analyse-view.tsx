@@ -143,7 +143,7 @@ export function AnalyseView() {
           <button type="button" onClick={() => fileRef.current?.click()} disabled={!!busy} className="btn btn-primary btn-lg">Choose a file</button>
           <span className="text-sm text-muted-foreground">or drop a .csv / .tsv / .txt / .xlsx here (up to 200 MB)</span>
           <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = ""; }} />
-          <button type="button" onClick={useExample} disabled={!!busy} className="btn btn-lg">Use the example table (Odetta&apos;s lyso‑IP batch 2)</button>
+          <button type="button" onClick={useExample} disabled={!!busy} className="btn btn-lg" data-tour="example">Use the example table (Odetta&apos;s lyso‑IP batch 2)</button>
         </div>
         {inspect && (
           <p className="text-sm">
@@ -166,9 +166,9 @@ export function AnalyseView() {
 
           {mode === "welch" ? (
             <>
-              <div className="grid sm:grid-cols-2 gap-4">
-                <GroupPicker label="Group A" hint="the baseline (e.g. WT, control)" stem={stemA} cols={colsA} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("a", s)} onCols={(c) => { setColsA(c); setStemA(CUSTOM); }} />
-                <GroupPicker label="Group B" hint="the condition (e.g. KO, treated)" stem={stemB} cols={colsB} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("b", s)} onCols={(c) => { setColsB(c); setStemB(CUSTOM); }} />
+              <div className="grid sm:grid-cols-2 gap-4" data-tour="groups">
+                <GroupPicker label="Group A" tourId="group-a" hint="the baseline (e.g. WT, control)" stem={stemA} cols={colsA} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("a", s)} onCols={(c) => { setColsA(c); setStemA(CUSTOM); }} />
+                <GroupPicker label="Group B" tourId="group-b" hint="the condition (e.g. KO, treated)" stem={stemB} cols={colsB} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("b", s)} onCols={(c) => { setColsB(c); setStemB(CUSTOM); }} />
               </div>
               <div className="grid sm:grid-cols-4 gap-3 text-sm">
                 <label className="grid gap-1">
@@ -218,14 +218,14 @@ export function AnalyseView() {
           )}
 
           <div className="flex items-center gap-3">
-            <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6">{busy ? "Running…" : "Run"}</button>
+            <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6" data-tour="run">{busy ? "Running…" : "Run"}</button>
             {mode === "welch" && <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>}
           </div>
         </div>
       )}
 
       {/* (d) results */}
-      {result && <WelchResults out={result} uploadId={inspect?.upload_id ?? "table"} reportBody={lastBody} />}
+      {result && <div data-tour="results"><WelchResults out={result} uploadId={inspect?.upload_id ?? "table"} reportBody={lastBody} /></div>}
       {odetta && <OdettaResults out={odetta} />}
     </div>
   );
@@ -237,7 +237,8 @@ function ModeButton({ active, disabled, title, onClick, children }: { active: bo
   );
 }
 
-function GroupPicker({ label, hint, stem, cols, groups, numeric, onStem, onCols }: {
+function GroupPicker({ label, hint, stem, cols, groups, numeric, onStem, onCols, tourId }: {
+  tourId?: string;
   label: string; hint: string; stem: string; cols: string[]; groups: Group[]; numeric: string[]; onStem: (s: string) => void; onCols: (c: string[]) => void;
 }) {
   const [filter, setFilter] = useState("");
@@ -251,7 +252,7 @@ function GroupPicker({ label, hint, stem, cols, groups, numeric, onStem, onCols 
     <div className="grid gap-2 text-sm">
       <div>
         <div className="label">{label} <span className="normal-case font-normal">· {hint}</span></div>
-        <select value={stem} onChange={(e) => onStem(e.target.value)} className="input mt-1 h-10">
+        <select value={stem} onChange={(e) => onStem(e.target.value)} className="input mt-1 h-10" data-tour={tourId}>
           {groups.map((g) => <option key={g.stem} value={g.stem}>{g.stem} ({g.columns.length} samples, {Math.round(g.fill * 100)}% filled)</option>)}
           <option value={CUSTOM}>custom selection…</option>
         </select>
@@ -308,7 +309,7 @@ function WelchResults({ out, uploadId, reportBody }: { out: RunOut; uploadId: st
     <div className="grid gap-4">
       <div className="card p-3 flex flex-wrap items-center gap-3 text-sm">
         <div><b>Report bundle for publication.</b> <span className="text-muted-foreground">A zip with a Methods paragraph written from these exact parameters, every tested protein as CSV, the parameters, a standalone <code>reproduce.py</code> that regenerates the result, and software versions. Upload it next to the paper.</span></div>
-        <button type="button" onClick={downloadReport} disabled={!reportBody || reporting} className="btn btn-primary ml-auto">{reporting ? "Building…" : "Download report bundle"}</button>
+        <button type="button" onClick={downloadReport} disabled={!reportBody || reporting} className="btn btn-primary ml-auto" data-tour="report">{reporting ? "Building…" : "Download report bundle"}</button>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <Tile label="proteins tested" value={s.n_tested} />

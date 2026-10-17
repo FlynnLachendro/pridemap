@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { TourButton } from "@/components/tour";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +75,7 @@ export function Sidebar({ className }: { className?: string }) {
         })}
       </nav>
 
+      <div className="px-3 py-2 border-t border-border shrink-0"><TourButton className="btn btn-primary w-full" /></div>
       <div className="px-4 py-2 border-t border-border text-[12px] text-faint font-mono tabular shrink-0" aria-live="polite">
         {stats ? `${stats.tagged.toLocaleString()} of ${stats.projects.toLocaleString()} tagged` : "a front door to 42,000 datasets"}
       </div>

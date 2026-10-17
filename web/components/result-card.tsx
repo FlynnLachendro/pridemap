@@ -15,7 +15,7 @@ function Chip({ r, kind }: { r: Reason; kind: "fit" | "watch" }) {
         onClick={() => has && setOpen((o) => !o)}
         className={cn(
           "pill gap-1.5 px-2.5 text-left whitespace-normal",
-          kind === "fit" ? "bg-ok-soft text-ok" : "bg-peak-soft text-peak",
+          kind === "fit" ? "chip-fit bg-ok-soft text-ok" : "chip-watch bg-peak-soft text-peak",
           has && "cursor-pointer hover:brightness-95"
         )}
         aria-expanded={open}
@@ -37,7 +37,7 @@ function Chip({ r, kind }: { r: Reason; kind: "fit" | "watch" }) {
 export function ResultCard({ r, rank }: { r: Result; rank: number }) {
   const t = r.tags;
   return (
-    <article className="rounded-xl border bg-card p-4 sm:p-5 grid gap-3">
+    <article className="card enter p-4 sm:p-5 grid gap-3">
       <div className="flex items-baseline gap-3 flex-wrap">
         <span className="text-xs font-medium text-muted-foreground tabular w-5">{rank}</span>
         <Link href={`/dataset/${r.accession}`} className="font-mono text-sm font-semibold text-teal hover:underline">
@@ -45,7 +45,7 @@ export function ResultCard({ r, rank }: { r: Result; rank: number }) {
         </Link>
         <span className="text-xs text-muted-foreground tabular">{r.publication_date?.slice(0, 4)}</span>
         {r.downloads ? <span className="text-xs text-muted-foreground tabular">{r.downloads.toLocaleString()} downloads</span> : null}
-        <CompareToggle accession={r.accession} className="ml-auto" />
+        <CompareToggle accession={r.accession} className="ml-auto" tourIndex={rank - 1} />
         <a href={r.pride_url} target="_blank" rel="noreferrer" className="text-xs underline text-muted-foreground">PRIDE ↗</a>
         {r.pubmed_id && (
           <a href={`https://europepmc.org/article/MED/${r.pubmed_id}`} target="_blank" rel="noreferrer" className="text-xs underline text-muted-foreground">paper ↗</a>

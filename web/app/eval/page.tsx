@@ -45,7 +45,7 @@ export default async function EvalPage() {
       </section>
 
       <section className="grid gap-3">
-        <h2 className="text-2xl">Model vs model (200 datasets, same inputs)</h2>
+        <h2 className="text-2xl" data-tour="bench">Model vs model (200 datasets, same inputs)</h2>
         {d?.bench ? (
           <>
             <p className="text-sm text-muted-foreground">Agreement with Claude Sonnet 5&apos;s tags on the same 200 datasets.</p>

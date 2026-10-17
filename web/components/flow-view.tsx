@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { API, pretty, TAG_LABEL } from "@/lib/api";
 import { useCompare } from "@/lib/compare-store";
+import { TOUR_B as TOUR_B_ACC } from "@/lib/tour";
 
 type Why = { why: string; parser: string };
 type Recipe = { tool: { value: string }; enzyme: { value: string[] }; fixed_modifications: { value: string[] }; variable_modifications: { value: string[] }; quantification: { value: string } };
@@ -37,7 +38,7 @@ function Candidate({ acc, q, confirmed, onConfirm }: { acc: string; q: string; c
   }, [acc, q]);
   const t = r?.tags ?? {};
   return (
-    <article className={`rounded-xl border bg-card p-4 grid gap-3 ${confirmed ? "border-ok" : ""}`}>
+    <article data-tour={`candidate-${acc === TOUR_B_ACC ? 0 : 1}`} className={`card p-4 grid gap-3 ${confirmed ? "border-ok" : ""}`}>
       <div className="flex items-baseline gap-3 flex-wrap">
         <Link href={`/dataset/${acc}`} className="font-mono text-sm text-teal hover:underline">{acc}</Link>
         <span className="text-sm text-muted-foreground line-clamp-1">{r?.summary ?? r?.title ?? "…"}</span>
@@ -47,7 +48,7 @@ function Candidate({ acc, q, confirmed, onConfirm }: { acc: string; q: string; c
       </div>
       <div className="text-sm leading-relaxed">
         <span className="label mr-2">Why this one</span>
-        {why ? <span>{why.why} <span className="text-faint text-xs font-mono">({why.parser === "llm" ? "Claude" : "from tags"})</span></span> : <span className="text-faint">writing…</span>}
+        {why ? <span data-tour="why-ready">{why.why} <span className="text-faint text-xs font-mono">({why.parser === "llm" ? "Claude" : "from tags"})</span></span> : <span className="text-faint">writing…</span>}
       </div>
       {re && (
         <div className="text-xs text-muted-foreground font-mono flex flex-wrap gap-x-4 gap-y-1">
@@ -57,7 +58,7 @@ function Candidate({ acc, q, confirmed, onConfirm }: { acc: string; q: string; c
         </div>
       )}
       <label className="flex items-center gap-2 text-sm font-sans">
-        <input type="checkbox" checked={confirmed} onChange={(e) => onConfirm(e.target.checked)} className="accent-[var(--ok)]" />
+        <input type="checkbox" checked={confirmed} onChange={(e) => onConfirm(e.target.checked)} className="accent-[var(--ok)]" data-tour={`confirm-${acc}`} />
         I&apos;ve read the reasoning and confirm this is a candidate
       </label>
     </article>
@@ -94,7 +95,7 @@ export function FlowView() {
 
       <Step n={3} title="Set up the database search" done={false}>
         <p className="text-sm text-muted-foreground">Each confirmed dataset has a set‑up sheet: files on PRIDE plus the search parameters read from its tags. The search itself runs on your machine.</p>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2" data-tour="setup-links">
           {confirmedList.map((a) => <Link key={a} href={`/dataset/${a}#reanalyse`} className="btn font-mono">{a} set‑up sheet →</Link>)}
           {confirmedList.length === 0 && <span className="text-sm text-faint">Confirm a candidate first.</span>}
         </div>

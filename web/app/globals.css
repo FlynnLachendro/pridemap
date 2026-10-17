@@ -325,3 +325,47 @@
   .mobile-drawer { transition: none; }
 }
 
+
+/* ---------------------------------------------------------------------------
+   Micro-interactions: every clickable thing answers on hover and press.
+   120 ms feedback, 200 ms entrances, reduced-motion honoured.
+   ------------------------------------------------------------------------- */
+@layer components {
+  .btn, .pill, a, button, label:has(input[type="checkbox"]), [role="button"] { transition: color 120ms var(--ease), background-color 120ms var(--ease), border-color 120ms var(--ease), box-shadow 120ms var(--ease), transform 120ms var(--ease); }
+  .btn:hover { border-color: var(--walnut); color: var(--walnut); background: var(--surface); }
+  .btn:active, .btn-primary:active { transform: translateY(1px); }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); box-shadow: 0 0 0 3px var(--teal-soft); }
+  .btn-ghost:hover { background: var(--surface-2); color: var(--text); }
+  .btn:focus-visible, .pill:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--walnut); outline-offset: 2px; }
+  .pill { cursor: default; }
+  button.pill, a.pill { cursor: pointer; }
+  button.pill:hover, a.pill:hover { background: var(--teal-soft); color: var(--walnut); }
+  button.pill:active, a.pill:active { transform: scale(0.97); }
+  .card { transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease), transform 160ms var(--ease); }
+  .card-hover:hover, article.card:hover { border-color: var(--accent-light); box-shadow: 0 6px 18px -12px rgb(14 124 134 / .35); }
+  /* results fade in as they arrive */
+  .enter { animation: enter 200ms var(--ease) both; }
+  @keyframes enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  /* facet rows and nav */
+  label:has(input[type="checkbox"]):hover { background: var(--surface-2); }
+  input[type="checkbox"] { accent-color: var(--walnut); width: 15px; height: 15px; cursor: pointer; }
+  aside nav a { position: relative; }
+  aside nav a:hover { background: var(--surface-2); }
+  aside nav a[aria-current="page"]::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--walnut); }
+  /* tag chips inside result cards */
+  .chip-fit, .chip-watch { transition: filter 120ms var(--ease), transform 120ms var(--ease); }
+  .chip-fit:hover, .chip-watch:hover { filter: brightness(0.95); }
+  .chip-fit:active, .chip-watch:active { transform: scale(0.97); }
+  /* loading */
+  .busy { opacity: .6; pointer-events: none; transition: opacity 120ms var(--ease); }
+  /* driver.js tour theme */
+  .driver-popover { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 10px; font-family: var(--font-body); box-shadow: 0 12px 32px -16px rgb(19 32 42 / .45); max-width: 380px; }
+  .driver-popover-title { font-family: var(--font-display); font-size: 17px; font-weight: 700; }
+  .driver-popover-description { font-size: 14px; line-height: 1.5; color: var(--muted-text); }
+  .driver-popover-footer button { font-family: var(--font-sans); border-radius: 6px; text-shadow: none; }
+  .driver-popover-next-btn, .driver-popover-prev-btn { background: var(--walnut) !important; color: var(--on-accent) !important; border: 0 !important; }
+  .driver-popover-prev-btn { background: var(--surface-2) !important; color: var(--text) !important; }
+  .driver-popover-progress-text { font-family: var(--font-mono); color: var(--faint); }
+  .driver-active-element { box-shadow: 0 0 0 3px var(--teal-soft) !important; border-radius: 8px; }
+}
+@media (prefers-reduced-motion: reduce) { .enter { animation: none; } .btn:active, .btn-primary:active, button.pill:active { transform: none; } }

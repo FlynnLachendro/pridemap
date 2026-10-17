@@ -3,6 +3,8 @@ import { Bricolage_Grotesque, Atkinson_Hyperlegible, JetBrains_Mono } from "next
 import "./globals.css";
 import { Shell } from "@/components/nav";
 import { CompareBar } from "@/components/compare-bar";
+import { Tour } from "@/components/tour";
+import { Suspense } from "react";
 
 const display = Bricolage_Grotesque({ variable: "--font-display", subsets: ["latin"], weight: ["500", "700", "800"] });
 const body = Atkinson_Hyperlegible({ variable: "--font-body", subsets: ["latin"], weight: ["400", "700"] });
@@ -20,6 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="h-full bg-background text-foreground">
         <Shell>{children}</Shell>
         <CompareBar />
+        <Suspense><Tour /></Suspense>
       </body>
     </html>
   );

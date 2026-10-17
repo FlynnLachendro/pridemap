@@ -62,7 +62,7 @@ export function CompareView() {
 
       {out && a && (
         <>
-          <div className={`rounded-xl border p-4 ${VERDICT[out.verdict].cls}`}>
+          <div data-tour="verdict" className={`rounded-xl border p-4 ${VERDICT[out.verdict].cls}`}>
             <div className="flex items-center gap-2 font-heading font-semibold text-lg"><span className={`inline-block w-3 h-3 rounded-full ${VERDICT[out.verdict].dot}`} />{VERDICT[out.verdict].label}</div>
             <p className="mt-1">{out.summary}</p>
           </div>

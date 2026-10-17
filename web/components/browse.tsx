@@ -119,7 +119,7 @@ export function Browse() {
         <h1 className="text-3xl sm:text-4xl">Search PRIDE by how the data was made</h1>
       </div>
 
-      <form className="search-box" onSubmit={(e) => { e.preventDefault(); submit(q); }} role="search">
+      <form className="search-box" data-tour="search" onSubmit={(e) => { e.preventDefault(); submit(q); }} role="search">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="text-teal shrink-0" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by keyword, accession, or ask a question in plain words" aria-label="search" />
         {q && <button type="button" onClick={() => { setQ(""); setAskOut(null); push({ sort: filters.sort }); }} className="btn btn-ghost btn-sm" aria-label="clear">clear</button>}
@@ -134,7 +134,7 @@ export function Browse() {
       {err && <p className="text-warn text-sm">API error: {err}</p>}
 
       {askOut && (
-        <div className="card p-4 grid gap-2 text-sm">
+        <div className="card p-4 grid gap-2 text-sm" data-tour="ask">
           <p><span className="label mr-2">How I read it</span>{askOut.interpretation} <span className="text-faint font-mono text-xs">({askOut.parser === "llm" ? "Claude" : "rules"})</span></p>
           {askOut.dropped && askOut.dropped.length > 0 && (
             <ul className="grid gap-1 text-muted-foreground">
@@ -148,7 +148,7 @@ export function Browse() {
       )}
 
       <div className="grid lg:grid-cols-[240px_1fr] gap-6 items-start">
-        <aside className="grid gap-5 lg:sticky lg:top-4">
+        <aside className="grid gap-5 lg:sticky lg:top-4" data-tour="filters">
           <div className="flex items-center justify-between">
             <span className="label">Filters</span>
             {activeChips.length > 0 && <button type="button" className="text-xs underline text-muted-foreground" onClick={() => push({ q: filters.q, sort: filters.sort })}>clear all</button>}
@@ -170,7 +170,7 @@ export function Browse() {
                   {lim.map(([v, n]) => (
                     <li key={v}>
                       <label className="flex items-center gap-2 text-sm px-1 py-0.5 rounded-md hover:bg-surface-2 cursor-pointer">
-                        <input type="checkbox" checked={isOn(fc.key, v)} onChange={() => toggleFacet(fc.key, v)} />
+                        <input type="checkbox" checked={isOn(fc.key, v)} onChange={() => toggleFacet(fc.key, v)} data-tour={`facet-${fc.key}-${v}`} />
                         <span className="truncate flex-1">{pretty(v)}</span>
                         <span className="tabular text-faint text-xs">{n}</span>
                       </label>
@@ -185,7 +185,7 @@ export function Browse() {
 
         </aside>
 
-        <div className="grid gap-3 min-w-0">
+        <div className={`grid gap-3 min-w-0 ${pending ? "busy" : ""}`}>
           <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-xl tabular">{total.toLocaleString()} dataset{total === 1 ? "" : "s"}</h2>
             {out && <span className="text-xs font-mono text-faint">{out.counts.tagged.toLocaleString()} tagged · {out.counts.untagged.toLocaleString()} not yet</span>}
@@ -215,7 +215,7 @@ export function Browse() {
           {out && out.results.length === 0 && <p className="text-muted-foreground">Nothing matches. Remove a filter or try a keyword.</p>}
 
           {out && view === "cards" && out.results.map((r, i) => r.tagged
-            ? <ResultCard key={r.accession} r={r} rank={(page - 1) * size + i + 1} />
+            ? <div key={r.accession} data-tour={`result-${i}`}><ResultCard r={r} rank={(page - 1) * size + i + 1} /></div>
             : <UntaggedCard key={r.accession} r={r} rank={(page - 1) * size + i + 1} />)}
 
           {out && view === "table" && (
@@ -257,7 +257,7 @@ export function Browse() {
 
 function UntaggedCard({ r, rank }: { r: BrowseRow; rank: number }) {
   return (
-    <article className="card p-4 grid gap-2 opacity-90">
+    <article className="card enter p-4 grid gap-2 opacity-90">
       <div className="flex items-baseline gap-3 flex-wrap">
         <span className="text-xs font-mono text-faint w-5">{rank}</span>
         <Link href={`/dataset/${r.accession}`} className="font-mono text-sm text-teal hover:underline">{r.accession}</Link>
