@@ -235,9 +235,11 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
   const [stopping, setStopping] = useState(false);
   const seen = useRef<string | null>(null);
 
+  const runsQS = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
+
   const poll = useCallback(async () => {
-    try { return await jfetch<RunStatus>(fetch(`${API}/dataset/${accession}/pipeline/status`)); } catch { return null; }
-  }, [accession]);
+    try { return await jfetch<RunStatus>(fetch(`${API}/dataset/${accession}/pipeline/status${runsQS}`)); } catch { return null; }
+  }, [accession, runsQS]);
 
   // One timer owns the polling: a quick beat while a run is live, a slow one otherwise so an idle page is cheap.
   const running = status?.running ?? false;
@@ -276,7 +278,7 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
   const stop = async () => {
     setStopping(true); setErr(null);
     try {
-      await fetch(`${API}/dataset/${accession}/pipeline`, { method: "DELETE" });
+      await fetch(`${API}/dataset/${accession}/pipeline${runsQS}`, { method: "DELETE" });
       const s = await poll();
       if (s) setStatus(s);
     } catch (e) { setErr(String(e)); } finally { setStopping(false); }
@@ -300,7 +302,7 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
         )}
         {!status?.running && (
           <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={starting} onClick={start}>
-            {starting ? "Starting…" : status?.failed ? "Start" : status?.exists ? "Resume" : "Run the whole pipeline"}
+            {starting ? "Starting…" : (status?.failed || status?.exists) ? "Resume" : "Run the whole pipeline"}
           </button>
         )}
       </div>
