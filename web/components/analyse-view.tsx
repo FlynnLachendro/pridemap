@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useCompare } from "@/lib/compare-store";
@@ -58,67 +58,108 @@ type SearchPlan = {
 };
 type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTable[]; raw_files: number; has_results: boolean; note: string | null; plan: SearchPlan | null };
 
+// The origin is client-only. Reading it through useSyncExternalStore keeps the server render ("") and the
+// client render consistent, with no state written from an effect.
+const NO_SUB = () => () => {};
+const getOrigin = () => window.location.origin;
+const getOriginServer = () => "";
+
+/** The whole pipeline as one command. Carries this page's origin so the script can link results straight back. */
+function OneLiner({ accession }: { accession: string }) {
+  const origin = useSyncExternalStore(NO_SUB, getOrigin, getOriginServer);
+  const [copied, setCopied] = useState(false);
+  const cmd = `curl -fsSL ${API}/dataset/${accession}/pipeline.sh${origin ? `?web=${encodeURIComponent(origin)}` : ""} | bash`;
+  return (
+    <div className="rounded-md border bg-card p-3 grid gap-2">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-semibold">Paste this into a terminal</span>
+        <button
+          type="button"
+          className="btn btn-sm btn-primary ml-auto"
+          onClick={() => { navigator.clipboard?.writeText(cmd).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {}); }}
+        >{copied ? "Copied ✓" : "Copy command"}</button>
+      </div>
+      <code className="text-xs break-all select-all rounded bg-muted/50 px-2 py-1.5 block">{cmd}</code>
+      <div className="text-xs text-faint">
+        Nothing to download or unzip, and it checks your tools and free space <em>before</em> fetching anything.
+        Re-run the same command to resume.
+      </div>
+    </div>
+  );
+}
+
 /** Raw-only dataset: name the engine that can actually run, say why, and hand over a kit for it. */
 function SearchKit({ plan, accession }: { plan: SearchPlan; accession: string }) {
   const tracks = plan.tracks ?? [];
   const stages = plan.stages ?? [];
   const label = tracks.length > 1 ? "search kit" : `${plan.engine_label} kit`;
+  const auto = stages.filter((s) => s.where !== "you decide").length;
   return (
     <div className="rounded-lg border bg-muted/30 p-4 grid gap-3" data-tour="searchkit">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="font-semibold text-sm">Run the search yourself</span>
+        <span className="font-semibold text-sm">Run the search</span>
         {tracks.map((t) => <span key={t.kind} className="pill">{t.kind} → {t.engine_label}</span>)}
         <span className="text-xs text-faint">{plan.raw_count} × {plan.vendor_label}</span>
-        <a className="btn btn-sm btn-primary ml-auto" href={`${API}${plan.kit_url ?? `/dataset/${accession}/searchkit.zip`}`} download>
-          Download {label} (zip)
-        </a>
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
-      {plan.caveat && <p className="text-xs text-muted-foreground">{plan.caveat}</p>}
 
-      <div className="rounded-md border bg-card px-3 py-2 grid gap-1">
-        <div className="text-xs text-muted-foreground">One command runs the whole pipeline:</div>
-        <code className="text-sm">bash run_all.sh</code>
-        <div className="text-xs text-faint">
-          Echoes every stage as it goes, writes <code>progress.jsonl</code>, and resumes where it stopped if a stage fails.
+      <OneLiner accession={accession} />
+
+      <p className="text-xs text-muted-foreground">
+        That runs all {auto} stages — tool and disk check, download, {plan.convert ? "conversion, " : ""}
+        {tracks.map((t) => t.engine_label).join(" and ")}, then it uploads the finished
+        table{tracks.length > 1 ? "s" : ""} back here and prints the link. The only thing left for you is picking
+        group A and group B.
+      </p>
+
+      <details className="text-xs">
+        <summary className="cursor-pointer text-faint hover:text-foreground">
+          Prefer to do it by hand? Every step spelled out, and the kit as a zip
+        </summary>
+        <div className="grid gap-3 mt-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <a className="btn btn-sm" href={`${API}${plan.kit_url ?? `/dataset/${accession}/searchkit.zip`}`} download>
+              Download {label} (zip)
+            </a>
+            <span className="text-faint">then <code>bash run_all.sh</code>, or run each script yourself</span>
+          </div>
+          {plan.caveat && <p className="text-muted-foreground">{plan.caveat}</p>}
+          <ol className="grid gap-1.5">
+            {stages.map((s, i) => (
+              <li key={s.id}>
+                <div className="flex items-baseline gap-2">
+                  <span className="tabular text-faint shrink-0">{i + 1}.</span>
+                  <span className="font-semibold">{s.label}</span>
+                  <span className={`pill shrink-0 ${s.where === "automatic" ? "" : "text-faint"}`}>{s.where}</span>
+                </div>
+                <div className="text-muted-foreground pl-6">{s.detail}</div>
+                {s.substages && s.substages.length > 0 && (
+                  <details className="pl-6 mt-0.5">
+                    <summary className="cursor-pointer text-faint hover:text-foreground">
+                      what {s.engine_label} does inside — {s.substages.length} steps
+                    </summary>
+                    <ol className="grid gap-0.5 mt-1 border-l pl-3">
+                      {s.substages.map((sub) => (
+                        <li key={sub.name} className="text-muted-foreground">
+                          <span className="font-medium">{sub.name}</span> — {sub.detail}
+                        </li>
+                      ))}
+                    </ol>
+                    <p className="text-faint mt-1">
+                      {s.engine === "maxquant"
+                        ? "Reported live: the run tails combined/proc/ and echoes each as MaxQuant finishes it."
+                        : "Reported as DIA-NN progresses."}
+                    </p>
+                  </details>
+                )}
+              </li>
+            ))}
+          </ol>
+          {!plan.maxquant_offered && plan.maxquant_reason && (
+            <p className="text-faint"><span className="font-semibold">Why not MaxQuant:</span> {plan.maxquant_reason}</p>
+          )}
         </div>
-      </div>
-
-      <ol className="grid gap-1.5">
-        {stages.map((s, i) => (
-          <li key={s.id} className="text-xs">
-            <div className="flex items-baseline gap-2">
-              <span className="tabular text-faint shrink-0">{i + 1}.</span>
-              <span className="font-semibold">{s.label}</span>
-              <span className={`pill shrink-0 ${s.where === "PRIDE Map" ? "" : "text-faint"}`}>{s.where}</span>
-            </div>
-            <div className="text-muted-foreground pl-6">{s.detail}</div>
-            {s.substages && s.substages.length > 0 && (
-              <details className="pl-6 mt-0.5">
-                <summary className="cursor-pointer text-faint hover:text-foreground">
-                  what {s.engine_label} does inside — {s.substages.length} steps
-                </summary>
-                <ol className="grid gap-0.5 mt-1 border-l pl-3">
-                  {s.substages.map((sub) => (
-                    <li key={sub.name} className="text-muted-foreground">
-                      <span className="font-medium">{sub.name}</span> — {sub.detail}
-                    </li>
-                  ))}
-                </ol>
-                <p className="text-faint mt-1">
-                  {s.engine === "maxquant"
-                    ? "run_all.sh tails combined/proc/ and echoes each of these as MaxQuant finishes it."
-                    : "Reported as DIA-NN progresses."}
-                </p>
-              </details>
-            )}
-          </li>
-        ))}
-      </ol>
-
-      {!plan.maxquant_offered && plan.maxquant_reason && (
-        <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {plan.maxquant_reason}</p>
-      )}
+      </details>
     </div>
   );
 }

@@ -120,11 +120,14 @@ export function Reanalyse({ accession }: { accession: string }) {
             {out.plan.conflict && <p className="text-warn text-xs">⚠ {out.plan.conflict}</p>}
             {out.plan.caveat && <p className="text-xs text-muted-foreground">{out.plan.caveat}</p>}
             <div className="rounded-md border bg-muted/30 px-3 py-2 grid gap-0.5">
-              <code className="text-sm">bash run_all.sh</code>
+              <code className="text-xs break-all select-all">
+                curl -fsSL {API}/dataset/{accession}/pipeline.sh | bash
+              </code>
               <span className="text-xs text-muted-foreground">
-                Runs all {(out.plan.stages ?? []).length} stages end to end, echoing each one and recording it to
-                <code> progress.jsonl</code>. Resumes where it stopped; MaxQuant&apos;s own internal steps are tailed
-                from <code>combined/proc/</code> so the long middle is not a black box.
+                Checks your tools and free space first, then runs every stage end to end and uploads the finished
+                table back into Analyse. Resumes where it stopped; MaxQuant&apos;s own internal steps are tailed from
+                <code> combined/proc/</code> so the long middle is not a black box. Full record in
+                <code> progress.jsonl</code>.
               </span>
             </div>
             <div className="label">What you get</div>

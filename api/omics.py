@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -527,6 +527,9 @@ def pipeline_stages(plan: dict) -> list[dict]:
     Single owner of the stage list: run_all.sh echoes it, progress.jsonl records it, and the UI draws it.
     """
     stages = [
+        {"id": "preflight", "label": "Check tools and disk space",
+         "detail": "verifies every engine is reachable and there is room, before anything is downloaded; "
+                   "msconvert is pulled automatically if Docker is running", "where": "automatic"},
         {"id": "download", "label": "Download raw files from PRIDE",
          "detail": f"{plan['raw_count']} runs"
                    + (f" plus {plan['sidecars']} index sidecars" if plan.get("sidecars") else "")
@@ -545,10 +548,14 @@ def pipeline_stages(plan: dict) -> list[dict]:
             "detail": f"config {tr['config']} → {tr['output_table']}", "where": "your machine",
             "engine": tr["engine"], "engine_label": tr["engine_label"], "output_table": tr["output_table"],
             "substages": [{"name": n, "detail": d} for n, d in subs]})
+    stages.append({"id": "upload", "label": "Hand the tables back to PRIDE Map",
+                   "detail": "uploaded automatically when the search finishes; prints a link that opens Analyse "
+                             "with the table already loaded (PRIDEMAP_NO_UPLOAD=1 to keep it local)",
+                   "where": "automatic"})
     stages.append({
         "id": "analyse", "label": "Analyse the protein table",
         "detail": "pick group A and group B — log2 fold change, Welch t-test, Benjamini-Hochberg FDR and a volcano plot",
-        "where": "PRIDE Map"})
+        "where": "you decide"})
     return stages
 
 
@@ -685,16 +692,27 @@ def _convert_sh(ctx: dict, plan: dict) -> str:
         f"# Convert {plan['vendor_label']} to mzML so the search engine can read it.",
         f"# Needs ProteoWizard msconvert: {MSCONVERT[1]}  (Windows for vendor formats, or the Docker image below).",
         "set -euo pipefail",
+        'cd "$(dirname "$0")"',
         "mkdir -p mzml",
-        "# Docker (Linux/macOS): vendor readers run under Wine in this image.",
-        "#   docker run --rm -v \"$PWD\":/data chambm/pwiz-skyline-i-agree-to-the-vendor-licenses \\",
-        "#     wine msconvert /data/raw/<run> --mzML --zlib --filter \"peakPicking vendor msLevel=1-\" -o /data/mzml",
-        "# Only the runs are converted; index sidecars (.wiff.scan) must stay next to them in raw/.",
+        "# Native msconvert if installed; otherwise the ProteoWizard image, which preflight.sh already pulled.",
+        "# Vendor readers run under Wine inside that image.",
+        'if command -v msconvert >/dev/null 2>&1; then',
+        '  CONV() { msconvert "$@"; }',
+        'elif command -v docker >/dev/null 2>&1; then',
+        f'  CONV() {{ docker run --rm -v "$PWD":/data {PWIZ_IMAGE} wine msconvert "$@"; }}',
+        "  PREFIX=/data/",
+        "else",
+        '  echo "msconvert not available and docker not installed — see preflight.sh" >&2; exit 1',
+        "fi",
+        'PREFIX="${PREFIX:-}"',
+        "",
+        "# Only the runs are converted; index sidecars (.wiff.scan) must stay beside them in raw/.",
         "RUNS=(",
         *[f'  "{(f.get("file_name") or "")}"' for f in ctx["runs"]],
         ")",
         'for f in "${RUNS[@]}"; do',
-        '  msconvert "raw/$f" --mzML --zlib --filter "peakPicking vendor msLevel=1-" -o mzml',
+        '  [ -f "mzml/${f%.*}.mzML" ] && continue   # already converted; resume cheaply',
+        '  CONV "${PREFIX}raw/$f" --mzML --zlib --filter "peakPicking vendor msLevel=1-" -o "${PREFIX}mzml"',
         "done",
         "",
     ])
@@ -709,6 +727,151 @@ def _download_sh(ctx: dict) -> str:
             lines.append(f"curl -C - -O {f['ftp']}")
     lines.append("")
     return "\n".join(lines)
+
+
+PWIZ_IMAGE = "chambm/pwiz-skyline-i-agree-to-the-vendor-licenses"
+
+
+def preflight_sh(ctx: dict, plan: dict) -> str:
+    """Check every tool and enough disk BEFORE the download, not four hours into it.
+
+    msconvert is provisioned automatically from the ProteoWizard image. MaxQuant and DIA-NN cannot be:
+    both require you to accept a licence and fetch the build yourself, so the most honest automation is to
+    detect them in seconds and say exactly what is missing and where to get it.
+    """
+    need_convert = bool(plan.get("convert"))
+    engines = {tr["engine"] for tr in (plan.get("tracks") or [])}
+    # Raw bytes are known from the file listing; leave headroom for mzML (~1x) and the search output.
+    raw_bytes = sum(f.get("size_bytes") or 0 for f in ctx["raw"])
+    need_gb = max(5, int((raw_bytes * (2.2 if need_convert else 1.4)) / 1e9) + 5)
+    out = [
+        "#!/usr/bin/env bash",
+        "# Preflight: everything this pipeline needs, checked up front.",
+        "# No -e: every check should run so you see the whole list of problems, not just the first.",
+        "set -uo pipefail",
+        'cd "$(dirname "$0")" || exit 1',
+        "",
+        "MISSING=0",
+        'ok()   { printf "  ✓ %s\\n" "$1"; }',
+        'warn() { printf "  ! %s\\n" "$1"; }',
+        'bad()  { printf "  ✗ %s\\n" "$1"; MISSING=1; }',
+        "",
+        'printf "Preflight\\n"',
+        "",
+        "# ---- disk. The estimate is raw size plus room for conversion and results; override it if you are",
+        "# writing to another volume, or only running one of the tracks.",
+        f"NEED_GB=${{PRIDEMAP_MIN_DISK_GB:-{need_gb}}}",
+        'FREE_GB=$(df -Pk . | awk "NR==2 {print int(\\$4/1048576)}")',
+        '[ "$FREE_GB" -ge "$NEED_GB" ] \\',
+        '  && ok "disk: ${FREE_GB}GB free, need ~${NEED_GB}GB" \\',
+        '  || bad "disk: only ${FREE_GB}GB free, need ~${NEED_GB}GB for raw + converted + results"',
+        "",
+        "# ---- curl",
+        'command -v curl >/dev/null 2>&1 && ok "curl" || bad "curl not found"',
+        "",
+    ]
+    if need_convert:
+        out += [
+            "# ---- docker: how msconvert is provided when it is not installed natively",
+            "HAVE_DOCKER=0",
+            'if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then',
+            '  HAVE_DOCKER=1; ok "docker is running"',
+            "else",
+            '  warn "docker not available — only matters if msconvert is missing natively"',
+            "fi",
+            "",
+            "# ---- msconvert: auto-provisioned from the ProteoWizard image when not installed",
+            'if command -v msconvert >/dev/null 2>&1; then',
+            '  ok "msconvert (native)"',
+            '  echo "native" > .pipeline_msconvert 2>/dev/null || true',
+            'elif [ "$HAVE_DOCKER" = "1" ]; then',
+            f'  printf "  … pulling {PWIZ_IMAGE} (one-time, ~2GB)\\n"',
+            f'  if docker pull -q {PWIZ_IMAGE} >/dev/null 2>&1; then',
+            '    ok "msconvert (docker, pulled automatically)"',
+            '    echo "docker" > .pipeline_msconvert 2>/dev/null || true',
+            "  else",
+            f'    bad "could not pull {PWIZ_IMAGE} — check your docker login/network"',
+            "  fi",
+            "else",
+            '  bad "msconvert missing and docker unavailable. Install ProteoWizard "'
+            '"(https://proteowizard.sourceforge.io/download.html) or start Docker and re-run."',
+            "fi",
+            "",
+        ]
+    if "maxquant" in engines:
+        out += [
+            "# ---- MaxQuant (.NET; licence acceptance means it cannot be fetched for you)",
+            'if [ -n "${MAXQUANT_CMD:-}" ] && command -v "$MAXQUANT_CMD" >/dev/null 2>&1; then',
+            '  ok "MaxQuant via \\$MAXQUANT_CMD"',
+            'elif command -v MaxQuantCmd.exe >/dev/null 2>&1; then',
+            '  ok "MaxQuantCmd.exe"',
+            'elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
+            '  ok "MaxQuant via mono (\\$MAXQUANT_DIR)"',
+            "else",
+            '  bad "MaxQuant not found. Download it from https://maxquant.org/download_asset/maxquant/latest "'
+            '"then either put MaxQuantCmd.exe on PATH, set MAXQUANT_CMD=/path/to/MaxQuantCmd.exe, "'
+            '"or set MAXQUANT_DIR=/path/to/MaxQuant and install mono."',
+            "fi",
+            "",
+        ]
+    if "diann" in engines:
+        out += [
+            "# ---- DIA-NN",
+            'if [ -n "${DIANN_CMD:-}" ] && command -v "$DIANN_CMD" >/dev/null 2>&1; then',
+            '  ok "DIA-NN via \\$DIANN_CMD"',
+            'elif command -v diann-linux >/dev/null 2>&1 || command -v diann >/dev/null 2>&1; then',
+            '  ok "DIA-NN"',
+            "else",
+            '  bad "DIA-NN not found. Get a build from https://github.com/vdemichev/DiaNN/releases "'
+            '"then put it on PATH or set DIANN_CMD=/path/to/diann."',
+            "fi",
+            "",
+        ]
+    out += [
+        'if [ "$MISSING" != "0" ]; then',
+        '  printf "\\nPreflight failed. Nothing has been downloaded — fix the items marked ✗ and re-run.\\n" >&2',
+        "  exit 1",
+        "fi",
+        'printf "\\nPreflight passed.\\n"',
+        "",
+    ]
+    return "\n".join(out)
+
+
+def bootstrap_sh(accession: str, api_base: str, web_base: str = "") -> str:
+    """The whole thing as one command: fetch the kit, unpack it, run it. No zip to click, nothing to unzip."""
+    return "\n".join([
+        "#!/usr/bin/env bash",
+        f"# PRIDE Map — full reanalysis of {accession}, from nothing to a protein table.",
+        "#",
+        f"#   curl -fsSL {api_base}/dataset/{accession}/pipeline.sh | bash",
+        "#",
+        "# Creates ./reanalysis/<accession>/, fetches the kit into it and runs the pipeline.",
+        "# Everything runs here, on this machine. Re-run the same command to resume.",
+        "set -euo pipefail",
+        "",
+        f'ACC="{accession}"',
+        f'API="${{PRIDEMAP_API:-{api_base}}}"',
+        'DIR="${PRIDEMAP_DIR:-reanalysis/$ACC}"',
+        "",
+        'command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }',
+        'command -v unzip >/dev/null 2>&1 || { echo "unzip is required" >&2; exit 1; }',
+        "",
+        'mkdir -p "$DIR"',
+        'cd "$DIR"',
+        "",
+        'if [ ! -f run_all.sh ]; then',
+        '  printf "Fetching the search kit for %s…\\n" "$ACC"',
+        f'  curl -fsSL "$API/dataset/$ACC/searchkit.zip{("?web=" + urllib.parse.quote(web_base, safe="")) if web_base else ""}" -o kit.zip',
+        '  unzip -oq kit.zip && rm -f kit.zip',
+        '  chmod +x ./*.sh',
+        "else",
+        '  printf "Kit already here — resuming.\\n"',
+        "fi",
+        "",
+        'exec bash run_all.sh',
+        "",
+    ])
 
 
 KIT_GITIGNORE = """\
@@ -786,6 +949,11 @@ fail() {
   exit 1
 }
 
+warn_up() {  # non-fatal: the search already succeeded, only the hand-off didn't
+  printf '        ! %s\n' "$1"
+  emit warning "$STAGE_ID" "$1"
+}
+
 # Tail MaxQuant's own progress. It writes one combined/proc/<job>.finished.txt per internal step; we echo each
 # as it appears, so the long opaque middle of the run reports what it is actually doing.
 MQ_SEEN="$PIPE_DIR/mq_seen"
@@ -829,12 +997,30 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         "set -euo pipefail",
         'cd "$(dirname "$0")"',
         "",
-        f"TOTAL_STAGES={total}",
+        # Every stage except the final 'analyse', which is yours to make in the browser.
+        f"TOTAL_STAGES={max(1, total - 1)}",
         f'ACCESSION="{acc}"',
+        f'API="${{PRIDEMAP_API:-{ctx.get("api_base", "")}}}"',
+        "# The web app is a different origin from the API, so it is passed in rather than guessed.",
+        f'WEB="${{PRIDEMAP_WEB:-{ctx.get("web_base", "")}}}"',
+        "# Tool commands resolve automatically; override any of them with an env var.",
+        'MQ="${MAXQUANT_CMD:-}"',
+        'DIANN="${DIANN_CMD:-}"',
+        '[ -n "$MQ" ]    || { command -v MaxQuantCmd.exe >/dev/null 2>&1 && MQ=MaxQuantCmd.exe; }',
+        '[ -n "$DIANN" ] || { command -v diann-linux >/dev/null 2>&1 && DIANN=diann-linux; }',
+        '[ -n "$DIANN" ] || { command -v diann >/dev/null 2>&1 && DIANN=diann; }',
         _stage_lib(),
         'printf "PRIDE Map pipeline — %s\\n" "$ACCESSION"',
-        f'printf "%s\\n" "{total} stages. Progress is also written to progress.jsonl."',
+        f'printf "%s\\n" "{max(1, total - 1)} automated stages, then group A vs B is yours to pick. '
+        f'Progress is also written to progress.jsonl."',
         'emit run_started "" "pipeline start"',
+        "",
+        "# ---------------------------------------------------------------- 0. preflight",
+        '# Fails here, in seconds, rather than after the download. Nothing is fetched until this passes.',
+        'if stage preflight "Check tools and disk space"; then',
+        '  bash preflight.sh || fail "preflight failed — nothing was downloaded"',
+        "  stage_done",
+        "fi",
         "",
         "# ---------------------------------------------------------------- 1. raw files",
         'if stage download "Download raw files from PRIDE"; then',
@@ -870,16 +1056,16 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 "",
                 f"# ---------------------------------------------------------------- {tr['engine_label']} ({tr['run_count']} {tr['kind']} runs)",
                 f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
-                f'  command -v {mq_cmd} >/dev/null 2>&1 || command -v mono >/dev/null 2>&1 \\',
-                f'    || fail "{mq_cmd} not found. MaxQuant is .NET: run it on Windows, or via mono on Linux/macOS."',
                 '  step "MaxQuant writes one combined/proc/<step>.finished.txt per internal step; echoing them as they land"',
                 "  watch_maxquant & MQ_WATCH=$!",
                 '  trap \'kill "$MQ_WATCH" 2>/dev/null || true\' EXIT',
-                f'  if command -v {mq_cmd} >/dev/null 2>&1; then',
-                f'    {mq_cmd} {tr["config"]} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
-                "  else",
-                f'    mono "$(command -v MaxQuantCmd.exe || echo MaxQuantCmd.exe)" {tr["config"]} \\',
+                '  if [ -n "$MQ" ]; then',
+                f'    "$MQ" {tr["config"]} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
+                '  elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
+                f'    mono "$MAXQUANT_DIR/bin/MaxQuantCmd.exe" {tr["config"]} \\',
                 '      || fail "MaxQuant (mono) failed — see combined/proc/ for the step it stopped on"',
+                "  else",
+                '    fail "MaxQuant not found — preflight.sh explains how to point at it (MAXQUANT_CMD / MAXQUANT_DIR)"',
                 "  fi",
                 '  kill "$MQ_WATCH" 2>/dev/null || true; trap - EXIT',
                 '  mq_scan  # final sweep: catch steps that finished between the last poll and now',
@@ -893,7 +1079,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 "",
                 f"# ---------------------------------------------------------------- {tr['engine_label']} ({tr['run_count']} {tr['kind']} runs)",
                 f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
-                f'  command -v {diann_cmd} >/dev/null 2>&1 || fail "{diann_cmd} not on PATH — https://github.com/vdemichev/DiaNN/releases"',
+                '  [ -n "$DIANN" ] || fail "DIA-NN not found — set DIANN_CMD, see preflight.sh"',
                 '  step "library-free: DIA-NN predicts a spectral library from the FASTA first"',
                 f'  bash run_diann_{kind}.sh || fail "DIA-NN failed"',
                 f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
@@ -904,27 +1090,63 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
     tables = [tr["output_table"] for tr in (plan.get("tracks") or [])]
     out += [
         "",
+        "# ---------------------------------------------------------------- hand the tables back to PRIDE Map",
+        "# Uploaded automatically so the last manual step disappears: the script prints a link that opens",
+        "# Analyse with the table already loaded. Set PRIDEMAP_NO_UPLOAD=1 to keep everything local.",
+        'if stage upload "Hand the protein tables to PRIDE Map"; then',
+        '  if [ -n "${PRIDEMAP_NO_UPLOAD:-}" ] || [ -z "$API" ]; then',
+        '    step "skipped (PRIDEMAP_NO_UPLOAD set, or no API URL) — upload the tables by hand"',
+        "  else",
+        "    TABLES=(" + " ".join(f'"{t}"' for t in tables) + ")",
+        '    for T in "${TABLES[@]}"; do',
+        '      [ -s "$T" ] || continue',
+        '      step "uploading $T to $API"',
+        '      RESP="$(curl -fsS -F "file=@$T" "$API/analyse/inspect" 2>/dev/null || true)"',
+        '      UID_="$(printf \'%s\' "$RESP" | sed -n \'s/.*"upload_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p\')"',
+        '      if [ -n "$UID_" ]; then',
+        '        if [ -n "$WEB" ]; then',
+        '          printf "        → open: %s\\n" "$WEB/analyse?upload=$UID_"',
+        "        else",
+        '          printf "        → loaded as upload %s — open PRIDE Map → Analyse\\n" "$UID_"',
+        "        fi",
+        '        emit uploaded "upload" "$T" "\\"upload_id\\":\\"$UID_\\""',
+        '        printf "%s\\t%s\\n" "$T" "$UID_" >> uploaded.txt',
+        "      else",
+        '        warn_up "could not upload $T — upload it by hand in the Analyse step"',
+        "      fi",
+        "    done",
+        "  fi",
+        "  stage_done",
+        "fi",
+        "",
         "# ---------------------------------------------------------------- done",
         'emit run_finished "" "pipeline complete"',
         'printf "\\n%s\\n" "──────────────────────────────────────────────"',
-        'printf "Pipeline complete. Upload to PRIDE Map → Analyse:\\n"',
-        *[f'printf "  • %s\\n" "{t}"' for t in tables],
-        'printf "\\nThere, pick group A and group B to get log2 fold change, Welch t-test,\\n"',
-        'printf "Benjamini-Hochberg FDR and a volcano plot.\\n"',
+        'printf "Pipeline complete.\\n\\n"',
+        'if [ -s uploaded.txt ]; then',
+        '  printf "Already loaded into PRIDE Map — open Analyse and pick group A and group B:\\n"',
+        '  while IFS="$(printf \'\\t\')" read -r t _; do printf "  • %s\\n" "$t"; done < uploaded.txt',
+        "else",
+        '  printf "Upload these in PRIDE Map → Analyse:\\n"',
+        *[f'  printf "  • %s\\n" "{t}"' for t in tables],
+        "fi",
+        'printf "\\nThat gives log2 fold change, Welch t-test, Benjamini-Hochberg FDR and a volcano plot.\\n"',
         'printf "Stage-by-stage record: progress.jsonl\\n"',
         "",
     ]
     return "\n".join(out)
 
 
-def search_kit(accession: str) -> tuple[bytes, dict]:
+def search_kit(accession: str, api_base: str = "", web_base: str = "") -> tuple[bytes, dict]:
     """A ready-to-run kit for the engine that can actually process this dataset's raw files."""
     ctx = _kit_context(accession)
+    ctx["api_base"] = api_base.rstrip("/")
+    ctx["web_base"] = _safe_origin(web_base)
     plan = search_plan(ctx["t"], [f.get("file_name") or "" for f in ctx["raw"]])
     p = ctx["p"]
     fasta_path, _ = _fasta(ctx)
     files: dict[str, str] = {"download_raw.sh": _download_sh(ctx), "download_fasta.sh": _fasta_sh(ctx),
-                             ".gitignore": KIT_GITIGNORE}
+                             "preflight.sh": preflight_sh(ctx, plan), ".gitignore": KIT_GITIGNORE}
     steps = [f"1. `bash download_raw.sh` pulls the {len(ctx['raw'])} raw files from PRIDE's FTP into raw/ "
              "(runs plus their index sidecars — the readers need both).",
              f"2. `bash download_fasta.sh` fetches the protein database to `{fasta_path}`, where the configs expect it."]
@@ -955,10 +1177,16 @@ def search_kit(accession: str) -> tuple[bytes, dict]:
             files[sh] = "\n".join([
                 "#!/usr/bin/env bash",
                 f"# DIA-NN library-free search of {accession} ({label}, {tr['run_count']} runs).",
-                "# Runs on YOUR machine, not on PRIDE Map. Install: https://github.com/vdemichev/DiaNN/releases",
+                "# Runs on YOUR machine, not on PRIDE Map. Build: https://github.com/vdemichev/DiaNN/releases",
                 "set -euo pipefail",
-                *( [f"mkdir -p {outdir}"] if multi else [] ),
-                f"diann-linux --cfg {cfg}",
+                'cd "$(dirname "$0")"',
+                "# Resolve the binary here too, so this script also works on its own.",
+                'DIANN="${DIANN_CMD:-}"',
+                '[ -n "$DIANN" ] || { command -v diann-linux >/dev/null 2>&1 && DIANN=diann-linux; }',
+                '[ -n "$DIANN" ] || { command -v diann >/dev/null 2>&1 && DIANN=diann; }',
+                '[ -n "$DIANN" ] || { echo "DIA-NN not found — set DIANN_CMD=/path/to/diann" >&2; exit 1; }',
+                *([f"mkdir -p {outdir}"] if multi else []),
+                f'"$DIANN" --cfg {cfg}',
                 "",
             ])
             steps += [f"{n}. `bash {sh}` runs DIA-NN library-free over {label} ({tr['run_count']} runs); it predicts a "
@@ -984,7 +1212,14 @@ def search_kit(accession: str) -> tuple[bytes, dict]:
     if not plan["maxquant_offered"] and plan.get("maxquant_reason"):
         readme += [f"**Why not MaxQuant:** {plan['maxquant_reason']}", ""]
     if tracks:
+        base = ctx.get("api_base") or ""
         readme += ["## Run it", "",
+                   "From nothing, in one command — fetches this kit and runs everything:", "",
+                   "```bash",
+                   f"curl -fsSL {base}/dataset/{accession}/pipeline.sh | bash" if base
+                   else "curl -fsSL <pride-map-api>/dataset/%s/pipeline.sh | bash" % accession,
+                   "```", "",
+                   "Or, if you already have this folder:", "",
                    "```bash",
                    "bash run_all.sh",
                    "```", "",
@@ -1018,12 +1253,35 @@ def search_kit(accession: str) -> tuple[bytes, dict]:
     return buf.getvalue(), plan
 
 
+def _api_base(request) -> str:
+    return str(request.base_url).rstrip("/")
+
+
+def _safe_origin(value: str) -> str:
+    """The caller supplies this, so only a plain http(s) origin is ever written into a generated script."""
+    v = (value or "").strip().rstrip("/")
+    if not v:
+        return ""
+    p = urllib.parse.urlparse(v)
+    if p.scheme not in ("http", "https") or not p.hostname or p.path or p.query or p.fragment:
+        return ""
+    return f"{p.scheme}://{p.netloc}"
+
+
 @router.get("/dataset/{accession}/searchkit.zip")
-def dataset_searchkit(accession: str):
-    data, plan = search_kit(accession)
+def dataset_searchkit(accession: str, request: Request, web: str = ""):
+    data, plan = search_kit(accession, _api_base(request), web)
     name = "search" if len(plan.get("tracks") or []) > 1 else (plan.get("engine") or "search")
     return Response(content=data, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{accession}_{name}_kit.zip"'})
+
+
+@router.get("/dataset/{accession}/pipeline.sh")
+def dataset_pipeline_sh(accession: str, request: Request, web: str = ""):
+    """The one-liner: `curl -fsSL <api>/dataset/<acc>/pipeline.sh | bash` runs the whole thing."""
+    _kit_context(accession)  # 404 early for an unknown accession rather than handing back a broken script
+    return Response(content=bootstrap_sh(accession, _api_base(request), _safe_origin(web)),
+                    media_type="text/x-shellscript")
 
 
 # ----------------------------------------------------------------------------- corrections feed
