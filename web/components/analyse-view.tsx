@@ -377,7 +377,7 @@ function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; acc
 
   const showRemote = remoteAvailable && plan.maxquant_offered;
   type RunMethod = "local" | "remote";
-  const [runMethod, setRunMethod] = useState<RunMethod>("local");
+  const [runMethod, setRunMethod] = useState<RunMethod>("remote");
 
   const handleRemoteDone = (jobId: string) => {
     const hints = labelA ? `&hint_a=${encodeURIComponent(labelA)}${labelB ? `&hint_b=${encodeURIComponent(labelB)}` : ""}` : "";
@@ -399,12 +399,12 @@ function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; acc
       {selectedRuns.length > 0 && showRemote && (
         <div className="flex gap-4 text-sm">
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="run-method" value="local" checked={runMethod === "local"} onChange={() => setRunMethod("local")} className="accent-teal" />
-            Run on this machine
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer">
             <input type="radio" name="run-method" value="remote" checked={runMethod === "remote"} onChange={() => setRunMethod("remote")} className="accent-teal" />
             Run on cloud (Devin)
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="run-method" value="local" checked={runMethod === "local"} onChange={() => setRunMethod("local")} className="accent-teal" />
+            Run on this machine
           </label>
         </div>
       )}
