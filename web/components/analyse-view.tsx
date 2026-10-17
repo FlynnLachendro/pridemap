@@ -376,7 +376,7 @@ function OneLiner({ accession }: { accession: string }) {
 }
 
 /** Raw-only dataset: name the engine that can actually run, say why, and hand over a kit for it. */
-function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; accession: string; remoteAvailable: boolean }) {
+function SearchKit({ plan, accession, remoteAvailable, localMq }: { plan: SearchPlan; accession: string; remoteAvailable: boolean; localMq: { docker: boolean; native: boolean; dockerImage: string | null } }) {
   const router = useRouter();
   const tracks = plan.tracks ?? [];
   const stages = plan.stages ?? [];
@@ -405,6 +405,21 @@ function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; acc
         {selectedRuns.length > 0 && <span className="pill bg-ok-soft text-ok">{selectedRuns.length} files selected · {labelA}{labelB ? ` vs ${labelB}` : ""}</span>}
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
+      {plan.maxquant_offered && (
+        <div className="flex flex-wrap gap-2 text-xs">
+          {localMq.docker && (
+            <span className="pill bg-ok-soft text-ok" title={localMq.dockerImage ?? ""}>
+              Local MaxQuant (Docker) ready
+            </span>
+          )}
+          {localMq.native && (
+            <span className="pill bg-ok-soft text-ok">Local MaxQuant (native) ready</span>
+          )}
+          {!localMq.docker && !localMq.native && (
+            <span className="pill text-faint">Local MaxQuant not detected — run preflight.sh to pull the Docker image</span>
+          )}
+        </div>
+      )}
 
       <SamplePicker accession={accession} rawNames={plan.raw_names ?? []} onSelect={handleSelect} />
 
@@ -496,8 +511,12 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [remoteAvailable, setRemoteAvailable] = useState(false);
+  const [localMq, setLocalMq] = useState<{ docker: boolean; native: boolean; dockerImage: string | null }>({ docker: false, native: false, dockerImage: null });
   useEffect(() => {
     fetch(`${API}/remote-mq`).then((r) => r.ok ? r.json() : null).then((d) => { if (d) setRemoteAvailable(d.available); }).catch(() => {});
+    fetch(`${API}/local-mq`).then((r) => r.ok ? r.json() : null).then((d) => {
+      if (d) setLocalMq({ docker: d.docker?.available ?? false, native: d.native?.available ?? false, dockerImage: d.docker?.image ?? null });
+    }).catch(() => {});
   }, []);
   const look = async (a: string, autoOpen = false) => {
     const x = a.trim().toUpperCase();
@@ -534,7 +553,7 @@ function FromPride({ initial, busy, onOpen }: { initial: string; busy: boolean; 
 
       {/* Search kit: always rendered after a lookup; absent-with-reason when there are no raw files */}
       {res && (res.plan?.engine
-        ? <SearchKit plan={res.plan} accession={res.accession} remoteAvailable={remoteAvailable} />
+        ? <SearchKit plan={res.plan} accession={res.accession} remoteAvailable={remoteAvailable} localMq={localMq} />
         : res.raw_files === 0 && all.length > 0
           ? <div className="rounded-lg border bg-muted/20 p-4 text-sm grid gap-1">
               <span className="font-semibold">Re-run the search</span>

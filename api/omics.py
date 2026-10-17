@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -2281,6 +2282,49 @@ def remote_mq_info():
         return {"available": False, "detail": "MQ_SERVER_URL not set"}
     health = _mq_health_check(url)
     return {"available": health["ok"], "detail": health["detail"]}
+
+
+@router.get("/local-mq")
+def local_mq_info():
+    """Health checks for MaxQuant on the local machine: Docker image presence and native binary."""
+    import shutil
+
+    # ---- Docker daemon + MaxQuant image ----
+    docker_result: dict = {"available": False, "image": None, "detail": ""}
+    if shutil.which("docker"):
+        daemon = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
+                                capture_output=True, text=True, timeout=5)
+        if daemon.returncode == 0:
+            # Prefer native-arch rebuild; fall back to amd64 image.
+            for img in (MAXQUANT_NATIVE_IMAGE, MAXQUANT_IMAGE):
+                probe = subprocess.run(["docker", "images", "-q", img],
+                                       capture_output=True, text=True, timeout=5)
+                if probe.stdout.strip():
+                    docker_result = {"available": True, "image": img,
+                                     "detail": f"image present (Docker {daemon.stdout.strip()})"}
+                    break
+            else:
+                docker_result = {"available": False, "image": None,
+                                 "detail": f"Docker running but neither MaxQuant image is pulled"}
+        else:
+            docker_result = {"available": False, "image": None,
+                             "detail": "Docker installed but daemon not running"}
+    else:
+        docker_result = {"available": False, "image": None, "detail": "docker not found in PATH"}
+
+    # ---- Native MaxQuant binary ----
+    native_result: dict = {"available": False, "version": None, "detail": ""}
+    for binary in ("MaxQuantCmd.exe", "MaxQuantCmd", "maxquant"):
+        path = shutil.which(binary)
+        if path:
+            ver_run = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+            version = (ver_run.stdout + ver_run.stderr).strip().split("\n")[0] if ver_run.returncode == 0 else None
+            native_result = {"available": True, "version": version, "detail": f"found at {path}"}
+            break
+    else:
+        native_result = {"available": False, "version": None, "detail": "MaxQuant binary not found in PATH"}
+
+    return {"docker": docker_result, "native": native_result}
 
 
 @router.get("/dataset/{accession}/pipeline/remote/active")
