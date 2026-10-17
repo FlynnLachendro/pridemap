@@ -670,6 +670,17 @@ uv run tag.py --limit 2000                                               # ~$12 
 
   <h3>The demo itself: "Take the tour"</h3>
   <p>A button in the sidebar runs the whole loop as a guided overlay in the second person ("you type… you see…"), 15 steps across six pages, typing the question and clicking for you, with a status pill while it works and a finish screen that points to every part of the app, your shortlist, recent searches, and the roadmap (search by protein via PRIDE Peptidome, saved searches and alerts, collections, one‑click reanalysis via quantms, OmicsDI cross‑omics links, corrections feeding the model, an MCP server): Browse (question → filters → protein card → tick DIA → fits/watch → shortlist two) → Compare (verdict) → Workflow (read the case, tick) → the dataset's set‑up sheet → Analyse (load example → lyso‑IP vs mock → volcano → report bundle) → Eval. Anyone on the team can run it on Sunday; it needs no one driving. <code>demo/record_tour.mjs</code> plays the same tour through Playwright and records a video (<code>demo/videos/</code>) as the backup if the venue Wi‑Fi dies.</p>
+
+  <h3>Saturday afternoon: the roadmap, built</h3>
+  <div class="defs">
+    <div class="def"><b>MCP server<small>api/mcp_server.py · /mcp</small></b><div>The whole app as tools for an AI assistant: search by method tags, ask a question, read a dataset with evidence, compare, set‑up sheet, protein lookup. One tool definition (<code>api/tools.py</code>) drives both the MCP server and the in‑app agent console, where Claude answers a research question live, each tool call streamed. Connect with one command in Claude Code or a JSON block in Claude Desktop; HTTP transport on :8010 for hosted agents. <strong>Demo line:</strong> "Everything you just clicked, your assistant can do mid‑conversation, with the same evidence."</div></div>
+    <div class="def"><b>Search by protein<small>mentions</small></b><div>PRIDE's protein‑evidence API was retired, so "contains protein X" isn't possible from PRIDE today. What exists: UniProt synonyms (gene names, full protein name) searched as phrases over titles, descriptions and protocols, from a button on the protein card. Honest label: datasets that <em>mention</em> it.</div></div>
+    <div class="def"><b>Collections<small>/collections</small></b><div>Name a shortlist, share the link, export SDRF, download a script that fetches every file.</div></div>
+    <div class="def"><b>Saved searches + alerts<small>/saved · check_alerts.py</small></b><div>Save a question, see "N new since you saved"; a script re‑checks on a schedule.</div></div>
+    <div class="def"><b>quantms kit<small>on the set‑up sheet</small></b><div>SDRF + params + run.sh for bigbio/quantms, so the reanalysis is one Nextflow command in the cloud.</div></div>
+    <div class="def"><b>OmicsDI links<small>on each dataset</small></b><div>Transcriptomics, genomics and metabolomics datasets on the same system.</div></div>
+    <div class="def"><b>Corrections feed the model<small>apply_corrections.py</small></b><div>Every "wrong?" becomes a gold row and a re‑tag with the human value as ground truth; Eval shows them.</div></div>
+  </div>
 </div></section>
 
 </body>

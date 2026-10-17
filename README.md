@@ -20,6 +20,9 @@ The loop a researcher actually runs, with a human tick at each step:
 - **Analyse** — upload a protein table, pick group A and B, get log2 fold change, Welch t‑test, Benjamini‑Hochberg FDR and a volcano plot. Odetta Antico's lyso‑IP pipeline (`analysis/`) runs as an option when the columns match.
 - **Workflow** — Find → Confirm (a written case per shortlisted candidate, you tick it) → Set up the search → Analyse → Check.
 - **Eval** — humans vs model on a 50‑dataset gold set; five models vs each other on 200 datasets (cost, speed, agreement).
+- **MCP server + agent console** — `uv run api/mcp_server.py` exposes the same search / ask / dataset / compare / set‑up sheet / protein tools to Claude Desktop, Claude Code, Cursor or any MCP client (stdio, or `--http` for streamable HTTP on :8010). The `/mcp` page explains it and has a live console where Claude uses the tools in front of you, each call and result streamed.
+- **Collections** — named, shareable shortlists with SDRF export and a download script for all the files. **Saved searches** — save a question, see how many new datasets match since (`check_alerts.py` for cron).
+- **Cross‑omics links** (OmicsDI) on every dataset, a **quantms reanalysis kit** (SDRF + params + run.sh) on the set‑up sheet, and **corrections that feed the model** (`apply_corrections.py` re‑tags with human corrections as ground truth).
 - **API** — FastAPI with OpenAPI at `/docs`: `/search`, `/ask`, `/map`, `/compare`, `/dataset/{acc}` (+ `/why`, `/reanalyse`, `/files.txt`), `/analyse/*`, `/export.sdrf.tsv`, `/eval`. Scripts and agents can use everything without the UI.
 
 ## The tags
@@ -92,7 +95,10 @@ tag_bench.py          benchmark several models on the same 200 datasets → eval
 make_gold_template.py / eval_tags.py   human gold set + agreement report
 analysis/             Odetta's R/Python downstream scripts + example data
 load_demo.py          load bundled demo data without crawling
-api/main.py           FastAPI
+api/main.py           FastAPI (+ collections_api.py, omics.py, agent_api.py routers)
+api/tools.py          the agent tools, shared by the MCP server and the in-app console
+api/mcp_server.py     MCP server (stdio / streamable HTTP)
+demo/record_tour.mjs  Playwright: plays and records the in-app tour
 web/                  Next.js 16 + Tailwind + shadcn
 PLAN.html, SPEC.md    the plan we built from
 ```
