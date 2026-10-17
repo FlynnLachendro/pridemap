@@ -124,6 +124,7 @@ export function Tour() {
 export function TourButton({ className }: { className?: string }) {
   // Full page load on purpose: the tour starts from a clean Browse page whatever page you're on.
   return (
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a full reload is the point: the tour must start clean from any page
     <button type="button" className={className} onClick={() => { try { localStorage.removeItem("pridemap.compare"); localStorage.removeItem("pridemap.confirmed"); } catch {} window.location.assign("/?tour=0"); }}>
       ▶ Take the tour
     </button>
