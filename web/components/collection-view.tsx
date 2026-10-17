@@ -39,7 +39,7 @@ export function CollectionView() {
   if (!c) return <div className="grid gap-3 max-w-4xl"><Skeleton className="h-9 w-1/2" /><Skeleton className="h-20" /><Skeleton className="h-20" /></div>;
 
   return (
-    <div className="grid gap-5 max-w-4xl">
+    <div className="grid gap-5 max-w-4xl" data-tour="collection">
       <div className="grid gap-2">
         <div className="flex items-center gap-3 text-sm">
           <Link href="/collections" className="text-muted-foreground hover:underline">← Collections</Link>

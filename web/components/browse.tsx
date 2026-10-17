@@ -187,7 +187,7 @@ export function Browse() {
             const shown = vals.filter(([v]) => !find || v.toLowerCase().includes(find));
             const lim = open[fc.key] ? shown : shown.slice(0, 6);
             return (
-              <div key={fc.key} className="grid gap-1">
+              <div key={fc.key} className="grid gap-1" data-tour={`facet-${fc.key}`}>
                 <div className="label">{fc.label}</div>
                 {fc.search && <input value={facetFind[fc.key] ?? ""} onChange={(e) => setFacetFind({ ...facetFind, [fc.key]: e.target.value })} placeholder={`find ${fc.label.toLowerCase()}…`} className="input h-8 text-xs" />}
                 <ul className="grid gap-0.5">

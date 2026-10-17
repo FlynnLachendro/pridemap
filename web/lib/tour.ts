@@ -3,32 +3,51 @@
 export const TOUR_Q = "I want to validate phosphorylated MFF in mouse liver";
 export const TOUR_A = "PXD055942";
 export const TOUR_B = "PXD029247";  // mouse liver phospho, label-free DIA (visible after the DIA filter)
+export const TOUR_COLLECTION = "Tour: mouse liver phospho";
+export const TOUR_SAVED = "Tour: mouse liver phospho DIA";
 
 export type TourStep = {
-  route: string;                 // pathname the step lives on
+  route: string;                 // pathname the step lives on; "collection" and "saved" resolve at run time
   el: string;                    // CSS selector to highlight (data-tour attributes)
   title: string;
   text: string;
   before?: string;               // action id to run before highlighting (see tour.tsx)
-  next?: string;                 // href to navigate to after this step (cross-page)
+  next?: string;                 // href to navigate to after this step (cross-page); "@collection" / "@saved" resolve at run time
   side?: "top" | "bottom" | "left" | "right";
+  align?: "start" | "center" | "end";
+  scroll?: "center" | "start";
 };
 
 export const STEPS: TourStep[] = [
-  { route: "/", el: '[data-tour="search"]', title: "Start with your question", text: `You have a protein of interest and want public data that could show it. Type it as you'd say it: “${TOUR_Q}”. Keywords and accessions work here too.`, before: "type-question" },
-  { route: "/", el: '[data-tour="ask"]', title: "Your question becomes filters", text: "You see how it was read: mouse, liver, phospho. The protein card tells you MFF gives 10 tryptic peptides and sits on the mitochondrial outer membrane, so a phospho dataset could detect it. Protein names aren't in dataset text, so that part isn't a filter." },
-  { route: "/", el: '[data-tour="filters"]', title: "Narrow by how the data was made", text: "Every filter is a tag read from the protocol or the paper, with the sentence behind it. You tick DIA because it catches more low‑abundance peptides than DDA.", before: "tick-dia" },
-  { route: "/", el: '[data-tour="result-0"]', title: "See why each dataset fits", text: "Green chips say why a dataset fits your question, amber chips say what to watch. Click any chip and you get the sentence it came from." },
-  { route: "/", el: '[data-tour="shortlist-0"]', title: "Shortlist the candidates", text: "You shortlist two: a multi‑tissue TMT atlas and a label‑free liver phosphoproteome.", before: "shortlist-two" },
-  { route: "/", el: '[data-tour="compare-bar"]', title: "Your shortlist follows you", text: "From here you can compare them side by side or carry them into the workflow. First: can they be pooled in one analysis?", next: `/compare?a=${TOUR_A},${TOUR_B}&tour=6`, side: "top" },
-  { route: "/compare", el: '[data-tour="verdict"]', title: "Comparable or not", text: "You get a verdict and the exact method difference that would break a cross‑dataset comparison, with every tag side by side underneath.", next: `/flow?q=${encodeURIComponent(TOUR_Q)}&tour=7` },
-  { route: "/flow", el: '[data-tour="candidate-0"]', title: "You confirm each candidate", text: "A three‑sentence case for each shortlisted dataset, written against your question. You read it and tick the ones you'll actually use.", before: "tick-candidate" },
-  { route: "/flow", el: '[data-tour="setup-links"]', title: "Set up the database search", text: "Each confirmed dataset gets a set‑up sheet.", next: `/dataset/${TOUR_B}?tour=9#reanalyse` },
-  { route: `/dataset/${TOUR_B}`, el: '[data-tour="reanalyse"]', title: "What to type into the search software", text: "The files PRIDE holds, and the parameters derived from the tags: DIA‑NN for this DIA dataset, enzyme, fixed and variable modifications, quantification, FASTA. Each line cites the sentence it came from. The search itself runs on your machine.", next: "/analyse?tour=10" },
+  // Browse
+  { route: "/", el: '[data-tour="search"]', title: "Start with your question", text: `Type it as you'd say it: “${TOUR_Q}”. Keywords and accessions work too.`, before: "type-question" },
+  { route: "/", el: '[data-tour="ask"]', title: "Your question becomes filters", text: "Mouse, liver, phospho. The protein card says MFF gives 10 tryptic peptides and sits on the mitochondrial outer membrane, so a phospho dataset could detect it." },
+  { route: "/", el: '[data-tour="mentions"]', title: "Datasets that mention the protein", text: "Protein names aren't searchable fields in PRIDE. This searches UniProt's names and synonyms for MFF across titles, descriptions and protocols." },
+  { route: "/", el: '[data-tour="facet-acquisition"]', title: "Narrow by how the data was made", text: "Each filter is a tag read from the protocol or the paper. You tick DIA because it sees more low‑abundance peptides than DDA.", before: "tick-dia", side: "right" },
+  { route: "/", el: '[data-tour="result-0"]', title: "See why each dataset fits", text: "Green chips: why it fits. Amber: what to watch. Each opens to the sentence it came from.", scroll: "start" },
+  { route: "/", el: '[data-tour="save-search"]', title: "Save the search", text: "Saved searches tell you how many new datasets have landed in PRIDE since, and a script can check on a schedule.", before: "save-search" },
+  { route: "/", el: '[data-tour="shortlist-0"]', title: "Shortlist the candidates", text: "You shortlist two: a multi‑tissue TMT atlas and a label‑free liver phosphoproteome.", before: "shortlist-two", scroll: "start" },
+  { route: "/", el: '[data-tour="compare-bar"]', title: "Your shortlist follows you", text: "Compare them, carry them into the workflow, or save them as a collection.", side: "top", next: `/compare?a=${TOUR_A},${TOUR_B}&tour=8` },
+  // Compare
+  { route: "/compare", el: '[data-tour="verdict"]', title: "Comparable or not", text: "A verdict, a match bar, and the exact method difference that would break a cross‑dataset comparison. Every tag side by side underneath.", before: "save-collection", next: "@collection" },
+  // Collection
+  { route: "collection", el: '[data-tour="collection"]', title: "Collections", text: "Your shortlist, named and shareable: compare all, open in the workflow, export SDRF, or download a script that fetches every file.", scroll: "start", next: `/flow?q=${encodeURIComponent(TOUR_Q)}&tour=10` },
+  // Workflow
+  { route: "/flow", el: '[data-tour="candidate-0"]', title: "You confirm each candidate", text: "A three‑sentence case for each shortlisted dataset, written against your question. Tick the ones you'll use.", before: "tick-candidate" },
+  { route: "/flow", el: '[data-tour="setup-links"]', title: "Set up the database search", text: "Each confirmed dataset gets a set‑up sheet.", next: `/dataset/${TOUR_B}?tour=12#reanalyse` },
+  // Dataset
+  { route: `/dataset/${TOUR_B}`, el: '[data-tour="reanalyse"]', title: "What to type into the search software", text: "The files PRIDE holds and the parameters derived from the tags: DIA‑NN here, enzyme, fixed and variable modifications, quantification, FASTA. Each line cites its sentence.", scroll: "start" },
+  { route: `/dataset/${TOUR_B}`, el: '[data-tour="quantms"]', title: "Or run it in the cloud", text: "A quantms kit: SDRF, parameters and a Nextflow command, generated from the same tags." },
+  { route: `/dataset/${TOUR_B}`, el: '[data-tour="omics"]', title: "Other omics on the same system", text: "Transcriptomics, genomics and metabolomics datasets for the same organism and tissue, from OmicsDI.", side: "left", next: "/analyse?tour=15" },
+  // Analyse
   { route: "/analyse", el: '[data-tour="example"]', title: "Analyse the protein table", text: "Your search gave you a protein table. You load it (here, an example lyso‑IP table).", before: "load-example" },
   { route: "/analyse", el: '[data-tour="groups"]', title: "Pick group A and group B", text: "Lyso‑IP against mock beads. You run it.", before: "set-groups-run" },
-  { route: "/analyse", el: '[data-tour="results"]', title: "Your first look", text: "8,223 proteins tested, 225 significant, volcano plot, sortable table. The pandas step, without pandas." },
-  { route: "/analyse", el: '[data-tour="report"]', title: "Take it to the paper", text: "One zip: a Methods paragraph written from these exact parameters, every tested protein, the parameters, a script that reproduces the result, and software versions.", next: "/eval?tour=14" },
-  { route: "/eval", el: '[data-tour="bench"]', title: "Know how much to trust it", text: "Five models on the same 200 datasets: cost, speed, agreement. Humans vs model on a hand‑labelled set. Every tag in the app shows its confidence and evidence.", next: "/mcp?tour=15" },
-  { route: "/mcp", el: '[data-tour="agent"]', title: "Let your own assistant do all of this", text: "Every step you just took is also a tool an AI agent can call through MCP. Here Claude is answering a question by searching, reading a dataset and comparing, live, with the same evidence you saw.", before: "run-agent", next: "/tour/done" },
+  { route: "/analyse", el: '[data-tour="results"]', title: "Your first look", text: "8,223 proteins tested, 225 significant, volcano plot, sortable table.", scroll: "start" },
+  { route: "/analyse", el: '[data-tour="report"]', title: "Take it to the paper", text: "One zip: a Methods paragraph from these exact parameters, every tested protein, the parameters, a script that reproduces the result, software versions.", next: "/map?tour=19" },
+  // Map
+  { route: "/map", el: '[data-tour="map"]', title: "The whole archive at a glance", text: "Every tagged dataset by organism, sample type, enrichment and acquisition. Click to drill in, click a leaf to search it.", next: "/eval?tour=20" },
+  // Eval
+  { route: "/eval", el: '[data-tour="bench"]', title: "Know how much to trust it", text: "Five models on the same 200 datasets: cost, speed, agreement. Humans vs model on a hand‑labelled set. Corrections you file feed the next run.", next: "/mcp?tour=21" },
+  // MCP
+  { route: "/mcp", el: '[data-tour="agent"]', title: "Let your own assistant do all of this", text: "Every step is also a tool an AI agent can call through MCP. Here Claude answers a question by searching, reading a dataset and comparing, live.", before: "run-agent", next: "/tour/done" },
 ];

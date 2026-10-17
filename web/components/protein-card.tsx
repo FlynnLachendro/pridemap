@@ -35,7 +35,7 @@ export function ProteinCard({ name, organism, tissue }: { name: string; organism
       {p.function && <p className="text-muted-foreground line-clamp-2"><span className="label mr-2">Function</span>{p.function}</p>}
       {p.synonyms && p.synonyms.length > 0 && (
         <div className="flex flex-wrap gap-2 items-center pt-1">
-          <Link href={`/?q=${encodeURIComponent(p.synonyms.join("|"))}${organism ? `&organism=${encodeURIComponent(organism)}` : ""}`} className="btn btn-sm">Datasets that mention {p.gene ?? p.name} →</Link>
+          <Link href={`/?q=${encodeURIComponent(p.synonyms.join("|"))}${organism ? `&organism=${encodeURIComponent(organism)}` : ""}`} className="btn btn-sm" data-tour="mentions">Datasets that mention {p.gene ?? p.name} →</Link>
           <span className="text-xs text-faint">searches titles, descriptions and protocols for: {p.synonyms.join(", ")}</span>
         </div>
       )}

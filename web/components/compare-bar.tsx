@@ -20,7 +20,7 @@ export function CompareBar() {
       </span>
       <Link href="/flow" className="rounded-full bg-teal text-primary-foreground px-3 py-1 font-semibold whitespace-nowrap text-xs">Workflow →</Link>
       {sel.length >= 2 && <Link href={`/compare?a=${sel.join(",")}`} className="rounded-full border border-border px-3 py-1 font-semibold whitespace-nowrap text-xs hover:border-teal transition-colors duration-[120ms]">Compare</Link>}
-      <button type="button" onClick={() => setSaving(true)} className="rounded-full border border-border px-3 py-1 font-semibold whitespace-nowrap text-xs hover:border-teal transition-colors duration-[120ms]">Save as collection</button>
+      <button type="button" data-tour="save-collection" onClick={() => setSaving(true)} className="rounded-full border border-border px-3 py-1 font-semibold whitespace-nowrap text-xs hover:border-teal transition-colors duration-[120ms]">Save as collection</button>
       <button type="button" onClick={clear} className="text-xs text-muted-foreground underline">clear</button>
       <CollectionDialog accessions={sel} open={saving} onOpenChange={setSaving} />
     </div>

@@ -47,7 +47,7 @@ export function SavedView() {
             const ck = checks[s.id];
             const n = ck && ck !== "busy" ? ck.new_count : s.new_count;
             return (
-              <article key={s.id} className="card p-4 grid gap-2 text-sm enter">
+              <article data-tour="saved-row" key={s.id} className="card p-4 grid gap-2 text-sm enter">
                 <div className="flex flex-wrap items-center gap-3">
                   <Link href={s.url} className="font-semibold text-base hover:underline">{s.name}</Link>
                   <span className={`pill tabular ${n > 0 ? "bg-peak-soft text-peak" : "bg-ok-soft text-ok"}`}>{n} new since you saved</span>

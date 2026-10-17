@@ -126,7 +126,7 @@ export function MapView() {
       {!tree && <div className="card p-4"><div className="skeleton h-[400px] w-full" /></div>}
       {tree && (
         <div className="rounded-xl border bg-card overflow-hidden">
-          <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto block" role="img" aria-label="Treemap of tagged PRIDE datasets">
+          <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto block" role="img" aria-label="Treemap of tagged PRIDE datasets" data-tour="map">
             {boxes.map((b, i) => {
               const col = PALETTE[b.parentIdx % PALETTE.length];
               const isLeafLevel = b.depth === 2;

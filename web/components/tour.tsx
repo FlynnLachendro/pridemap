@@ -3,7 +3,8 @@ import { useEffect, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { driver, type Driver } from "driver.js";
 import "driver.js/dist/driver.css";
-import { STEPS, TOUR_A, TOUR_B, TOUR_Q } from "@/lib/tour";
+import { STEPS, TOUR_A, TOUR_B, TOUR_COLLECTION, TOUR_Q, TOUR_SAVED } from "@/lib/tour";
+import { createCollection, createSaved, deleteCollection, deleteSaved, listCollections, listSaved } from "@/lib/api";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -15,6 +16,8 @@ function status(msg: string | null) {
   el.innerHTML = `<span class="spinner"></span><span>${msg}</span>`;
 }
 const MSG: Record<string, string> = {
+  "save-search": "Tour: saving this search…",
+  "save-collection": "Tour: saving the shortlist as a collection…",
   "type-question": "Tour: typing Charlotte’s question…",
   "tick-dia": "Tour: narrowing to DIA…",
   "shortlist-two": "Tour: shortlisting two datasets…",
@@ -71,6 +74,25 @@ const ACTIONS: Record<string, () => Promise<void>> = {
     await waitFor('[data-tour="groups"]', 30000);
     await sleep(500);
   },
+  "save-search": async () => {
+    // create via the API (robust) so the Saved searches page has a real row; replace a previous tour row of the same name
+    try {
+      for (const r of await listSaved()) if (r.name === TOUR_SAVED) await deleteSaved(r.id);
+      const sp = new URLSearchParams(window.location.search);
+      const filters: Record<string, string> = {};
+      sp.forEach((v, k) => { if (!["tour", "ask", "page", "size"].includes(k) && v) filters[k] = v; });
+      const total = Number(document.querySelector("h2.tabular")?.textContent?.replace(/[^0-9]/g, "") ?? 0);
+      await createSaved({ name: TOUR_SAVED, filters, url: `/?${new URLSearchParams(filters).toString()}`, total_at_save: total });
+    } catch (e) { console.warn("tour save-search", e); }
+    await waitFor('[data-tour="save-search"]');
+  },
+  "save-collection": async () => {
+    try {
+      for (const c of await listCollections()) if (c.name === TOUR_COLLECTION) await deleteCollection(c.id);
+      const c = await createCollection({ name: TOUR_COLLECTION, accessions: [TOUR_A, TOUR_B], note: "Made by the tour: the two shortlisted mouse liver phospho datasets." });
+      sessionStorage.setItem("tour-collection", c.id);
+    } catch (e) { console.warn("tour save-collection", e); }
+  },
   "run-agent": async () => {
     const b = (await waitFor('[data-tour="agent-run"]')) as HTMLButtonElement | null;
     b?.click();
@@ -91,7 +113,8 @@ const ACTIONS: Record<string, () => Promise<void>> = {
 
 function label(href: string) {
   const p = href.split("?")[0];
-  return p.startsWith("/dataset/") ? "the dataset’s set‑up sheet" : { "/compare": "Compare", "/flow": "Workflow", "/analyse": "Analyse", "/eval": "Eval", "/mcp": "the agent page", "/tour/done": "the finish" }[p] ?? p;
+  if (p.startsWith("/collections/")) return "your new collection";
+  return p.startsWith("/dataset/") ? "the dataset’s set‑up sheet" : { "/compare": "Compare", "/flow": "Workflow", "/analyse": "Analyse", "/eval": "Eval", "/map": "the Map", "/mcp": "the agent page", "/tour/done": "the finish" }[p] ?? p;
 }
 
 export function Tour() {
@@ -104,7 +127,8 @@ export function Tour() {
     const raw = new URLSearchParams(window.location.search).get("tour");
     if (raw === null) return;
     const start = Number(raw) || 0;
-    const steps = STEPS.map((s, i) => ({ ...s, i })).filter((s) => s.i >= start && s.route === path);
+    const routeOf = (r: string) => (r === "collection" ? path.startsWith("/collections/") : r === path);
+    const steps = STEPS.map((s, i) => ({ ...s, i })).filter((s) => s.i >= start && routeOf(s.route));
     if (!steps.length) return;
     let cancelled = false;
 
@@ -115,9 +139,13 @@ export function Tour() {
       overlayOpacity: 0.45,
       stagePadding: 8,
       popoverClass: "pridemap-tour",
-      smoothScroll: true,
-      onHighlightStarted: (el) => { (el as HTMLElement | undefined)?.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" }); },
-      onHighlighted: () => { setTimeout(() => d.refresh(), 250); },
+      smoothScroll: false,
+      onHighlightStarted: (el) => {
+        const idx = d.getActiveIndex() ?? 0;
+        const want = steps[idx]?.scroll ?? "center";
+        (el as HTMLElement | undefined)?.scrollIntoView({ block: want, inline: "nearest", behavior: "instant" as ScrollBehavior });
+      },
+      onHighlighted: () => { setTimeout(() => d.refresh(), 120); setTimeout(() => d.refresh(), 450); },
       nextBtnText: "Next →",
       prevBtnText: "← Back",
       doneBtnText: "Finish",
@@ -125,7 +153,11 @@ export function Tour() {
       onNextClick: async () => {
         const idx = d.getActiveIndex() ?? 0;
         const step = steps[idx];
-        if (step.next) { cancelled = true; d.destroy(); status(`Tour: opening ${label(step.next)}…`); try { sessionStorage.setItem("tour-status", `Tour: opening ${label(step.next)}…`); } catch {} window.dispatchEvent(new Event("pridemap-navigating")); router.push(step.next); return; }
+        if (step.next) {
+          let href = step.next;
+          if (href === "@collection") { const id = sessionStorage.getItem("tour-collection"); href = id ? `/collections/${id}?tour=${step.i + 1}` : `/flow?q=${encodeURIComponent(TOUR_Q)}&tour=${step.i + 2}`; }
+          cancelled = true; d.destroy(); status(`Tour: opening ${label(href)}…`); try { sessionStorage.setItem("tour-status", `Tour: opening ${label(href)}…`); } catch {} window.dispatchEvent(new Event("pridemap-navigating")); router.push(href); return;
+        }
         const nxt = steps[idx + 1];
         if (!nxt) { cancelled = true; d.destroy(); status(null); router.push("/tour/done"); return; }
         if (nxt.before && ACTIONS[nxt.before]) { status(MSG[nxt.before] ?? "Tour: working…"); await ACTIONS[nxt.before](); status(null); }
@@ -133,7 +165,7 @@ export function Tour() {
       },
       steps: steps.map((s) => ({
         element: s.el,
-        popover: { title: s.title, description: s.text, side: s.side ?? "bottom", align: "start", progressText: `${s.i + 1} of ${STEPS.length}`, doneBtnText: s.next ? "Next →" : "Finish" },
+        popover: { title: s.title, description: s.text, side: s.side ?? "bottom", align: s.align ?? "start", progressText: `${s.i + 1} of ${STEPS.length}`, doneBtnText: s.next ? "Next →" : "Finish" },
       })),
     });
     drv.current = d;

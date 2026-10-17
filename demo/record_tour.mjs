@@ -11,7 +11,7 @@ await page.goto(`${BASE}/`);
 await page.evaluate(() => { localStorage.removeItem("pridemap.compare"); localStorage.removeItem("pridemap.confirmed"); });
 await page.goto(`${BASE}/?tour=0`);
 
-const TOTAL = 16;
+const TOTAL = 22;
 for (let i = 0; i < TOTAL; i++) {
   await page.waitForSelector(".driver-popover", { timeout: 120000 });
   await page.waitForTimeout(4500);                      // let the viewer read

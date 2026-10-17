@@ -19,7 +19,7 @@ export function OmicsLinks({ accession }: { accession: string }) {
   return (
     <div className="rounded-xl border bg-card p-4 text-sm grid gap-3" data-tour="omics">
       <div className="flex items-baseline justify-between gap-2">
-        <h2 className="text-lg">Other omics on the same system</h2>
+        <h2 className="text-lg" data-tour="omics">Other omics on the same system</h2>
         <span className="text-xs text-muted-foreground">via OmicsDI</span>
       </div>
       {err && <p className="text-warn text-xs">{err}</p>}

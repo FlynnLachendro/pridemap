@@ -17,7 +17,7 @@ export function SaveSearch({ filters, total }: { filters: Record<string, string>
   const url = `/?${new URLSearchParams(question).toString()}`;
   return (
     <>
-      <button type="button" className="btn btn-sm" onClick={() => { setSaved(null); setOpen(true); }}>Save search</button>
+      <button type="button" className="btn btn-sm" data-tour="save-search" onClick={() => { setSaved(null); setOpen(true); }}>Save search</button>
       {saved && <Link href="/saved" className="text-xs text-ok enter whitespace-nowrap">Saved ✓ view saved searches →</Link>}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
