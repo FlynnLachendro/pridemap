@@ -382,10 +382,14 @@ def sample_annotations(accession: str, refresh: bool = False) -> dict:
     for r in rows:
         for field, a in r["annotations"].items():
             counts.setdefault(field, set()).add(a["value"])
-    fields = [{"field": f, "distinct": len(v), "varies": len(v) > 1, "values": sorted(v)[:12]}
+    # A field with one value per run identifies the run; it does not group runs, so it is not a factor and must
+    # not take a slot in the label (replicate number 16 says nothing; Hypoxia / 48 h do). Fewest distinct values
+    # first, so the coarsest grouping — the thing most likely to be the experimental factor — leads.
+    fields = [{"field": f, "distinct": len(v), "varies": len(v) > 1,
+               "identifier": len(v) >= max(2, len(rows)), "values": sorted(v)[:12]}
               for f, v in counts.items()]
-    fields.sort(key=lambda f: (not f["varies"], -f["distinct"], f["field"]))
-    varying = [f["field"] for f in fields if f["varies"]]
+    fields.sort(key=lambda f: (not f["varies"], f["identifier"], f["distinct"], f["field"]))
+    varying = [f["field"] for f in fields if f["varies"] and not f["identifier"]]
     for r in rows:
         r["label"] = "_".join(_slug(r["annotations"][f]["value"]) for f in varying[:3]
                               if f in r["annotations"]) or _run_key(r["file_name"])
@@ -835,8 +839,15 @@ def pipeline_stages(plan: dict) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------- MaxQuant / DIA-NN kits
+# Bioconda's MaxQuant container. Published amd64 only, and MaxQuant is .NET: on an arm64 host it runs under
+# emulation, where Mono's JIT dies in its own trampoline before MaxQuant parses an argument. So the image is
+# detected AND smoke-tested, rather than assumed to work because it is present.
+MAXQUANT_IMAGE = "quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1"
+MAXQUANT_IMAGE_VERSION = "2.0.3.0"
+DOCKER_MOUNT = "/data"
+
 MQ_INSTRUMENT = {"orbitrap": 0, "timstof": 1, "qtof": 2, "fticr": 0, "ion_trap": 0}
-MQ_VERSION = "2.4.14.0"
+MQ_VERSION = MAXQUANT_IMAGE_VERSION  # match the container we provision; a newer native install will offer to upgrade the file
 
 
 def _xml_list(tag: str, items: list[str], item_tag: str = "string") -> str:
@@ -883,6 +894,11 @@ KIT_DIR_TOKEN = "__KIT_DIR__"
 
 def _abs_in_kit(path: str) -> str:
     return f"{KIT_DIR_TOKEN}/{path.lstrip('/')}"
+
+
+def _docker_config(name: str) -> str:
+    """The container-path copy of a config, written beside the shipped one."""
+    return re.sub(r"(\.[^.]+)$", r".docker\1", name)
 
 
 def _local_config(name: str) -> str:
@@ -1106,16 +1122,21 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
         'command -v curl >/dev/null 2>&1 && ok "curl" || bad "curl not found"',
         "",
     ]
-    if need_convert:
+    # Docker provides msconvert and MaxQuant when they are not installed natively, so check it whenever either
+    # could need it — not only when there is a conversion stage.
+    if need_convert or "maxquant" in engines:
         out += [
-            "# ---- docker: how msconvert is provided when it is not installed natively",
+            "# ---- docker: where msconvert and MaxQuant come from when they are not installed natively",
             "HAVE_DOCKER=0",
             'if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then',
             '  HAVE_DOCKER=1; ok "docker is running"',
             "else",
-            '  warn "docker not available — only matters if msconvert is missing natively"',
+            '  warn "docker not available — only matters if a tool below is missing natively"',
             "fi",
             "",
+        ]
+    if need_convert:
+        out += [
             "# ---- msconvert. Checked now; the 2 GB image pull is deferred to the end, because pulling it only to",
             "# abort on a different failed check wastes bandwidth and several minutes.",
             "NEED_PWIZ_PULL=0",
@@ -1136,18 +1157,41 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
         ]
     if "maxquant" in engines:
         out += [
-            "# ---- MaxQuant (.NET; licence acceptance means it cannot be fetched for you)",
+            "# ---- MaxQuant. Native install, or the Bioconda container, which we can fetch and verify.",
+            "MQ_RUNNER=none",
+            "NEED_MQ_PULL=0",
             'if [ -n "${MAXQUANT_CMD:-}" ] && command -v "$MAXQUANT_CMD" >/dev/null 2>&1; then',
-            '  ok "MaxQuant via \\$MAXQUANT_CMD"',
+            '  MQ_RUNNER=native; ok "MaxQuant via \\$MAXQUANT_CMD"',
             'elif command -v MaxQuantCmd.exe >/dev/null 2>&1; then',
-            '  ok "MaxQuantCmd.exe"',
+            '  MQ_RUNNER=native; ok "MaxQuantCmd.exe"',
             'elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
-            '  ok "MaxQuant via mono (\\$MAXQUANT_DIR)"',
+            '  MQ_RUNNER=mono; ok "MaxQuant via mono (\\$MAXQUANT_DIR)"',
+            'elif [ "${HAVE_DOCKER:-0}" = "1" ]; then',
+            f'  if ! docker image inspect {MAXQUANT_IMAGE} >/dev/null 2>&1; then',
+            "    NEED_MQ_PULL=1",
+            f'    warn "MaxQuant will come from {MAXQUANT_IMAGE} — a ~1.4GB pull, once"',
+            "    MQ_RUNNER=docker",
+            "  else",
+            "    # Present is not the same as working: prove it can start before committing to the download.",
+            "    # Captured rather than piped — under pipefail a pipeline reports the crashing container's status,",
+            "    # not grep's match, which silently turned this check into an always-pass.",
+            f'    MQ_PROBE="$(docker run --rm {MAXQUANT_IMAGE} mono /usr/local/bin/MaxQuantCmd.exe --version 2>&1 || true)"',
+            '    if [ "${MQ_PROBE#*should not be reached}" != "$MQ_PROBE" ]; then',
+            '      bad "the MaxQuant image is present but crashes on this host: it is linux/amd64, this machine '
+            'is $(uname -m), and Mono dies in its own JIT under QEMU emulation. Easiest fix: in Docker Desktop, '
+            'Settings > General, switch on Rosetta for x86_64/amd64 emulation and re-run — Rosetta runs Mono '
+            'correctly where QEMU does not. Otherwise run this kit on an x86_64 machine, or install MaxQuant '
+            'natively and set MAXQUANT_CMD."',
+            "    else",
+            '      MQ_RUNNER=docker; ok "MaxQuant (docker image, verified it starts)"',
+            "    fi",
+            "  fi",
             "else",
-            '  bad "MaxQuant not found. Download it from https://maxquant.org/download_asset/maxquant/latest "'
-            '"then either put MaxQuantCmd.exe on PATH, set MAXQUANT_CMD=/path/to/MaxQuantCmd.exe, "'
-            '"or set MAXQUANT_DIR=/path/to/MaxQuant and install mono."',
+            '  bad "MaxQuant not found, and docker is not running. Either start Docker (the container is fetched '
+            'for you), or install MaxQuant from https://maxquant.org/download_asset/maxquant/latest and set '
+            'MAXQUANT_CMD=/path/to/MaxQuantCmd.exe."',
             "fi",
+            'echo "$MQ_RUNNER" > .pipeline_mq_runner 2>/dev/null || true',
             "",
         ]
     if "diann" in engines:
@@ -1169,14 +1213,30 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
         "  exit 1",
         "fi",
     ]
+    # Everything else passed, so the expensive provisioning is now worth doing.
     if need_convert:
         out += [
-            '# Everything else passed, so the one expensive bit of provisioning is now worth doing.',
             'if [ "${NEED_PWIZ_PULL:-0}" = "1" ]; then',
             f'  printf "  … pulling {PWIZ_IMAGE} (one-time, ~2GB)\\n"',
             f'  docker pull -q {PWIZ_IMAGE} >/dev/null 2>&1 \\',
             f'    || {{ printf "  ✗ could not pull {PWIZ_IMAGE}\\n" >&2; exit 1; }}',
             '  printf "  ✓ msconvert (docker, pulled automatically)\\n"',
+            "fi",
+        ]
+    if "maxquant" in engines:
+        out += [
+            'if [ "${NEED_MQ_PULL:-0}" = "1" ]; then',
+            f'  printf "  … pulling {MAXQUANT_IMAGE} (one-time, ~1.4GB)\\n"',
+            f'  docker pull -q --platform linux/amd64 {MAXQUANT_IMAGE} >/dev/null 2>&1 \\',
+            f'    || {{ printf "  ✗ could not pull {MAXQUANT_IMAGE}\\n" >&2; exit 1; }}',
+            "  # Pulled is not the same as runnable; the same smoke test as above, now that it exists.",
+            f'  MQ_PROBE="$(docker run --rm {MAXQUANT_IMAGE} mono /usr/local/bin/MaxQuantCmd.exe --version 2>&1 || true)"',
+            '  if [ "${MQ_PROBE#*should not be reached}" != "$MQ_PROBE" ]; then',
+            '    printf "  ✗ MaxQuant pulled, but it crashes under emulation on this $(uname -m) host. '
+            'Switch on Rosetta in Docker Desktop (Settings > General) and re-run, or use an x86_64 machine.\\n" >&2',
+            "    exit 1",
+            "  fi",
+            '  printf "  ✓ MaxQuant (docker, pulled and verified)\\n"',
             "fi",
         ]
     out += [
@@ -1236,6 +1296,8 @@ progress.jsonl
 # Configs with this kit's directory substituted in, written by run_all.sh. The shipped config is the one to keep.
 *.local.xml
 *.local.cfg
+*.docker.xml
+*.docker.cfg
 """
 
 
@@ -1409,18 +1471,28 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
                 # MaxQuant's workers resolve paths from their own cwd, so the config needs absolute ones. The kit
                 # cannot know where it will be unpacked, so the directory is substituted here, once, per run.
-                f'  sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
-                f'  step "paths in {tr["config"]} resolved against $PWD -> {_local_config(tr["config"])}"',
                 '  step "MaxQuant writes one combined/proc/<step>.finished.txt per internal step; echoing them as they land"',
                 "  watch_maxquant & MQ_WATCH=$!",
                 '  trap \'kill "$MQ_WATCH" 2>/dev/null || true\' EXIT',
+                # The config carries a placeholder rather than a path, because MaxQuant's workers resolve relative
+                # paths from their own cwd. What it resolves to differs per runner: the kit directory natively,
+                # the mount point inside the container.
                 '  if [ -n "$MQ" ]; then',
+                f'    sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
+                f'    step "paths resolved against $PWD -> {_local_config(tr["config"])}"',
                 f'    "$MQ" {_local_config(tr["config"])} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
                 '  elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
+                f'    sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
                 f'    mono "$MAXQUANT_DIR/bin/MaxQuantCmd.exe" {_local_config(tr["config"])} \\',
                 '      || fail "MaxQuant (mono) failed — see combined/proc/ for the step it stopped on"',
+                '  elif command -v docker >/dev/null 2>&1; then',
+                f'    sed "s#{KIT_DIR_TOKEN}#{DOCKER_MOUNT}#g" {tr["config"]} > {_docker_config(tr["config"])}',
+                f'    step "running MaxQuant in {MAXQUANT_IMAGE}; paths resolved against {DOCKER_MOUNT}"',
+                f'    docker run --rm --platform linux/amd64 -v "$PWD":{DOCKER_MOUNT} -w {DOCKER_MOUNT} \\',
+                f'      {MAXQUANT_IMAGE} maxquant {DOCKER_MOUNT}/{_docker_config(tr["config"])} \\',
+                '      || fail "MaxQuant (docker) failed — see combined/proc/ for the step it stopped on"',
                 "  else",
-                '    fail "MaxQuant not found — preflight.sh explains how to point at it (MAXQUANT_CMD / MAXQUANT_DIR)"',
+                '    fail "MaxQuant not found — preflight.sh explains the options (MAXQUANT_CMD / MAXQUANT_DIR / docker)"',
                 "  fi",
                 '  kill "$MQ_WATCH" 2>/dev/null || true; trap - EXIT',
                 '  mq_scan  # final sweep: catch steps that finished between the last poll and now',
@@ -1749,11 +1821,14 @@ def pipeline_start(accession: str, request: Request, web: str = "", runs: str = 
 
 
 @router.get("/dataset/{accession}/pipeline/status")
-def pipeline_status(accession: str, request: Request, tail: int = 40):
-    """Where the run has got to: one entry per stage, plus the last lines of output."""
+def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str = ""):
+    """Where the run has got to: one entry per stage, plus the last lines of output.
+
+    `runs` must match the selection the run was started with, since each selection has its own directory."""
     local = _is_local(request)
-    d = run_dir(accession)
-    plan = dataset_search_plan(accession)
+    sel = parse_runs(runs)
+    d = run_dir(accession, sel)
+    plan = dataset_search_plan(accession, sel)
     events = _read_progress(d)
     by_stage: dict[str, dict] = {}
     for e in events:
