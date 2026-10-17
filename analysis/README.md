@@ -10,3 +10,10 @@ Drop R and Python scripts here (Odetta). For each script, a few lines at the top
 A tiny example input file next to the script helps more than anything else.
 
 The app will call these from an "Analyse" step: pick datasets → pull their result tables from PRIDE → run the script → show the output.
+
+## What's here
+
+- `tese_lysoip_analysis.py` (Odetta Antico) — LysoTag lyso‑IP analysis for PINK1 TESE mice: tag‑vs‑tag effect, input‑normalised enrichment, mock‑controlled dod, batch comparison. Input: a CSV export with `Genes`, `log2FC`, `-log10 P.Value` and intensity columns named `<prefix>_IP_LTKI.N` etc. Requires pandas, numpy, scipy.
+- `tese_lysoip_compare_batches.py` (Odetta Antico) — compares per‑protein TESE effects between two such datasets (e.g. batch 1 vs batch 2): concordance, common hits, batch‑specific hits, scatter plot. Requires matplotlib too.
+
+Both take file paths on the command line; see each file's docstring. Example input CSVs are not in the repo yet.
