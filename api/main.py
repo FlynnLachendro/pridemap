@@ -42,7 +42,7 @@ PRIDE_URL = "https://www.ebi.ac.uk/pride/archive/projects/"
 
 
 def db():
-    con = sqlite3.connect(DB, check_same_thread=False)
+    con = sqlite3.connect(DB, check_same_thread=False, timeout=60)
     con.row_factory = sqlite3.Row
     return con
 
