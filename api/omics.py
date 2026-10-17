@@ -7,6 +7,7 @@ import concurrent.futures as cf
 import datetime as dt
 import io
 import json
+import logging
 import os
 import pathlib
 import re
@@ -17,6 +18,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
@@ -2183,12 +2186,6 @@ def corrections_stats():
             "applied": con.execute("SELECT count(*) FROM tags WHERE model LIKE '%(corrected)'").fetchone()[0]}
 
 
-@router.get("/remote-mq")
-def remote_mq_info():
-    """Tells the UI whether a remote MaxQuant server is configured (MQ_SERVER_URL in .env)."""
-    return {"available": bool(os.environ.get("MQ_SERVER_URL", "").strip())}
-
-
 # ----------------------------------------------------------------------------- remote MaxQuant server (Devin/cloud)
 # Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to a remote Linux machine running the Devin-provisioned
 # mq_server. Temporary: tear down by unsetting MQ_SERVER_URL.
@@ -2207,6 +2204,35 @@ def _mq_remote_url() -> str:
 def _mq_auth_headers() -> dict:
     token = os.environ.get("MQ_TOKEN", "")
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _mq_health_check(base_url: str) -> dict:
+    """Probe GET {base_url}/health. Returns {ok, status_code, detail}. Always logs."""
+    url = f"{base_url}/health"
+    logger.info("remote MQ health check → %s", url)
+    try:
+        req = urllib.request.Request(url, headers=_mq_auth_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode(errors="replace")
+            logger.info("remote MQ health check ✓  %s  body=%r", url, body[:120])
+            return {"ok": True, "status_code": resp.status, "detail": body}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        logger.warning("remote MQ health check ✗  %s  HTTP %s  %r", url, e.code, detail[:120])
+        return {"ok": False, "status_code": e.code, "detail": detail}
+    except Exception as e:
+        logger.warning("remote MQ health check ✗  %s  %s", url, e)
+        return {"ok": False, "status_code": None, "detail": str(e)}
+
+
+@router.get("/remote-mq")
+def remote_mq_info():
+    """Tells the UI whether a remote MaxQuant server is reachable (MQ_SERVER_URL in .env + /health probe)."""
+    url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
+    if not url:
+        return {"available": False, "detail": "MQ_SERVER_URL not set"}
+    health = _mq_health_check(url)
+    return {"available": health["ok"], "detail": health["detail"]}
 
 
 @router.get("/dataset/{accession}/pipeline/remote/active")
@@ -2231,7 +2257,13 @@ def pipeline_remote_active(accession: str):
 def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
+    # Health-gate: fail fast with a clear message before building/uploading the kit.
+    health = _mq_health_check(base_url)
+    if not health["ok"]:
+        raise HTTPException(502, f"remote MQ server health check failed: {health['detail']}")
     kit_bytes, _ = search_kit(accession, _api_base(request), "", runs=parse_runs(runs))
+    kit_kb = len(kit_bytes) / 1024
+    logger.info("pipeline_remote_start  accession=%s  kit=%.1f KB  url=%s/run", accession, kit_kb, base_url)
     boundary = "PrideMapBoundary"
     body = (
         f"--{boundary}\r\n"
@@ -2244,13 +2276,20 @@ def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
+        logger.info("pipeline_remote_start  job_id=%s", result.get("job_id"))
         _active_remote_jobs[accession] = result["job_id"]
         return result
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        body_text = e.read().decode(errors="replace")
+        logger.error("pipeline_remote_start  HTTP %s from %s/run: %r", e.code, base_url, body_text[:300])
+        raise HTTPException(e.code, body_text)
+    except TimeoutError as e:
+        logger.error("pipeline_remote_start  timeout after 60 s calling %s/run: %s", base_url, e)
+        raise HTTPException(504, f"remote MQ server timed out (60 s): {e}")
     except Exception as e:
+        logger.error("pipeline_remote_start  unexpected error calling %s/run: %s", base_url, e)
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
@@ -2258,13 +2297,23 @@ def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
 def pipeline_remote_status(accession: str, job_id: str):
     """Poll job status from the remote server. Returns {status, log}."""
     base_url = _mq_remote_url()
-    req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
+    url = f"{base_url}/status/{job_id}"
+    logger.debug("pipeline_remote_status  job_id=%s → %s", job_id, url)
+    req = urllib.request.Request(url, headers=_mq_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read())
+            data = json.loads(resp.read())
+        logger.debug("pipeline_remote_status  job_id=%s  status=%s", job_id, data.get("status"))
+        return data
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        body_text = e.read().decode(errors="replace")
+        logger.error("pipeline_remote_status  HTTP %s from %s: %r", e.code, url, body_text[:300])
+        raise HTTPException(e.code, body_text)
+    except TimeoutError as e:
+        logger.error("pipeline_remote_status  timeout after 15 s calling %s: %s", url, e)
+        raise HTTPException(504, f"remote MQ server timed out polling status (15 s): {e}")
     except Exception as e:
+        logger.error("pipeline_remote_status  unexpected error calling %s: %s", url, e)
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
@@ -2272,15 +2321,24 @@ def pipeline_remote_status(accession: str, job_id: str):
 def pipeline_remote_results(accession: str, job_id: str):
     """Download proteinGroups.txt from a completed remote job."""
     base_url = _mq_remote_url()
-    req = urllib.request.Request(f"{base_url}/results/{job_id}", headers=_mq_auth_headers())
+    url = f"{base_url}/results/{job_id}"
+    logger.info("pipeline_remote_results  job_id=%s → %s", job_id, url)
+    req = urllib.request.Request(url, headers=_mq_auth_headers())
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             data = resp.read()
+        logger.info("pipeline_remote_results  job_id=%s  bytes=%d", job_id, len(data))
         return Response(content=data, media_type="text/tab-separated-values",
                         headers={"Content-Disposition": f'attachment; filename="{accession}_proteinGroups.txt"'})
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        body_text = e.read().decode(errors="replace")
+        logger.error("pipeline_remote_results  HTTP %s from %s: %r", e.code, url, body_text[:300])
+        raise HTTPException(e.code, body_text)
+    except TimeoutError as e:
+        logger.error("pipeline_remote_results  timeout after 120 s calling %s: %s", url, e)
+        raise HTTPException(504, f"remote MQ server timed out fetching results (120 s): {e}")
     except Exception as e:
+        logger.error("pipeline_remote_results  unexpected error calling %s: %s", url, e)
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
