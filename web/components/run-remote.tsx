@@ -4,7 +4,7 @@ import { API } from "@/lib/api";
 
 type RemoteJob = { status: "idle" | "submitting" | "running" | "done" | "error"; job_id: string | null; log: string; err: string | null };
 
-export function RunRemote({ accession, runs }: { accession: string; runs?: string[] }) {
+export function RunRemote({ accession, runs, engineLabel = "search engine", outputTable = "results.txt", onDone }: { accession: string; runs?: string[]; engineLabel?: string; outputTable?: string; onDone?: (jobId: string) => void }) {
   const [job, setJob] = useState<RemoteJob>({ status: "idle", job_id: null, log: "", err: null });
   const [stopping, setStopping] = useState(false);
   const seen = useRef<string | null>(null);
@@ -37,7 +37,11 @@ export function RunRemote({ accession, runs }: { accession: string; runs?: strin
         const s = await poll(job.job_id!);
         if (!live) return;
         if (s.status === "done" || s.status === "error") {
-          setJob((j) => ({ ...j, status: s.status as "done" | "error", log: s.log }));
+          setJob((j) => {
+            const next = { ...j, status: s.status as "done" | "error", log: s.log };
+            if (s.status === "done" && j.job_id && onDone) onDone(j.job_id);
+            return next;
+          });
         } else {
           setJob((j) => ({ ...j, log: s.log }));
         }
@@ -84,58 +88,57 @@ export function RunRemote({ accession, runs }: { accession: string; runs?: strin
 
   type StageState = "pending" | "running" | "done" | "failed";
   const STAGE_MARK: Record<StageState, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
-  const runsLabel = runs?.length ? `MaxQuant — ${runs.length} DDA run${runs.length !== 1 ? "s" : ""}` : "MaxQuant search";
-  // Mirror the local RunHere pipeline stages; map coarse remote job status onto them
-  const stages: { label: string; state: StageState }[] = active ? [
+  const runsLabel = runs?.length ? `${engineLabel} — ${runs.length} run${runs.length !== 1 ? "s" : ""}` : `${engineLabel} search`;
+  // Mirror the local RunHere pipeline stages; map coarse remote job status onto them.
+  // Always rendered (idle = all pending) so the user sees what will run before clicking.
+  const st = job.status;
+  const stages: { label: string; state: StageState }[] = [
     {
       label: "Check tools and disk space",
-      state: job.status === "submitting" ? "running"
-        : job.status === "error" && !job.job_id ? "failed"
-        : "done",
+      state: st === "submitting" ? "running"
+        : st === "error" && !job.job_id ? "failed"
+        : active ? "done" : "pending",
     },
     {
       label: "Download raw files from PRIDE",
-      state: job.status === "submitting" ? "pending"
-        : job.status === "running" ? "running"
-        : job.status === "done" ? "done"
-        : job.job_id ? "failed" : "pending",
+      state: st === "submitting" ? "pending"
+        : st === "running" ? "running"
+        : st === "done" ? "done"
+        : st === "error" && job.job_id ? "failed" : "pending",
     },
     {
       label: "Fetch the protein database",
-      state: job.status === "submitting" ? "pending"
-        : job.status === "running" ? "running"
-        : job.status === "done" ? "done"
-        : job.job_id ? "failed" : "pending",
+      state: st === "submitting" ? "pending"
+        : st === "running" ? "running"
+        : st === "done" ? "done"
+        : st === "error" && job.job_id ? "failed" : "pending",
     },
     {
       label: runsLabel,
-      state: job.status === "submitting" ? "pending"
-        : job.status === "running" ? "running"
-        : job.status === "done" ? "done"
-        : job.job_id ? "failed" : "pending",
+      state: st === "submitting" ? "pending"
+        : st === "running" ? "running"
+        : st === "done" ? "done"
+        : st === "error" && job.job_id ? "failed" : "pending",
     },
     {
       label: "Hand the tables back to PRIDE Map",
-      state: job.status === "done" ? "done"
-        : job.status === "running" ? "pending"
-        : job.status === "submitting" ? "pending"
-        : job.job_id ? "failed" : "pending",
+      state: st === "done" ? "done" : "pending",
     },
     {
       label: "Analyse the protein table",
-      state: job.status === "done" ? "done" : "pending",
+      state: st === "done" ? "done" : "pending",
     },
-  ] : [];
+  ];
 
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2 mt-2">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="text-sm font-semibold">Run on cloud (MaxQuant via Devin)</span>
+        <span className="text-sm font-semibold">Run on cloud ({engineLabel} via Devin)</span>
         {/* Fix 7: show connection badge only when idle; job status badge replaces it when active */}
         {!active && (
           <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2.5 py-0.5 text-xs font-medium text-ok">
             <span className="size-1.5 rounded-full bg-ok animate-pulse" />
-            Remote MaxQuant connected
+            Remote {engineLabel} connected
           </span>
         )}
         {job.status === "running" && <span className="pill">running…</span>}
@@ -156,13 +159,11 @@ export function RunRemote({ accession, runs }: { accession: string; runs?: strin
       </div>
       {/* Fix 6: description matches the depth of the local card */}
       <p className="text-xs text-faint">
-        Submits the search kit to the remote MaxQuant server — nothing to install locally. Safe to close this
-        page; the job keeps running and results download automatically when the search finishes.
+        Submits the search kit to the remote {engineLabel} server — nothing to install locally. Safe to close this
+        page; the job keeps running and results are loaded into Analyse automatically when the search finishes.
       </p>
       {job.err && <p className="text-xs text-warn">{job.err}</p>}
-      {/* Fix 5: pseudo-stage list mirrors the local RunHere card */}
-      {stages.length > 0 && (
-        <ol className="grid gap-0.5 text-xs">
+      <ol className="grid gap-0.5 text-xs">
           {stages.map((s) => (
             <li key={s.label} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
               <span aria-hidden className="inline-block w-4">{STAGE_MARK[s.state]}</span>
@@ -170,21 +171,23 @@ export function RunRemote({ accession, runs }: { accession: string; runs?: strin
             </li>
           ))}
         </ol>
+      {busy && (
+        <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">
+          {job.status === "submitting" ? "Submitting job…" : job.log ? job.log.split("\n").slice(-10).join("\n") : "Waiting for output…"}
+        </pre>
       )}
-      {job.log && (() => {
+      {job.status !== "running" && job.log && (() => {
         const lines = job.log.split("\n");
-        return job.status === "running"
-          ? <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">{lines.slice(-10).join("\n")}</pre>
-          : (
-            <details className="text-xs">
-              <summary className="cursor-pointer text-faint hover:text-foreground">output ({lines.length} lines)</summary>
-              <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{job.log}</pre>
-            </details>
-          );
+        return (
+          <details className="text-xs">
+            <summary className="cursor-pointer text-faint hover:text-foreground">output ({lines.length} lines)</summary>
+            <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{job.log}</pre>
+          </details>
+        );
       })()}
       {job.status === "done" && job.job_id && (
-        <a className="btn btn-sm btn-primary self-start" href={`${API}/dataset/${accession}/pipeline/remote/${job.job_id}/results`} download={`${accession}_proteinGroups.txt`}>
-          Download proteinGroups.txt
+        <a className="btn btn-sm self-start" href={`${API}/dataset/${accession}/pipeline/remote/${job.job_id}/results`} download={`${accession}_${outputTable}`}>
+          Download {outputTable}
         </a>
       )}
     </div>

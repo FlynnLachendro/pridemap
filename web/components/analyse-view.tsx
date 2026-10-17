@@ -15,7 +15,7 @@ type MzTab = {
 type Inspect = {
   upload_id: string; file: string; n_rows: number; n_cols: number;
   id_columns: string[]; numeric_columns: string[]; suggested_groups: Group[]; contaminant_columns: string[];
-  odetta_compatible: boolean; odetta_prefixes: string[]; mztab?: MzTab | null;
+  mztab?: MzTab | null;
 };
 type Row = { id: string; log2fc: number | null; t: number | null; p: number | null; q: number | null; mean_a: number | null; mean_b: number | null; n_a: number; n_b: number };
 type Pt = { id: string; log2fc: number | null; neglog10p: number | null; sig: "up" | "down" | "ns" };
@@ -23,11 +23,6 @@ type RunOut = {
   summary: { n_proteins: number; n_dropped_contaminants: number; n_tested: number; n_sig_q05: number; n_up: number; n_down: number; log_transform: string; p99_raw: number | null; min_valid: number; sign: string; test: string };
   columns: string[]; rows: Row[]; volcano: Pt[];
 };
-type OdettaOut = {
-  ok: boolean; error: string | null; stdout: string; stderr: string; command?: string; outdir?: string;
-  outputs: { name: string; rows: number; columns: string[]; head: Record<string, unknown>[]; error?: string }[];
-};
-type Mode = "welch" | "odetta";
 type SampleRow = { file_name: string; run: string; size_bytes: number | null; ftp: string | null; annotations: Record<string, { value: string; source: string; source_kind: string }>; label: string; local: boolean };
 type SampleData = { accession: string; runs: number; sources: Array<{ kind: string; file_name: string; runs_annotated: number; note: string }>; fields: Array<{ field: string; distinct: number; varies: boolean; identifier: boolean; values: string[] }>; varying_fields: string[]; rows: SampleRow[]; conflicts: Array<{ field: string; annotation_says: string; tag: string; tag_says: string; note: string }>; note: string | null; cached: boolean };
 type SortKey = keyof Row;
@@ -62,6 +57,7 @@ type SearchPlan = {
   mixed: boolean; runs_dda: number; runs_dia: number; runs_unclassified: number; sidecars: number;
   tracks: Track[]; stages: Stage[];
   convert: { from: string; to: string; tool: string; url: string; why: string } | null; kit_url?: string;
+  raw_names?: string[];
 };
 type PrideResults = { accession: string; tables: PrideTable[]; archives: PrideTable[]; raw_files: number; has_results: boolean; note: string | null; plan: SearchPlan | null };
 
@@ -78,155 +74,151 @@ type RunStatus = {
 };
 const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
 
-/** Loads the Samplelist.xlsx / SDRF and lets the user pick two groups before starting the pipeline. */
-function SamplePicker({ accession, onSelect }: { accession: string; onSelect: (runs: string[], labelA: string, labelB: string) => void }) {
+/** Lets the user pick up to 2 runs for A vs B comparison. Raw file names show immediately;
+ *  clicking "Load sample annotations" fetches SDRF / Samplelist.xlsx and maps metadata columns. */
+function SamplePicker({ accession, rawNames, onSelect }: { accession: string; rawNames: string[]; onSelect: (runs: string[], labelA: string, labelB: string) => void }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<SampleData | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [factor, setFactor] = useState("");
-  const [valA, setValA] = useState("");
-  const [valB, setValB] = useState("");
+  const [checked, setChecked] = useState<string[]>([]);
 
+  // Auto-fetch annotations whenever the picker is opened
   useEffect(() => {
     if (!open || data || loading) return;
     let live = true;
     setLoading(true); setErr(null);
     fetch(`${API}/dataset/${encodeURIComponent(accession)}/samples`)
       .then((r) => r.ok ? r.json() : r.text().then((t) => { throw new Error(t); }))
-      .then((d: SampleData) => {
-        if (!live) return;
-        setData(d);
-        const f = d.varying_fields[0] ?? "";
-        setFactor(f);
-        const vals = d.fields.find((x) => x.field === f)?.values ?? [];
-        setValA(vals[0] ?? ""); setValB(vals[1] ?? "");
-      })
+      .then((d: SampleData) => { if (live) setData(d); })
       .catch((e) => { if (live) setErr(String(e)); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [open, accession, data, loading]);
+  }, [open, accession]);
 
-  const factorField = data?.fields.find((f) => f.field === factor);
-  const runsA = useMemo(() => data?.rows.filter((r) => r.annotations[factor]?.value === valA) ?? [], [data, factor, valA]);
-  const runsB = useMemo(() => data?.rows.filter((r) => r.annotations[factor]?.value === valB) ?? [], [data, factor, valB]);
-  const allSelected = useMemo(() => [...runsA, ...runsB].map((r) => r.file_name), [runsA, runsB]);
+  // Merge rawNames with loaded annotation rows so the table is always complete
+  const rows = useMemo<SampleRow[]>(() => {
+    if (data) {
+      const inData = new Set(data.rows.map((r) => r.file_name));
+      const extras = rawNames
+        .filter((n) => !inData.has(n))
+        .map((n): SampleRow => ({ file_name: n, run: n, size_bytes: null, ftp: null, annotations: {}, label: n, local: false }));
+      return [...data.rows, ...extras];
+    }
+    return rawNames.map((n): SampleRow => ({ file_name: n, run: n, size_bytes: null, ftp: null, annotations: {}, label: n, local: false }));
+  }, [rawNames, data]);
 
-  const apply = () => { onSelect(allSelected, valA, valB); setOpen(false); };
-  const reset = () => { onSelect([], "", ""); };
+  const annotFields = data?.varying_fields.slice(0, 3) ?? [];
 
-  const changeFactor = (f: string) => {
-    setFactor(f);
-    const vals = data?.fields.find((x) => x.field === f)?.values ?? [];
-    setValA(vals[0] ?? ""); setValB(vals[1] ?? "");
+  const toggle = (name: string) => {
+    setChecked((prev) => {
+      if (prev.includes(name)) return prev.filter((n) => n !== name);
+      if (prev.length >= 2) return prev;
+      return [...prev, name];
+    });
   };
+
+  const labelFor = (fileName: string) => {
+    const row = data?.rows.find((r) => r.file_name === fileName);
+    if (row?.label) return row.label;
+    const f = annotFields[0];
+    if (f && row?.annotations[f]?.value) return row.annotations[f].value;
+    return fileName.replace(/\.[^.]+$/, "");
+  };
+
+  const apply = () => {
+    if (checked.length === 0) return;
+    onSelect(checked, labelFor(checked[0]), checked[1] ? labelFor(checked[1]) : "");
+    setOpen(false);
+  };
+  const reset = () => { onSelect([], "", ""); setChecked([]); };
 
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm font-semibold">Pick samples</span>
-        <span className="text-xs text-faint">select two groups from the sample list instead of processing all raw files</span>
+        <span className="text-xs text-faint">select up to 2 files to search (A then B) — leave empty to search all</span>
+        {checked.length > 0 && (
+          <span className="pill bg-ok-soft text-ok">
+            {checked.length === 2 ? `A: ${labelFor(checked[0])} · B: ${labelFor(checked[1])}` : `A: ${labelFor(checked[0])}`}
+          </span>
+        )}
         <button type="button" className="btn btn-sm ml-auto" onClick={() => setOpen((v) => !v)}>
           {open ? "Collapse" : "Open sample list"}
         </button>
       </div>
       {open && (
         <div className="grid gap-3">
-          {loading && <p className="text-xs text-teal">Loading sample annotations…</p>}
+          {loading && <p className="text-xs text-faint flex items-center gap-1"><span className="spinner" />Loading sample annotations…</p>}
           {err && <p className="text-xs text-warn">{err}</p>}
-          {data?.note && !data.sources.length && (
-            <p className="text-xs text-faint rounded bg-muted/40 p-2">{data.note} Runs can still be filtered by selecting them from the list below, or use all runs.</p>
-          )}
-          {data && data.sources.length > 0 && (
-            <>
-              <div className="flex flex-wrap gap-2 text-xs text-faint">
-                {data.sources.map((s) => (
-                  <span key={s.file_name} className="pill">
-                    {s.kind === "spreadsheet" ? "spreadsheet" : "SDRF"} · <span className="font-mono">{s.file_name}</span> · {s.runs_annotated} runs annotated
-                  </span>
-                ))}
-              </div>
-              {data.conflicts.length > 0 && (
-                <p className="text-xs text-warn rounded bg-warn-soft/30 p-2">
-                  ⚠ Annotation vs tag conflict: {data.conflicts.map((c) => `${c.field} says "${c.annotation_says}" but dataset tags say "${c.tag_says}"`).join("; ")}. Neither is automatically right — the tag comes from the protocol text, the annotation from the deposited file.
-                </p>
-              )}
-              <div className="grid sm:grid-cols-3 gap-3 text-sm">
-                <label className="grid gap-1">
-                  <span className="label">Group by</span>
-                  <select value={factor} onChange={(e) => changeFactor(e.target.value)} className="input h-9">
-                    {data.varying_fields.map((f) => <option key={f} value={f}>{f}</option>)}
-                    {data.varying_fields.length === 0 && <option value="">(no varying fields found)</option>}
-                  </select>
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">Group A · {runsA.length} run{runsA.length !== 1 ? "s" : ""}</span>
-                  <select value={valA} onChange={(e) => setValA(e.target.value)} className="input h-9">
-                    {factorField?.values.map((v) => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">Group B · {runsB.length} run{runsB.length !== 1 ? "s" : ""}</span>
-                  <select value={valB} onChange={(e) => setValB(e.target.value)} className="input h-9">
-                    {factorField?.values.filter((v) => v !== valA).map((v) => <option key={v} value={v}>{v}</option>)}
-                    {factorField && factorField.values.filter((v) => v !== valA).length === 0 && <option value="">(choose a different Group A value first)</option>}
-                  </select>
-                </label>
-              </div>
-              {/* Run table: shows all annotated runs coloured by group */}
-              {data.rows.length > 0 && (
-                <div className="overflow-x-auto rounded border text-xs max-h-56">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b bg-muted/40">
-                        <th className="px-2 py-1 text-left label">run</th>
-                        {data.varying_fields.slice(0, 4).map((f) => <th key={f} className="px-2 py-1 text-left label">{f}</th>)}
-                        <th className="px-2 py-1 text-left label">cached</th>
+          {/* Run table: always shown, annotation columns appear after loading */}
+          {rows.length > 0 && (
+            <div className="overflow-x-auto rounded border text-xs max-h-64">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b bg-muted/40">
+                    <th className="px-2 py-1 w-10 text-center label">A / B</th>
+                    <th className="px-2 py-1 text-left label">file name</th>
+                    {annotFields.map((f) => <th key={f} className="px-2 py-1 text-left label">{f}</th>)}
+                    {data && <th className="px-2 py-1 label text-center">cached</th>}
+                    {data && <th className="px-2 py-1 label text-right">size</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => {
+                    const isChecked = checked.includes(r.file_name);
+                    const checkIdx = checked.indexOf(r.file_name);
+                    const disabled = !isChecked && checked.length >= 2;
+                    return (
+                      <tr
+                        key={r.file_name}
+                        className={`border-b last:border-0 cursor-pointer ${isChecked ? "bg-ok-soft/30" : disabled ? "opacity-40" : "hover:bg-muted/30"}`}
+                        onClick={() => !disabled && toggle(r.file_name)}
+                      >
+                        <td className="px-2 py-1 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={disabled}
+                            onChange={() => toggle(r.file_name)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="accent-ok"
+                          />
+                          {isChecked && (
+                            <span className={`ml-1 text-[10px] font-bold ${checkIdx === 0 ? "text-teal" : "text-peak"}`}>
+                              {checkIdx === 0 ? "A" : "B"}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1 font-mono text-[11px] truncate max-w-[220px]" title={r.file_name}>
+                          {r.label !== r.file_name && r.label ? <><span>{r.label}</span><span className="text-faint ml-1">({r.file_name})</span></> : r.file_name}
+                        </td>
+                        {annotFields.map((f) => <td key={f} className="px-2 py-1">{r.annotations[f]?.value ?? "—"}</td>)}
+                        {data && <td className="px-2 py-1 text-center">{r.local ? "✓" : ""}</td>}
+                        {data && <td className="px-2 py-1 text-right text-faint tabular">{r.size_bytes ? `${(r.size_bytes / 1e9).toFixed(1)} GB` : "—"}</td>}
                       </tr>
-                    </thead>
-                    <tbody>
-                      {data.rows.map((r) => {
-                        const inA = r.annotations[factor]?.value === valA;
-                        const inB = r.annotations[factor]?.value === valB;
-                        return (
-                          <tr key={r.file_name} className={`border-b last:border-0 ${inA ? "bg-teal-soft/40" : inB ? "bg-peak-soft/40" : "opacity-40"}`}>
-                            <td className="px-2 py-1 font-mono truncate max-w-[200px]" title={r.file_name}>{r.label || r.run}</td>
-                            {data.varying_fields.slice(0, 4).map((f) => <td key={f} className="px-2 py-1">{r.annotations[f]?.value ?? "—"}</td>)}
-                            <td className="px-2 py-1">{r.local ? "✓" : ""}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <div className="flex flex-wrap items-center gap-2">
-                <button type="button" className="btn btn-sm btn-primary" disabled={!valA || !valB || valA === valB || allSelected.length === 0} onClick={apply}>
-                  Use these {allSelected.length} run{allSelected.length !== 1 ? "s" : ""} ({runsA.length} A + {runsB.length} B)
-                </button>
-                <button type="button" className="btn btn-sm" onClick={reset}>Use all runs</button>
-                <span className="text-xs text-faint">· group labels carry into the Analyse step as the suggested A/B split</span>
-              </div>
-            </>
-          )}
-          {data && data.sources.length === 0 && !loading && (
-            <div className="grid gap-2">
-              <p className="text-xs text-faint rounded bg-muted/40 p-2">{data.note ?? "No sample annotation file found on PRIDE."} The {data.runs} runs can only be told apart by file name — select them individually below, or use all runs.</p>
-              <div className="overflow-x-auto rounded border text-xs max-h-56">
-                <table className="w-full">
-                  <thead><tr className="border-b bg-muted/40"><th className="px-2 py-1 text-left label">file name</th><th className="px-2 py-1 label">size</th><th className="px-2 py-1 label">cached</th></tr></thead>
-                  <tbody>
-                    {data.rows.map((r) => (
-                      <tr key={r.file_name} className="border-b last:border-0">
-                        <td className="px-2 py-1 font-mono text-[11px]">{r.file_name}</td>
-                        <td className="px-2 py-1 text-faint tabular text-right">{r.size_bytes ? `${(r.size_bytes / 1e9).toFixed(1)} GB` : "—"}</td>
-                        <td className="px-2 py-1 text-center">{r.local ? "✓" : ""}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
+          )}
+          {/* Action buttons */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn btn-sm btn-primary" disabled={checked.length === 0} onClick={apply}>
+              {checked.length === 2
+                ? `Search these 2 files (A: ${labelFor(checked[0])} · B: ${labelFor(checked[1])})`
+                : checked.length === 1
+                  ? `Search this 1 file — add a second for A vs B comparison`
+                  : "Tick files above to select"}
+            </button>
+            <button type="button" className="btn btn-sm" onClick={reset}>Search all files</button>
+            {checked.length === 2 && <span className="text-xs text-faint">· first tick = A, second tick = B — labels carry through to Analyse</span>}
+          </div>
+          {data?.conflicts && data.conflicts.length > 0 && (
+            <p className="text-xs text-warn rounded bg-warn-soft/30 p-2">
+              ⚠ Annotation vs tag conflict: {data.conflicts.map((c) => `${c.field} says "${c.annotation_says}" but tags say "${c.tag_says}"`).join("; ")}
+            </p>
           )}
         </div>
       )}
@@ -235,7 +227,7 @@ function SamplePicker({ accession, onSelect }: { accession: string; onSelect: (r
 }
 
 /** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
-function RunHere({ accession, runs }: { accession: string; runs?: string[] }) {
+function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: string[]; hintA?: string; hintB?: string }) {
   const router = useRouter();
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -262,7 +254,11 @@ function RunHere({ accession, runs }: { accession: string; runs?: string[] }) {
   // When the run hands a table back, open it: the point of the whole exercise is the table, not the run.
   useEffect(() => {
     const last = status?.uploads?.[status.uploads.length - 1];
-    if (last && seen.current !== last) { seen.current = last; router.push(`/analyse?upload=${encodeURIComponent(last)}`); }
+    if (last && seen.current !== last) {
+      seen.current = last;
+      const hints = hintA ? `&hint_a=${encodeURIComponent(hintA)}${hintB ? `&hint_b=${encodeURIComponent(hintB)}` : ""}` : "";
+      router.push(`/analyse?upload=${encodeURIComponent(last)}${hints}`);
+    }
   }, [status?.uploads, router]);
 
   if (status && !status.can_run) return null;  // a hosted PRIDE Map cannot run searches; the one-liner still can
@@ -369,6 +365,7 @@ function OneLiner({ accession }: { accession: string }) {
 
 /** Raw-only dataset: name the engine that can actually run, say why, and hand over a kit for it. */
 function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; accession: string; remoteAvailable: boolean }) {
+  const router = useRouter();
   const tracks = plan.tracks ?? [];
   const stages = plan.stages ?? [];
   const label = tracks.length > 1 ? "search kit" : `${plan.engine_label} kit`;
@@ -377,19 +374,47 @@ function SearchKit({ plan, accession, remoteAvailable }: { plan: SearchPlan; acc
   const [labelA, setLabelA] = useState("");
   const [labelB, setLabelB] = useState("");
   const handleSelect = (runs: string[], a: string, b: string) => { setSelectedRuns(runs); setLabelA(a); setLabelB(b); };
+
+  const showRemote = remoteAvailable && plan.maxquant_offered;
+  type RunMethod = "local" | "remote";
+  const [runMethod, setRunMethod] = useState<RunMethod>("local");
+
+  const handleRemoteDone = (jobId: string) => {
+    const hints = labelA ? `&hint_a=${encodeURIComponent(labelA)}${labelB ? `&hint_b=${encodeURIComponent(labelB)}` : ""}` : "";
+    router.push(`/analyse?upload=${encodeURIComponent(jobId)}${hints}`);
+  };
+
   return (
     <div className="rounded-lg border bg-muted/30 p-4 grid gap-3" data-tour="searchkit">
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-semibold text-sm">Run the search</span>
         {tracks.map((t) => <span key={t.kind} className="pill">{t.kind} → {t.engine_label}</span>)}
         <span className="text-xs text-faint">{plan.raw_count} × {plan.vendor_label}</span>
-        {selectedRuns.length > 0 && <span className="pill bg-ok-soft text-ok">{selectedRuns.length} runs selected · {labelA} vs {labelB}</span>}
+        {selectedRuns.length > 0 && <span className="pill bg-ok-soft text-ok">{selectedRuns.length} files selected · {labelA}{labelB ? ` vs ${labelB}` : ""}</span>}
       </div>
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
 
-      <SamplePicker accession={accession} onSelect={handleSelect} />
-      <RunHere accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} />
-      {remoteAvailable && plan.maxquant_offered && <RunRemote accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} />}
+      <SamplePicker accession={accession} rawNames={plan.raw_names ?? []} onSelect={handleSelect} />
+
+      {selectedRuns.length > 0 && showRemote && (
+        <div className="flex gap-4 text-sm">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="run-method" value="local" checked={runMethod === "local"} onChange={() => setRunMethod("local")} className="accent-teal" />
+            Run on this machine
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="run-method" value="remote" checked={runMethod === "remote"} onChange={() => setRunMethod("remote")} className="accent-teal" />
+            Run on cloud (Devin)
+          </label>
+        </div>
+      )}
+
+      {selectedRuns.length > 0 && (!showRemote || runMethod === "local") && (
+        <RunHere accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} hintA={labelA} hintB={labelB} />
+      )}
+      {selectedRuns.length > 0 && showRemote && runMethod === "remote" && (
+        <RunRemote accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} engineLabel={plan.engine_label ?? "search engine"} outputTable={plan.output_table ?? "results.txt"} onDone={handleRemoteDone} />
+      )}
 
       <p className="text-xs text-muted-foreground">
         All {auto} stages — tool and disk check, download, {plan.convert ? "conversion, " : ""}
@@ -538,6 +563,8 @@ export function AnalyseView() {
   const router = useRouter();
   const uploadParam = params.get("upload");
   const accParam = params.get("acc");
+  const hintA = params.get("hint_a") ?? "";
+  const hintB = params.get("hint_b") ?? "";
 
   const [inspect, setInspect] = useState<Inspect | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -550,12 +577,8 @@ export function AnalyseView() {
   const [logT, setLogT] = useState<"auto" | "log2" | "none">("auto");
   const [minValid, setMinValid] = useState(2);
   const [contam, setContam] = useState("");
-  const [mode, setMode] = useState<Mode>("welch");
-  const [prefix, setPrefix] = useState("Set1_Brain");
-  const [name, setName] = useState("batch");
   const [result, setResult] = useState<RunOut | null>(null);
   const [lastBody, setLastBody] = useState<Record<string, unknown> | null>(null);
-  const [odetta, setOdetta] = useState<OdettaOut | null>(null);
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const loadedId = inspect?.upload_id ?? null;
@@ -567,17 +590,15 @@ export function AnalyseView() {
     setStemA(g[0]?.stem ?? CUSTOM); setColsA(g[0]?.columns ?? []);
     setStemB(g[1]?.stem ?? CUSTOM); setColsB(g[1]?.columns ?? []);
     setContam("");
-    setMode("welch");
-    setPrefix(d.odetta_prefixes[0] ?? "Set1_Brain");
-    setResult(null); setOdetta(null); setErr(null);
+    setResult(null); setErr(null);
   };
 
-  // ?upload=<id> re-opens an existing upload
+  // ?upload=<id> re-opens an existing upload; ?hint_a / ?hint_b pre-select groups from the search step
   useEffect(() => {
     if (!uploadParam || uploadParam === loadedId) return;
     let live = true;
     jfetch<Inspect>(fetch(`${API}/analyse/${encodeURIComponent(uploadParam)}`))
-      .then((d) => { if (live) applyInspect(d); })
+      .then((d) => { if (!live) return; applyInspect(d); applyHints(d.suggested_groups, hintA, hintB); })
       .catch((e) => { if (live) setErr(String(e)); });
     return () => { live = false; };
   }, [uploadParam, loadedId]);
@@ -611,24 +632,28 @@ export function AnalyseView() {
     if (which === "a") { setStemA(stem); if (g) setColsA(g.columns); } else { setStemB(stem); if (g) setColsB(g.columns); }
   };
 
+  const applyHints = (groups: Group[], a: string, b: string) => {
+    if (!a && !b) return;
+    const find = (hint: string) => groups.find((g) => g.stem.toLowerCase().includes(hint.toLowerCase()) || hint.toLowerCase().includes(g.stem.toLowerCase()));
+    const ga = a ? find(a) : undefined;
+    const gb = b ? find(b) : undefined;
+    if (ga) { setStemA(ga.stem); setColsA(ga.columns); }
+    if (gb) { setStemB(gb.stem); setColsB(gb.columns); }
+  };
+
   const run = async () => {
     if (!inspect) return;
-    setErr(null); setResult(null); setOdetta(null);
+    setErr(null); setResult(null);
     try {
-      if (mode === "odetta") {
-        setBusy("Running Odetta's TESE pipeline (tag effect, input-normalised enrichment, mock-controlled dod)…");
-        setOdetta(await jfetch<OdettaOut>(fetch(`${API}/analyse/odetta`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ upload_id: inspect.upload_id, prefix, name }) })));
-      } else {
-        setBusy("Welch t-test per protein + Benjamini–Hochberg…");
-        const body = { upload_id: inspect.upload_id, id_column: idCol, group_a: colsA, group_b: colsB, log_transform: logT, min_valid: minValid, contaminant_column: contam || null };
-        setLastBody({ ...body, label_a: stemA || "A", label_b: stemB || "B" });
-        setResult(await jfetch<RunOut>(fetch(`${API}/analyse/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })));
-        markAnalysed();
-      }
+      setBusy("Welch t-test per protein + Benjamini–Hochberg…");
+      const body = { upload_id: inspect.upload_id, id_column: idCol, group_a: colsA, group_b: colsB, log_transform: logT, min_valid: minValid, contaminant_column: contam || null };
+      setLastBody({ ...body, label_a: stemA || "A", label_b: stemB || "B" });
+      setResult(await jfetch<RunOut>(fetch(`${API}/analyse/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })));
+      markAnalysed();
     } catch (e) { setErr(String(e)); } finally { setBusy(null); }
   };
 
-  const canRun = !!inspect && !busy && (mode === "odetta" ? !!prefix && !!name : !!idCol && colsA.length >= 2 && colsB.length >= 2);
+  const canRun = !!inspect && !busy && !!idCol && colsA.length >= 2 && colsB.length >= 2;
 
   return (
     <div className="grid gap-5">
@@ -655,8 +680,7 @@ export function AnalyseView() {
         {inspect && (
           <p className="text-sm" data-tour="loaded">
             <span className="font-semibold">{inspect.file}</span> · <span className="tabular">{inspect.n_rows.toLocaleString()}</span> rows × <span className="tabular">{inspect.n_cols.toLocaleString()}</span> columns · {inspect.suggested_groups.length} sample groups detected
-            {inspect.odetta_compatible && <span className="ml-2 pill bg-ok-soft text-ok">lyso‑IP layout: Odetta&apos;s pipeline available</span>}
-          </p>
+            </p>
         )}
         {inspect?.mztab && !inspect.mztab.comparable && (
           <p className="note text-sm text-warn" data-tour="mztab-warning">
@@ -687,81 +711,49 @@ export function AnalyseView() {
       {/* (b) choose groups */}
       {inspect && (
         <div className="rounded-xl border bg-card p-5 grid gap-4">
-          <div className="flex flex-wrap gap-2">
-            <ModeButton active={mode === "welch"} onClick={() => setMode("welch")}>Group A vs group B</ModeButton>
-            <ModeButton active={mode === "odetta"} onClick={() => setMode("odetta")} disabled={!inspect.odetta_compatible} title={inspect.odetta_compatible ? "" : "needs <prefix>_IP_LTKI.N and <prefix>_IP_LTWT.N columns"}>Odetta&apos;s TESE pipeline</ModeButton>
+          <div className="grid sm:grid-cols-2 gap-4" data-tour="groups">
+            <GroupPicker label="Group A" tourId="group-a" hint="the baseline (e.g. WT, control)" stem={stemA} cols={colsA} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("a", s)} onCols={(c) => { setColsA(c); setStemA(CUSTOM); }} />
+            <GroupPicker label="Group B" tourId="group-b" hint="the condition (e.g. KO, treated)" stem={stemB} cols={colsB} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("b", s)} onCols={(c) => { setColsB(c); setStemB(CUSTOM); }} />
           </div>
-
-          {mode === "welch" ? (
-            <>
-              <div className="grid sm:grid-cols-2 gap-4" data-tour="groups">
-                <GroupPicker label="Group A" tourId="group-a" hint="the baseline (e.g. WT, control)" stem={stemA} cols={colsA} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("a", s)} onCols={(c) => { setColsA(c); setStemA(CUSTOM); }} />
-                <GroupPicker label="Group B" tourId="group-b" hint="the condition (e.g. KO, treated)" stem={stemB} cols={colsB} groups={inspect.suggested_groups} numeric={inspect.numeric_columns} onStem={(s) => pickGroup("b", s)} onCols={(c) => { setColsB(c); setStemB(CUSTOM); }} />
-              </div>
-              <div className="grid sm:grid-cols-4 gap-3 text-sm">
-                <label className="grid gap-1">
-                  <span className="label">protein id column</span>
-                  <select value={idCol} onChange={(e) => setIdCol(e.target.value)} className="input h-10">
-                    {inspect.id_columns.map((c) => <option key={c} value={c}>{c}</option>)}
-                    {!inspect.id_columns.length && <option value="">(no text id column found)</option>}
-                  </select>
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">intensities are</span>
-                  <select value={logT} onChange={(e) => setLogT(e.target.value as typeof logT)} className="input h-10">
-                    <option value="auto">auto-detect (log2 if raw)</option>
-                    <option value="log2">raw → take log2</option>
-                    <option value="none">already log-scale</option>
-                  </select>
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">min values per group</span>
-                  <input type="number" min={2} max={50} value={minValid} onChange={(e) => setMinValid(Math.max(2, Number(e.target.value) || 2))} className="input h-10 tabular" />
-                </label>
-                <label className="grid gap-1">
-                  <span className="label">drop contaminants by</span>
-                  <select value={contam} onChange={(e) => setContam(e.target.value)} className="input h-10">
-                    <option value="">(don&apos;t filter)</option>
-                    {inspect.contaminant_columns.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </label>
-              </div>
-            </>
-          ) : (
-            <div className="grid sm:grid-cols-[1fr_1fr_2fr] gap-3 text-sm">
-              <label className="grid gap-1">
-                <span className="label">column prefix</span>
-                <select value={prefix} onChange={(e) => setPrefix(e.target.value)} className="input h-10">
-                  {inspect.odetta_prefixes.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </label>
-              <label className="grid gap-1">
-                <span className="label">batch name</span>
-                <input value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9_-]/g, "_"))} className="input h-10 font-mono" />
-              </label>
-              <p className="text-muted-foreground self-end">
-                Runs <code>analysis/tese_lysoip_analysis.py</code>: tag‑vs‑tag TESE effect, input‑normalised enrichment and the mock‑controlled dod, using the <code>{prefix}_IP_*</code> and <code>{prefix}_WC_*</code> columns. Positive = TESE‑high.
-              </p>
-            </div>
-          )}
+          <div className="grid sm:grid-cols-4 gap-3 text-sm">
+            <label className="grid gap-1">
+              <span className="label">protein id column</span>
+              <select value={idCol} onChange={(e) => setIdCol(e.target.value)} className="input h-10">
+                {inspect.id_columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                {!inspect.id_columns.length && <option value="">(no text id column found)</option>}
+              </select>
+            </label>
+            <label className="grid gap-1">
+              <span className="label">intensities are</span>
+              <select value={logT} onChange={(e) => setLogT(e.target.value as typeof logT)} className="input h-10">
+                <option value="auto">auto-detect (log2 if raw)</option>
+                <option value="log2">raw → take log2</option>
+                <option value="none">already log-scale</option>
+              </select>
+            </label>
+            <label className="grid gap-1">
+              <span className="label">min values per group</span>
+              <input type="number" min={2} max={50} value={minValid} onChange={(e) => setMinValid(Math.max(2, Number(e.target.value) || 2))} className="input h-10 tabular" />
+            </label>
+            <label className="grid gap-1">
+              <span className="label">drop contaminants by</span>
+              <select value={contam} onChange={(e) => setContam(e.target.value)} className="input h-10">
+                <option value="">(don&apos;t filter)</option>
+                {inspect.contaminant_columns.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+          </div>
 
           <div className="flex items-center gap-3">
             <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6" data-tour="run">{busy ? <><span className="spinner mr-2" />Running…</> : "Run"}</button>
-            {mode === "welch" && <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>}
+            <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>
           </div>
         </div>
       )}
 
       {/* (d) results */}
       {result && <div data-tour="results"><WelchResults out={result} uploadId={inspect?.upload_id ?? "table"} reportBody={lastBody} /></div>}
-      {odetta && <OdettaResults out={odetta} />}
     </div>
-  );
-}
-
-function ModeButton({ active, disabled, title, onClick, children }: { active: boolean; disabled?: boolean; title?: string; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button type="button" onClick={onClick} disabled={disabled} title={title} className={`btn rounded-full ${active ? "btn-primary" : ""}`}>{children}</button>
   );
 }
 
@@ -996,33 +988,3 @@ function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: strin
   );
 }
 
-const cell = (v: unknown) => (v === null || v === undefined ? "—" : typeof v === "number" ? (Number.isInteger(v) ? v : fmt(v)) : typeof v === "boolean" ? String(v) : String(v));
-
-function OdettaResults({ out }: { out: OdettaOut }) {
-  return (
-    <div className="grid gap-4">
-      <div className={`rounded-xl border p-4 ${out.ok ? "border-ok bg-ok-soft/40" : "border-warn bg-warn-soft/40"}`}>
-        <div className="font-heading font-semibold text-lg">{out.ok ? "Odetta's pipeline finished" : "Odetta's pipeline failed"}</div>
-        {out.error && <p className="mt-1 text-sm text-warn">{out.error}</p>}
-        {out.stdout && <pre className="mt-2 text-xs whitespace-pre-wrap">{out.stdout}</pre>}
-        {!out.ok && out.stderr && <pre className="mt-2 text-xs whitespace-pre-wrap text-warn">{out.stderr}</pre>}
-        {out.outdir && <p className="mt-2 text-xs text-muted-foreground">Full CSVs are in <code>{out.outdir}/</code>. Sign convention: positive = TESE‑high.</p>}
-      </div>
-      {out.outputs.map((o) => (
-        <div key={o.name} className="rounded-xl border bg-card">
-          <div className="p-3 border-b text-sm"><span className="font-mono font-semibold">{o.name}</span> <span className="text-muted-foreground">· {o.rows.toLocaleString()} rows · showing first {o.head.length}</span>{o.error && <span className="text-warn"> · {o.error}</span>}</div>
-          <div className="overflow-x-auto">
-            <table className="text-xs">
-              <thead><tr className="border-b">{o.columns.map((c) => <th key={c} className="p-2 text-left whitespace-nowrap label">{c}</th>)}</tr></thead>
-              <tbody>
-                {o.head.map((r, i) => (
-                  <tr key={i} className="border-b last:border-0">{o.columns.map((c) => <td key={c} className="p-2 tabular whitespace-nowrap">{cell(r[c])}</td>)}</tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
