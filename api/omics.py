@@ -1753,7 +1753,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 # directory and add it as an additional bind-mount at the same path so links resolve inside
                 # the container.
                 '    MQ_SYMLINK_MOUNTS=""',
-                '    for _f in raw/*.raw raw/*.RAW 2>/dev/null; do',
+                '    for _f in raw/*.raw raw/*.RAW; do',
                 '      [ -L "$_f" ] || continue',
                 '      _real=$(realpath "$_f" 2>/dev/null) || continue',
                 '      _dir=$(dirname "$_real")',
