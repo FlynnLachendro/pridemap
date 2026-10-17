@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { API, TAG_LABEL } from "@/lib/api";
 import { useCompare } from "@/lib/compare-store";
+import { Skeleton } from "@/components/skeleton";
 
 type Cell = { value: string | number | null; confidence: number | null; evidence: string | null };
 type Out = {
@@ -59,6 +60,7 @@ export function CompareView() {
       </form>
       {!a && <p className="text-sm text-muted-foreground">Shortlist two or more datasets, or type accessions above.</p>}
       {err && <p className="text-warn text-sm">{err}</p>}
+      {a && !out && !err && <div className="card p-4 grid gap-3"><Skeleton className="h-6 w-1/3" /><Skeleton className="h-3 w-full" /><Skeleton className="h-4 w-3/4" /></div>}
 
       {out && a && (
         <>

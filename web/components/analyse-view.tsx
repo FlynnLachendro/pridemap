@@ -218,7 +218,7 @@ export function AnalyseView() {
           )}
 
           <div className="flex items-center gap-3">
-            <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6" data-tour="run">{busy ? "Running…" : "Run"}</button>
+            <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6" data-tour="run">{busy ? <><span className="spinner mr-2" />Running…</> : "Run"}</button>
             {mode === "welch" && <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>}
           </div>
         </div>
@@ -309,7 +309,7 @@ function WelchResults({ out, uploadId, reportBody }: { out: RunOut; uploadId: st
     <div className="grid gap-4">
       <div className="card p-3 flex flex-wrap items-center gap-3 text-sm">
         <div><b>Report bundle for publication.</b> <span className="text-muted-foreground">A zip with a Methods paragraph written from these exact parameters, every tested protein as CSV, the parameters, a standalone <code>reproduce.py</code> that regenerates the result, and software versions. Upload it next to the paper.</span></div>
-        <button type="button" onClick={downloadReport} disabled={!reportBody || reporting} className="btn btn-primary ml-auto" data-tour="report">{reporting ? "Building…" : "Download report bundle"}</button>
+        <button type="button" onClick={downloadReport} disabled={!reportBody || reporting} className="btn btn-primary ml-auto" data-tour="report">{reporting ? <><span className="spinner mr-2" />Building…</> : "Download report bundle"}</button>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <Tile label="proteins tested" value={s.n_tested} />

@@ -4,6 +4,7 @@ import "./globals.css";
 import { Shell } from "@/components/nav";
 import { CompareBar } from "@/components/compare-bar";
 import { Tour } from "@/components/tour";
+import { LoadingBar } from "@/components/loading-bar";
 import { Suspense } from "react";
 
 const display = Bricolage_Grotesque({ variable: "--font-display", subsets: ["latin"], weight: ["500", "700", "800"] });
@@ -20,6 +21,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={`${display.variable} ${body.variable} ${sans.variable} ${mono.variable} h-full antialiased`}>
       <body className="h-full bg-background text-foreground">
+        <LoadingBar />
         <Shell>{children}</Shell>
         <CompareBar />
         <Suspense><Tour /></Suspense>

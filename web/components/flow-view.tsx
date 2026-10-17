@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { API, pretty, TAG_LABEL } from "@/lib/api";
 import { useCompare } from "@/lib/compare-store";
 import { TOUR_B as TOUR_B_ACC } from "@/lib/tour";
+import { Skeleton } from "@/components/skeleton";
 
 type Why = { why: string; parser: string };
 type Recipe = { tool: { value: string }; enzyme: { value: string[] }; fixed_modifications: { value: string[] }; variable_modifications: { value: string[] }; quantification: { value: string } };
@@ -41,14 +42,14 @@ function Candidate({ acc, q, confirmed, onConfirm }: { acc: string; q: string; c
     <article data-tour={`candidate-${acc === TOUR_B_ACC ? 0 : 1}`} className={`card p-4 grid gap-3 ${confirmed ? "border-ok" : ""}`}>
       <div className="flex items-baseline gap-3 flex-wrap">
         <Link href={`/dataset/${acc}`} className="font-mono text-sm text-teal hover:underline">{acc}</Link>
-        <span className="text-sm text-muted-foreground line-clamp-1">{r?.summary ?? r?.title ?? "…"}</span>
+        {r ? <span className="text-sm text-muted-foreground line-clamp-1">{r.summary ?? r.title}</span> : <Skeleton className="h-4 w-2/3" />}
       </div>
       <div className="flex flex-wrap gap-1.5 text-xs font-mono">
         {["organism", "tissue", "enrichment", "acquisition", "labelling", "enzyme", "instrument_family"].map((k) => t[k] ? <span key={k} className="pill"><span className="text-faint">{TAG_LABEL[k]} </span>{pretty(t[k])}</span> : null)}
       </div>
       <div className="text-sm leading-relaxed">
         <span className="label mr-2">Why this one</span>
-        {why ? <span data-tour="why-ready">{why.why} <span className="text-faint text-xs font-mono">({why.parser === "llm" ? "Claude" : "from tags"})</span></span> : <span className="text-faint">writing…</span>}
+        {why ? <span data-tour="why-ready" className="enter">{why.why} <span className="text-faint text-xs font-mono">({why.parser === "llm" ? "Claude" : "from tags"})</span></span> : <span className="inline-grid gap-1.5 w-full align-top mt-1"><Skeleton className="h-3.5 w-full" /><Skeleton className="h-3.5 w-11/12" /><Skeleton className="h-3.5 w-2/3" /></span>}
       </div>
       {re && (
         <div className="text-xs text-muted-foreground font-mono flex flex-wrap gap-x-4 gap-y-1">

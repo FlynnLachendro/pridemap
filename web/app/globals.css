@@ -369,3 +369,21 @@
   .driver-active-element { box-shadow: 0 0 0 3px var(--teal-soft) !important; border-radius: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { .enter { animation: none; } .btn:active, .btn-primary:active, button.pill:active { transform: none; } }
+
+/* ---------------------------------------------------------------------------
+   Working states: loading bar, skeletons, spinners, tour status.
+   ------------------------------------------------------------------------- */
+@layer components {
+  .loading-bar { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 60; background: var(--walnut); transform: scaleX(0); transform-origin: left; opacity: 0; transition: opacity 150ms var(--ease); }
+  .loading-bar.on { opacity: 1; animation: loading-bar 1.6s cubic-bezier(0.2, 0, 0.2, 1) infinite; }
+  @keyframes loading-bar { 0% { transform: scaleX(0); } 60% { transform: scaleX(0.75); } 100% { transform: scaleX(1); opacity: 0.4; } }
+  .skeleton { border-radius: 6px; background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%); background-size: 400% 100%; animation: shimmer 1.4s ease infinite; }
+  @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+  .spinner { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--teal-soft); border-top-color: var(--walnut); animation: spin 0.8s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tour-status { position: fixed; left: 50%; top: 16px; transform: translateX(-50%); z-index: 100000; display: inline-flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 999px; background: var(--text); color: var(--bg); font-family: var(--font-sans); font-size: 14px; box-shadow: 0 8px 24px -10px rgb(19 32 42 / .5); animation: enter 200ms var(--ease) both; }
+  .tour-status .spinner { border-color: rgb(255 255 255 / .25); border-top-color: var(--bg); }
+  .note { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border-light); font-size: 14px; }
+  .note b { color: var(--text); }
+}
+@media (prefers-reduced-motion: reduce) { .skeleton, .spinner, .loading-bar.on { animation: none; } }

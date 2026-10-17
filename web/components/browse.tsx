@@ -6,6 +6,7 @@ import { API, ask, pretty, TAG_LABEL, type AskOut, type Dropped, type Result } f
 import { ResultCard } from "@/components/result-card";
 import { ProteinCard } from "@/components/protein-card";
 import { CompareToggle } from "@/components/compare-toggle";
+import { CardSkeleton } from "@/components/skeleton";
 
 type Facets = Record<string, [string, number][]>;
 type BrowseRow = Result & { tagged: boolean; raw?: { organisms: string[]; organism_parts: string[]; instruments: string[]; experiment_types: string[] } };
@@ -123,7 +124,7 @@ export function Browse() {
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="text-teal shrink-0" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by keyword, accession, or ask a question in plain words" aria-label="search" />
         {q && <button type="button" onClick={() => { setQ(""); setAskOut(null); push({ sort: filters.sort }); }} className="btn btn-ghost btn-sm" aria-label="clear">clear</button>}
-        <button type="submit" disabled={pending} className="btn btn-primary">{pending ? "Searching…" : "Search"}</button>
+        <button type="submit" disabled={pending} className="btn btn-primary">{pending ? <><span className="spinner mr-2" />Searching…</> : "Search"}</button>
       </form>
       <div className="flex flex-wrap gap-1.5 items-center text-xs">
         <span className="text-faint font-mono">Try:</span>
@@ -137,9 +138,18 @@ export function Browse() {
         <div className="card p-4 grid gap-2 text-sm" data-tour="ask">
           <p><span className="label mr-2">How I read it</span>{askOut.interpretation} <span className="text-faint font-mono text-xs">({askOut.parser === "llm" ? "Claude" : "rules"})</span></p>
           {askOut.dropped && askOut.dropped.length > 0 && (
-            <ul className="grid gap-1 text-muted-foreground">
-              {askOut.dropped.map((d: Dropped) => <li key={d.key}><span className="line-through decoration-peak">{TAG_LABEL[d.key] ?? d.key}: {pretty(d.value)}</span> — {d.why}.</li>)}
-            </ul>
+            <div className="grid gap-1.5">
+              {askOut.dropped.map((d: Dropped) => (
+                <div key={d.key} className="note">
+                  <span aria-hidden>ⓘ</span>
+                  <span>
+                    {d.key === "q"
+                      ? <><b>{pretty(d.value)}</b> isn&apos;t used as a filter: protein names aren&apos;t in dataset descriptions. The card below says whether these datasets&apos; methods could detect it; confirming it&apos;s there means reanalysing the data.</>
+                      : <><b>{TAG_LABEL[d.key] ?? d.key}: {pretty(d.value)}</b> was set aside so you still see results — {d.why}.</>}
+                  </span>
+                </div>
+              ))}
+            </div>
           )}
           {(askOut.filters.q || askOut.dropped?.some((d) => d.key === "q")) && (
             <ProteinCard name={String(askOut.filters.q ?? askOut.dropped?.find((d) => d.key === "q")?.value ?? "")} organism={askOut.filters.organism ? String(askOut.filters.organism) : undefined} tissue={askOut.filters.tissue ? String(askOut.filters.tissue) : undefined} />
@@ -211,7 +221,7 @@ export function Browse() {
             </div>
           )}
 
-          {!out && !err && <p className="text-sm text-faint">Loading…</p>}
+          {!out && !err && <><CardSkeleton /><CardSkeleton /><CardSkeleton /></>}
           {out && out.results.length === 0 && <p className="text-muted-foreground">Nothing matches. Remove a filter or try a keyword.</p>}
 
           {out && view === "cards" && out.results.map((r, i) => r.tagged

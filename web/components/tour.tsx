@@ -6,6 +6,22 @@ import "driver.js/dist/driver.css";
 import { STEPS, TOUR_A, TOUR_B, TOUR_Q } from "@/lib/tour";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// A status pill the tour shows while it is doing something (typing, clicking, changing page).
+function status(msg: string | null) {
+  let el = document.getElementById("tour-status");
+  if (!msg) { el?.remove(); return; }
+  if (!el) { el = document.createElement("div"); el.id = "tour-status"; el.className = "tour-status"; el.setAttribute("role", "status"); document.body.appendChild(el); }
+  el.innerHTML = `<span class="spinner"></span><span>${msg}</span>`;
+}
+const MSG: Record<string, string> = {
+  "type-question": "Tour: typing Charlotte’s question…",
+  "tick-dia": "Tour: narrowing to DIA…",
+  "shortlist-two": "Tour: shortlisting two datasets…",
+  "tick-candidate": "Tour: Claude is writing the case for each candidate…",
+  "load-example": "Tour: loading Odetta’s protein table…",
+  "set-groups-run": "Tour: running lyso‑IP vs mock beads…",
+};
 async function waitFor(sel: string, ms = 15000) {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
@@ -66,6 +82,11 @@ const ACTIONS: Record<string, () => Promise<void>> = {
   },
 };
 
+function label(href: string) {
+  const p = href.split("?")[0];
+  return p.startsWith("/dataset/") ? "the dataset’s set‑up sheet" : { "/compare": "Compare", "/flow": "Workflow", "/analyse": "Analyse", "/eval": "Eval" }[p] ?? p;
+}
+
 export function Tour() {
   const path = usePathname();
   const router = useRouter();
@@ -87,6 +108,9 @@ export function Tour() {
       overlayOpacity: 0.45,
       stagePadding: 8,
       popoverClass: "pridemap-tour",
+      smoothScroll: true,
+      onHighlightStarted: (el) => { (el as HTMLElement | undefined)?.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" }); },
+      onHighlighted: () => { setTimeout(() => d.refresh(), 250); },
       nextBtnText: "Next →",
       prevBtnText: "← Back",
       doneBtnText: "Finish",
@@ -94,10 +118,10 @@ export function Tour() {
       onNextClick: async () => {
         const idx = d.getActiveIndex() ?? 0;
         const step = steps[idx];
-        if (step.next) { cancelled = true; d.destroy(); router.push(step.next); return; }
+        if (step.next) { cancelled = true; d.destroy(); status(`Tour: opening ${label(step.next)}…`); try { sessionStorage.setItem("tour-status", `Tour: opening ${label(step.next)}…`); } catch {} window.dispatchEvent(new Event("pridemap-navigating")); router.push(step.next); return; }
         const nxt = steps[idx + 1];
-        if (!nxt) { cancelled = true; d.destroy(); router.push("/about"); return; }
-        if (nxt.before && ACTIONS[nxt.before]) await ACTIONS[nxt.before]();
+        if (!nxt) { cancelled = true; d.destroy(); status(null); router.push("/about"); return; }
+        if (nxt.before && ACTIONS[nxt.before]) { status(MSG[nxt.before] ?? "Tour: working…"); await ACTIONS[nxt.before](); status(null); }
         d.moveNext();
       },
       steps: steps.map((s) => ({
@@ -109,12 +133,16 @@ export function Tour() {
 
     (async () => {
       const first = steps[0];
-      if (first.before && ACTIONS[first.before]) await ACTIONS[first.before]();
+      let carried: string | null = null;
+      try { carried = sessionStorage.getItem("tour-status"); sessionStorage.removeItem("tour-status"); } catch {}
+      if (first.before && ACTIONS[first.before]) { status(MSG[first.before] ?? carried ?? "Tour: working…"); await ACTIONS[first.before](); }
+      else if (carried) status(carried);
       await waitFor(first.el, 20000);
+      status(null);
       if (!cancelled) d.drive(0);
     })();
 
-    return () => { cancelled = true; d.destroy(); };
+    return () => { cancelled = true; d.destroy(); status(null); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 

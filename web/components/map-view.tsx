@@ -123,7 +123,7 @@ export function MapView() {
           </span>
         ))}
       </div>
-      {!tree && <p className="text-muted-foreground text-sm">Loading… (needs the API on {process.env.NEXT_PUBLIC_API_URL ?? "localhost:8000"})</p>}
+      {!tree && <div className="card p-4"><div className="skeleton h-[400px] w-full" /></div>}
       {tree && (
         <div className="rounded-xl border bg-card overflow-hidden">
           <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto block" role="img" aria-label="Treemap of tagged PRIDE datasets">
