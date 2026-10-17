@@ -252,14 +252,30 @@ def _slug(value: str, n: int = 14) -> str:
     return s[:n]
 
 
+def _annot_cache_dir() -> pathlib.Path:
+    base = os.environ.get("PRIDEMAP_RAW_DIR") or str(pathlib.Path(tempfile.gettempdir()) / "pridemap-raw")
+    p = pathlib.Path(base).expanduser() / "_annot"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def _fetch_annot_bytes(ftp: str | None) -> bytes | None:
+    """Fetch annotation file bytes, caching locally so EBI FTP is only hit once per file."""
     if not ftp:
         return None
     url = ftp.replace("ftp://", "https://", 1)
+    # Stable cache key: last two path components (accession/filename) joined with __
+    parts = url.rstrip("/").split("/")
+    cache_name = "__".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+    cache_path = _annot_cache_dir() / cache_name
+    if cache_path.is_file() and cache_path.stat().st_size > 0:
+        return cache_path.read_bytes()[:MAX_ANNOT_BYTES]
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "pridemap/1.0"})
         with urllib.request.urlopen(req, timeout=60) as r:
-            return r.read(MAX_ANNOT_BYTES + 1)[:MAX_ANNOT_BYTES]
+            data = r.read(MAX_ANNOT_BYTES + 1)[:MAX_ANNOT_BYTES]
+        cache_path.write_bytes(data)
+        return data
     except Exception as e:
         print(f"sample annotation fetch failed ({ftp}):", e, file=sys.stderr)
         return None
@@ -348,29 +364,41 @@ def sample_annotations(accession: str, refresh: bool = False) -> dict:
     if not runs:
         runs = [f for f in files if (f.get("file_name") or "").lower().endswith(RAW_EXT) and is_run(f.get("file_name") or "")]
 
-    sources, per_run = [], {}
+    # Collect annotation files, then fetch them all in parallel.
+    annot_files = []
     for f in files:
         name = f.get("file_name") or ""
         if SDRF_RE.search(name):
-            data = _fetch_annot_bytes(f.get("ftp"))
-            parsed = _sdrf_annotations(data) if data else {}
-            if parsed:
-                sources.append({"kind": "sdrf", "file_name": name, "runs_annotated": len(parsed),
-                                "note": "SDRF-Proteomics, the community standard. Often curated after the fact — check it against the paper."})
-                per_run["sdrf:" + name] = parsed
+            annot_files.append(("sdrf", f))
         elif name.lower().endswith(SHEET_EXT) and (f.get("category") or "").upper() not in ("RAW", "PEAK", "SEARCH", "RESULT"):
-            data = _fetch_annot_bytes(f.get("ftp"))
-            try:
-                parsed = _sheet_annotations(data, name) if data else {}
-            except HTTPException:
-                raise
-            except Exception as e:
-                print(f"sheet parse failed ({name}):", e, file=sys.stderr)
-                parsed = {}
-            if parsed:
-                sources.append({"kind": "spreadsheet", "file_name": name, "runs_annotated": len(parsed),
-                                "note": "The submitter's own sample list. Free-form columns, so the field names are theirs, not a standard's."})
-                per_run["sheet:" + name] = parsed
+            annot_files.append(("sheet", f))
+
+    def _fetch_one(kind_f):
+        kind, f = kind_f
+        return kind, f, _fetch_annot_bytes(f.get("ftp"))
+
+    sources, per_run = [], {}
+    with cf.ThreadPoolExecutor(max_workers=min(8, len(annot_files) or 1)) as pool:
+        for kind, f, data in pool.map(_fetch_one, annot_files):
+            name = f.get("file_name") or ""
+            if kind == "sdrf":
+                parsed = _sdrf_annotations(data) if data else {}
+                if parsed:
+                    sources.append({"kind": "sdrf", "file_name": name, "runs_annotated": len(parsed),
+                                    "note": "SDRF-Proteomics, the community standard. Often curated after the fact — check it against the paper."})
+                    per_run["sdrf:" + name] = parsed
+            else:
+                try:
+                    parsed = _sheet_annotations(data, name) if data else {}
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    print(f"sheet parse failed ({name}):", e, file=sys.stderr)
+                    parsed = {}
+                if parsed:
+                    sources.append({"kind": "spreadsheet", "file_name": name, "runs_annotated": len(parsed),
+                                    "note": "The submitter's own sample list. Free-form columns, so the field names are theirs, not a standard's."})
+                    per_run["sheet:" + name] = parsed
 
     # Merge per run, remembering which file each value came from.
     rows = []
@@ -923,6 +951,67 @@ def _local_config(name: str) -> str:
     return re.sub(r"(\.[^.]+)$", r".local\1", name)
 
 
+# Per-mass-analyser fragment settings. MaxQuant looks these up by the analyser name it reads from the raw
+# file ("FTMS" for an Orbitrap), so an absent array is not a defaulted array: MS/MS preparation throws
+# "The given key 'FTMS' was not present in the dictionary" and the run dies ~15 minutes in.
+#
+# The values are MaxQuant's own, not chosen here: they were read out of MaxQuantLibS by calling
+# WorkflowModelGlobalParams.GetFragmentSpectrumSettings on a default parameter tree, which is what the GUI
+# writes. Element names and their order likewise match the properties MaxQuant's writer emits.
+MSMS_PARAMS: list[tuple[str, str, str, str, str, str, str, str, str]] = [
+    # name, match tol, in ppm, deisotope tol, in ppm, de-novo tol, in ppm, deisotope, topx
+    ("FTMS",    "20",  "True",  "7",    "True",  "25",  "True",  "True",  "12"),
+    ("ITMS",    "0.5", "False", "0.15", "False", "0.5", "False", "False", "8"),
+    ("TOF",     "40",  "True",  "0.01", "False", "25",  "True",  "True",  "10"),
+    ("Unknown", "20",  "True",  "7",    "True",  "25",  "True",  "True",  "12"),
+]
+
+# Fragmentation types. MaxQuant's defaults are identical for every type except the name, so only the names
+# vary here. Looked up the same way as the analysers, so the array has to be present for the same reason.
+FRAGMENTATION_TYPES = ["CID", "HCD", "ETD", "PQD", "ETHCD", "ETCID", "UVPD", "Unknown"]
+
+
+def _msms_params_xml() -> list[str]:
+    """The two per-analyser arrays MaxQuant indexes by name. Mandatory, so they are generated, not optional."""
+    out = ["   <msmsParamsArray>"]
+    for name, match, match_ppm, deiso, deiso_ppm, denovo, denovo_ppm, deisotope, topx in MSMS_PARAMS:
+        out += [
+            "      <msmsParams>",
+            f"         <Name>{name}</Name>",
+            f"         <MatchTolerance>{match}</MatchTolerance>",
+            f"         <MatchToleranceInPpm>{match_ppm}</MatchToleranceInPpm>",
+            f"         <DeisotopeTolerance>{deiso}</DeisotopeTolerance>",
+            f"         <DeisotopeToleranceInPpm>{deiso_ppm}</DeisotopeToleranceInPpm>",
+            f"         <DeNovoTolerance>{denovo}</DeNovoTolerance>",
+            f"         <DeNovoToleranceInPpm>{denovo_ppm}</DeNovoToleranceInPpm>",
+            f"         <Deisotope>{deisotope}</Deisotope>",
+            f"         <Topx>{topx}</Topx>",
+            "         <TopxInterval>100</TopxInterval>",
+            "         <HigherCharges>True</HigherCharges>",
+            "         <IncludeWater>True</IncludeWater>",
+            "         <IncludeAmmonia>True</IncludeAmmonia>",
+            "         <DependentLosses>True</DependentLosses>",
+            "         <Recalibration>False</Recalibration>",
+            "      </msmsParams>",
+        ]
+    out += ["   </msmsParamsArray>", "   <fragmentationParamsArray>"]
+    for name in FRAGMENTATION_TYPES:
+        out += [
+            "      <fragmentationParams>",
+            f"         <Name>{name}</Name>",
+            "         <Connected>False</Connected>",
+            "         <ConnectedScore0>1</ConnectedScore0>",
+            "         <ConnectedScore1>1</ConnectedScore1>",
+            "         <ConnectedScore2>1</ConnectedScore2>",
+            "         <InternalFragments>False</InternalFragments>",
+            "         <InternalFragmentWeight>1</InternalFragmentWeight>",
+            "         <InternalFragmentAas>KRH</InternalFragmentAas>",
+            "      </fragmentationParams>",
+        ]
+    out += ["   </fragmentationParamsArray>"]
+    return out
+
+
 def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
     """A MaxQuant mqpar.xml seeded from the tags. A starting point: open it in MaxQuant's GUI and check it."""
     r, t = ctx["r"], ctx["t"]
@@ -974,12 +1063,20 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         "         <lcmsRunType>Standard</lcmsRunType>",
         f"         <lfqMode>{lfq}</lfqMode>",
         f"         <matchBetweenRuns>{'True' if lfq else 'False'}</matchBetweenRuns>",
+        # Labelling. Not optional even when there is no label: MaxQuant's deisotoping stage calls
+        # GetLmods() unconditionally, which dereferences labelMods, so omitting these three throws
+        # NullReferenceException ~13 minutes in, after feature detection has already succeeded. A
+        # label-free group is multiplicity 1 with a single empty label, not an absent one.
+        "         <multiplicity>1</multiplicity>",
+        "         <maxLabeledAa>0</maxLabeledAa>",
+        _xml_list("labelMods", [""]).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
         _xml_list("enzymes", enzymes).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
         "         <maxMissedCleavages>2</maxMissedCleavages>",
         _xml_list("variableModifications", variable).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
         _xml_list("fixedModifications", fixed or ["Carbamidomethyl (C)"]).replace("      <", "         <").replace("\n         <string>", "\n            <string>"),
         "      </parameterGroup>",
         "   </parameterGroups>",
+        *_msms_params_xml(),
         "   <peptideFdr>0.01</peptideFdr>",
         "   <proteinFdr>0.01</proteinFdr>",
         "   <minPepLen>7</minPepLen>",
@@ -1990,6 +2087,30 @@ def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str 
             "finished": finished, "failed": failed, "stages": stages, "log": log_lines,
             "uploads": [e.get("upload_id") for e in events if e.get("event") == "uploaded" and e.get("upload_id")],
             "dir": str(d) if d.exists() else None}
+
+
+@router.delete("/dataset/{accession}/pipeline")
+def pipeline_cancel(accession: str, request: Request, runs: str = ""):
+    """Stop a running pipeline by sending SIGTERM to its process group."""
+    import signal
+    _require_local(request)
+    sel = parse_runs(runs)
+    d = run_dir(accession, sel)
+    pid_file = d / ".pipeline" / "run.pid"
+    if not pid_file.exists():
+        return {"stopped": False, "reason": "no pid file"}
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError:
+        return {"stopped": False, "reason": "invalid pid file"}
+    if not _pid_alive(pid):
+        return {"stopped": False, "reason": "not running"}
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    pid_file.unlink(missing_ok=True)
+    return {"stopped": True}
 
 
 # ----------------------------------------------------------------------------- corrections feed

@@ -1290,22 +1290,23 @@ def dataset_results(accession: str):
     tables.sort(key=lambda e: (0 if "proteingroups" in e["file_name"].lower() or "pg_matrix" in e["file_name"].lower() or "combined_protein" in e["file_name"].lower() else 1, e["size_bytes"] or 0))
     out = {"accession": accession, "tables": tables, "archives": archives, "raw_files": raw,
            "has_results": bool(tables or archives), "note": None, "plan": None}
-    if tables or archives:
-        return out
     if not raw:
-        out["note"] = "PRIDE lists no files for this dataset."
+        if not (tables or archives):
+            out["note"] = "PRIDE lists no files for this dataset."
         return out
-    # Raw only: say which engine can actually run on these files rather than naming one and hoping.
+    # Raw files exist: say which engine can run on them — even when the submitter also deposited a result table,
+    # because the user may want to re-run the search themselves rather than relying on the submitter's output.
     from omics import search_plan
     plan = search_plan(dict(con.execute("SELECT * FROM tags WHERE accession=?", (accession,)).fetchone() or {}),
                        [f.get("file_name") or "" for f in files if (f.get("category") or "").upper() == "RAW"])
     plan["kit_url"] = f"/dataset/{accession}/searchkit.zip"
     out["plan"] = plan
-    # "Only raw files" is often untrue: a Mascot .dat or an SDRF is not a table Analyse can read, but it is still there.
-    other = sorted({(f.get("category") or "OTHER").upper() for f in files if (f.get("category") or "").upper() != "RAW"})
-    held = f"no result table Analyse can open ({plan['raw_count']} × {plan['vendor_label']}"
-    held += f"; also {', '.join(c.lower() for c in other)} files PRIDE lists but this step can't parse)." if other else ")."
-    out["note"] = f"PRIDE holds {held} " + (plan.get("why") or "")
+    if not (tables or archives):
+        # Raw only: surface a note explaining what's there and why a search is needed.
+        other = sorted({(f.get("category") or "OTHER").upper() for f in files if (f.get("category") or "").upper() != "RAW"})
+        held = f"no result table Analyse can open ({plan['raw_count']} × {plan['vendor_label']}"
+        held += f"; also {', '.join(c.lower() for c in other)} files PRIDE lists but this step can't parse)." if other else ")."
+        out["note"] = f"PRIDE holds {held} " + (plan.get("why") or "")
     return out
 
 
