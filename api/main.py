@@ -1438,6 +1438,70 @@ def bh_fdr(p):
     return q
 
 
+def _describe_two(body, df, n_input: int, all_rows: bool = False):
+    """Compare groups that have too few replicates to test: fold change and detection, no inference.
+
+    Returns the same shape as the t-test path so the UI needs no second code path, but every p and q is null and
+    the summary says plainly that nothing here is a significance claim. Detection is the useful half: a protein
+    seen in one sample and not the other is the common real finding in a two-sample comparison.
+    """
+    np, _ = _sci()
+    dropped_contaminants = 0
+    if body.contaminant_column:
+        if body.contaminant_column not in df.columns:
+            raise HTTPException(400, "contaminant column not in table")
+        flag = df[body.contaminant_column].astype(str).str.strip().str.lower().isin(TRUTHY)
+        dropped_contaminants = int(flag.sum())
+        df = df[~flag]
+    ids = df[body.id_column].astype(str).where(df[body.id_column].notna(), "").to_numpy()
+    _, pd = _sci()
+    A = np.array(df[body.group_a].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float), copy=True)
+    B = np.array(df[body.group_b].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float), copy=True)
+    A[~(A > 0)] = np.nan
+    B[~(B > 0)] = np.nan
+    allv = np.concatenate([A.ravel(), B.ravel()])
+    allv = allv[~np.isnan(allv)]
+    p99 = float(np.percentile(allv, 99)) if allv.size else 0.0
+    mode = body.log_transform
+    if mode == "auto":
+        mode = "log2" if p99 > 100 else "none"
+    if mode == "log2":
+        A, B = np.log2(A), np.log2(B)
+    with np.errstate(all="ignore"):
+        ma, mb = np.nanmean(A, axis=1), np.nanmean(B, axis=1)
+    n_a, n_b = np.sum(~np.isnan(A), axis=1), np.sum(~np.isnan(B), axis=1)
+    in_a, in_b = n_a > 0, n_b > 0
+    keep = in_a | in_b  # a protein absent from both says nothing
+    ids, ma, mb, n_a, n_b, in_a, in_b = ids[keep], ma[keep], mb[keep], n_a[keep], n_b[keep], in_a[keep], in_b[keep]
+    both = in_a & in_b
+    log2fc = np.where(both, mb - ma, np.nan)
+    r = lambda x, d=4: None if (x is None or not np.isfinite(x)) else round(float(x), d)  # noqa: E731
+    # Biggest movers first, then the one-sided detections, then the rest.
+    rank = np.where(both, -np.abs(np.nan_to_num(log2fc, nan=0.0)), 1.0)
+    order = np.argsort(rank, kind="stable")
+    n_keep = len(order) if all_rows else 2000
+    rows = [{"id": ids[i], "log2fc": r(log2fc[i]), "t": None, "p": None, "q": None,
+             "mean_a": r(ma[i], 3), "mean_b": r(mb[i], 3), "n_a": int(n_a[i]), "n_b": int(n_b[i]),
+             "detection": "both" if both[i] else ("a_only" if in_a[i] else "b_only")}
+            for i in order[:n_keep]]
+    return {
+        "summary": {
+            "n_proteins": int(n_input), "n_dropped_contaminants": dropped_contaminants,
+            "n_tested": 0, "n_quantified_both": int(both.sum()), "n_a_only": int((in_a & ~in_b).sum()),
+            "n_b_only": int((in_b & ~in_a).sum()), "n_sig_q05": 0, "n_up": 0, "n_down": 0,
+            "log_transform": mode, "p99_raw": r(p99, 2), "min_valid": 1,
+            "comparison": "descriptive", "replicates": {"a": len(body.group_a), "b": len(body.group_b)},
+            "sign": "positive = higher in B",
+            "test": "none — with fewer than 2 replicates in a group there is no within-group variance, so no "
+                    "p-value or FDR can be computed. Fold changes and detection are descriptive only: a "
+                    "difference here may be biology or may be run-to-run variation, and this cannot tell them "
+                    "apart. Add replicates to test anything.",
+        },
+        "columns": ["id", "log2fc", "mean_a", "mean_b", "n_a", "n_b", "detection"],
+        "rows": rows, "volcano": [],
+    }
+
+
 @app.post("/analyse/run")
 def analyse_run(body: RunIn, all_rows: bool = False):
     np, pd = _sci()
@@ -1446,10 +1510,15 @@ def analyse_run(body: RunIn, all_rows: bool = False):
     missing = [c for c in [body.id_column, *body.group_a, *body.group_b] if c not in df.columns]
     if missing:
         raise HTTPException(400, f"columns not in table: {missing[:5]}")
-    if len(body.group_a) < 2 or len(body.group_b) < 2:
-        raise HTTPException(400, "each group needs at least 2 columns (replicates) for a t-test")
+    if not body.group_a or not body.group_b:
+        raise HTTPException(400, "both groups need at least one column")
     if set(body.group_a) & set(body.group_b):
         raise HTTPException(400, "a column can't be in both groups")
+    # One column a side is a real thing to want — two samples out of a deposition, often all anyone has — but it
+    # carries no within-group variance, so a t-test is undefined and any p-value would be invented. Describe the
+    # difference instead, and say so in the summary. The inferential path below keeps its >=2 requirement.
+    if len(body.group_a) < 2 or len(body.group_b) < 2:
+        return _describe_two(body, df, n_input=len(df))
     n_input = len(df)
     dropped_contaminants = 0
     if body.contaminant_column:
