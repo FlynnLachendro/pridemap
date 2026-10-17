@@ -1281,7 +1281,27 @@ def protein(name: str, organism: Optional[str] = None):
 
 
 # ----------------------------------------------------------------------------- browse (PRIDE-style landing)
+_BROWSE_CACHE: dict = {}
+
+
 @app.get("/browse")
+def browse_cached(request: Request):
+    """120 s response cache keyed by the full query string: the landing page (no filters) is the hot path and the data
+    only changes as tagging runs. Filtered pages are cheap and mostly uncached in practice."""
+    key = str(request.url.query)
+    hit = _BROWSE_CACHE.get(key)
+    if hit and time.time() - hit[0] < 120:
+        return hit[1]
+    qp = dict(request.query_params)
+    ints = {"since", "page", "size", "facet_top"}
+    kwargs = {k: (int(v) if k in ints and v.isdigit() else v) for k, v in qp.items() if k in browse.__code__.co_varnames}
+    out = browse(**kwargs)
+    if len(_BROWSE_CACHE) > 500:
+        _BROWSE_CACHE.clear()
+    _BROWSE_CACHE[key] = (time.time(), out)
+    return out
+
+
 def browse(
     q: Optional[str] = None, organism: Optional[str] = None, sample_type: Optional[str] = None, tissue: Optional[str] = None,
     cell_line: Optional[str] = None, disease: Optional[str] = None, enrichment: Optional[str] = None, acquisition: Optional[str] = None,
@@ -1351,6 +1371,24 @@ app.include_router(agent_router)
 @app.get("/")
 def root():
     return {"name": "PRIDE Map API", "docs": "/docs", "stats": "/stats", "search": "/search?organism=mouse&enrichment=phospho"}
+
+
+@app.on_event("startup")
+def _warm():
+    import threading
+
+    def loop():
+        while True:
+            try:
+                for q in ["size=20", "size=20&sort=relevance"]:
+                    _BROWSE_CACHE[q] = (time.time(), browse(size=20))
+                _FACET_CACHE.clear()
+                facets(db(), Filters(), top=12)
+            except Exception as e:
+                print("warm failed:", e, file=sys.stderr)
+            time.sleep(100)
+
+    threading.Thread(target=loop, daemon=True).start()
 
 
 if __name__ == "__main__":
