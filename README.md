@@ -142,6 +142,18 @@ The `/mcp` page in the running web UI explains the available tools and has a liv
 
 ---
 
+## Running MaxQuant
+
+PRIDE Map generates a ready-to-run search kit (scripts + MaxQuant XML configs) for any suitable
+dataset. Two paths:
+
+| Path | Guide |
+|------|-------|
+| **Local** — Docker on your macOS or Linux machine | [docs/maxquant-local.md](docs/maxquant-local.md) |
+| **Cloud** — Devin runs MaxQuant on a Linux VM, exposed over a Cloudflare tunnel | [docs/maxquant-cloud-devin.md](docs/maxquant-cloud-devin.md) |
+
+---
+
 ## Handover (Mani, Sat 17 Oct 17:00 → Sun pitch)
 
 - **[HANDOVER.html](HANDOVER.html)** — everything: run it in 15 minutes, repo map, pipeline, API, UI, MCP, the tour, gotchas, numbers, the pitch script and judge Q&A, submission checklist.
