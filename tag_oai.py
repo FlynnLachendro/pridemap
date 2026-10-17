@@ -154,7 +154,11 @@ def main():
     a = ap.parse_args()
     prov = PROVIDERS[a.provider]
     model = a.model or prov["model"]
-    keys = [k.strip() for k in (os.environ.get(prov["keys_env"]) or os.environ.get(prov["key_env"]) or "").split(",") if k.strip()]
+    # keys: HF_TOKENS (comma list) plus any HF_TOKENS2, HF_TOKENS3... so teammates' tokens can be pasted as separate lines
+    raw = [v for k, v in os.environ.items() if k == prov["keys_env"] or (k.startswith(prov["keys_env"]) and k[len(prov["keys_env"]):].isdigit())]
+    if not raw and os.environ.get(prov["key_env"]):
+        raw = [os.environ[prov["key_env"]]]
+    keys = list(dict.fromkeys(k.strip() for v in raw for k in v.split(",") if k.strip()))
     if not keys:
         sys.exit(f"set {prov['keys_env']} (comma-separated) or {prov['key_env']} in .env")
     keyring = Keys(keys)
