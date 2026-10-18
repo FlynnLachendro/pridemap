@@ -8,14 +8,19 @@ machine, and because Modal is x86-64 the arm64 workarounds that
 [maxquant-local.md](maxquant-local.md) carries simply do not apply — Bruker data
 included.
 
-> ### ⚠️ STATUS: PLANNED, NOT BUILT
+> ### STATUS: Phases 1a, 1b and 2 are built; not yet deployed
 >
-> `api/modal_runner.py` **does not exist yet**. Every `modal` command below that
-> references it will fail today. This document is both the setup guide for when
-> Phase 1a ships and the spec for building it. Commands that cannot work yet
-> carry an inline `⚠️ NOT YET IMPLEMENTED` marker.
+> `api/modal_runner.py` exists and implements Phase 1a and the Phase 2
+> `GET /jobs/{accession}` endpoint; `api/omics.py` carries the Phase 1b parallel
+> downloader and the Phase 2 Dict fallback. Nobody has run
+> [Step-by-step setup](#step-by-step-setup) against a real Modal account yet, so
+> the [Implementation verification](#implementation-verification) checklist is
+> unticked — treat the first deploy as the proving run.
 >
-> Working alternatives right now: [maxquant-local.md](maxquant-local.md) ·
+> Phase 3 (right-sizing the box) is deliberately still open; it needs usage
+> numbers from a real run.
+>
+> Alternatives that are already proven: [maxquant-local.md](maxquant-local.md) ·
 > [maxquant-cloud-devin.md](maxquant-cloud-devin.md)
 
 ## How it works
@@ -127,15 +132,8 @@ modal secret create pridemap-mq-token MQ_TOKEN=<that-token>
 ### 4. Deploy
 
 ```bash
-# ⚠️  NOT YET IMPLEMENTED — api/modal_runner.py does not exist (Phase 1a)
 modal deploy api/modal_runner.py
 ```
-
-> ⚠️ **This is the gate.** Steps 1–3 above work today — they set up your Modal
-> account and are not wasted. This step and **everything after it** (step 5,
-> running a search, verifying, troubleshooting, teardown) depends on
-> `api/modal_runner.py`, which has not been written yet. Read on to understand
-> the shape of the system, but nothing below will run until Phase 1a ships.
 
 Use `modal deploy`, not `modal serve`: serve is for local development and dies
 when you Ctrl-C, while deploy creates the persistent endpoint this design needs.
@@ -180,11 +178,11 @@ Pick a dataset, choose your samples, and press **Run on cloud**. From there:
 - To collect results later, reopen the dataset in PRIDE Map. The run is
   rediscovered and the protein table loads into the Analyse tab.
 
-> Recovering a run after a full shutdown depends on Phase 2 (see
-> [Implementation plan](#implementation-plan)). With only Phase 1a deployed, a
-> closed browser tab is fine, but killing the API process loses the job
-> reference — the job keeps running and billing. Until Phase 2 ships, cancel
-> orphans from the dashboard.
+> Recovery after a full shutdown is Phase 2, and it is built: on a cache miss
+> `pipeline_remote_active()` asks Modal for `GET /jobs/{accession}` and picks the
+> run back up. This path has not been exercised against a live deploy yet
+> (verification steps 13–14), so if a restarted API does not rediscover a run,
+> check the dashboard for an orphan still billing.
 
 ### Per run, there is no Modal login
 
@@ -292,8 +290,10 @@ Two other things survive a partial teardown:
 
 # Implementation plan
 
-Everything above describes the finished system. This section is what remains to
-be built. Phases are independently shippable.
+Everything above describes the finished system. This section is the build spec.
+Phases are independently shippable. **Phases 1a, 1b and 2 are implemented** —
+what follows is kept as the record of why each piece is shaped the way it is,
+and the obligations any change to them must still honour. Phase 3 is open.
 
 ## What to reuse
 
@@ -376,11 +376,10 @@ Catch `modal.exception.TimeoutError` → `running` **first**, then a generic
 `except Exception` → `error`. Inverting these reports every healthy running job
 as failed.
 
-**Known risk window until Phase 2 ships.** If the API process dies,
-`_active_remote_jobs` (`api/omics.py:2281`) loses the accession→job_id mapping.
-The `modal.Dict` entry still exists, but nothing reads it yet — so the job runs
-to completion unreachable, billing 16 cores for up to 24 h. **Ship Phase 2
-before running real datasets,** or cancel orphans from the dashboard.
+**Why Phase 2 is not optional.** If the API process dies, `_active_remote_jobs`
+(`api/omics.py:2281`) loses the accession→job_id mapping. Without a reader for
+the `modal.Dict`, the job runs to completion unreachable, billing 16 cores for
+up to 24 h. Phase 2 is that reader, and it ships alongside this.
 
 ## Phase 1b — Push scooter: parallel raw-file downloads
 
