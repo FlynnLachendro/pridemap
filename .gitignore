@@ -37,3 +37,5 @@ out_dia/
 fasta/
 # Pipeline runs started from the UI land here (api/omics.py RUNS_DIR).
 reanalysis/
+# Pre-commit hook cache: records the staged-file hash of the last passing run.
+.gate-cache/
