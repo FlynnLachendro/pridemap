@@ -1430,10 +1430,27 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
         "# ---- disk. The estimate is raw size plus room for conversion and results; override it if you are",
         "# writing to another volume, or only running one of the tracks.",
         f"NEED_GB=${{PRIDEMAP_MIN_DISK_GB:-{need_gb}}}",
-        'FREE_GB=$(df -Pk . | awk "NR==2 {print int(\\$4/1048576)}")',
-        '[ "$FREE_GB" -ge "$NEED_GB" ] \\',
-        '  && ok "disk: ${FREE_GB}GB free, need ~${NEED_GB}GB" \\',
-        '  || bad "disk: only ${FREE_GB}GB free, need ~${NEED_GB}GB for raw + converted + results"',
+        # printf "%d", not print. A Modal Volume reports 2^53 KB free — a sentinel for "no meaningful
+        # limit" — and int() of that is 8589934592, which mawk (Debian's awk, and so the container's)
+        # renders through OFMT as "8.58993e+09". `[ -ge ]` then errors with "integer expression
+        # expected", the || branch fires, and preflight failed EVERY cloud run on a volume with
+        # effectively infinite space. macOS's awk prints the integer plainly, which is why this never
+        # reproduced locally. %d forces the integer form on every awk.
+        # The regex guard is inside awk on purpose: printf "%d" COERCES a non-numeric field to 0, so
+        # validating after the fact would read an unparseable df as "0GB free" — i.e. full — which is
+        # the same outage in a new disguise. awk refuses to convert, and the shell sees "unknown".
+        "FREE_GB=$(df -Pk . | awk 'NR==2 { if ($4 ~ /^[0-9]+$/) printf \"%d\\n\", int($4/1048576);"
+        " else print \"unknown\" }')",
+        # A filesystem that reports something unparseable must not be read as "full". Warning keeps
+        # the run going on an exotic volume; failing here stopped work that would have succeeded.
+        'case "$FREE_GB" in',
+        '  ""|*[!0-9]*)',
+        '    warn "disk: could not read free space from df (got \'${FREE_GB}\') — skipping this check" ;;',
+        "  *)",
+        '    [ "$FREE_GB" -ge "$NEED_GB" ] \\',
+        '      && ok "disk: ${FREE_GB}GB free, need ~${NEED_GB}GB" \\',
+        '      || bad "disk: only ${FREE_GB}GB free, need ~${NEED_GB}GB for raw + converted + results" ;;',
+        "esac",
         "",
         "# ---- curl",
         'command -v curl >/dev/null 2>&1 && ok "curl" || bad "curl not found"',
@@ -1444,8 +1461,13 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
     if need_convert or "maxquant" in engines:
         out += [
             "# ---- docker: where msconvert and MaxQuant come from when they are not installed natively",
+            # On Modal the tools are baked into the image and there is no Docker daemon by design, so
+            # the warning below is noise in a log the UI now puts in front of the user. The runner
+            # sets PRIDEMAP_TOOLS_PREINSTALLED=1 to say "this host provides the tools directly".
             "HAVE_DOCKER=0",
-            'if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then',
+            'if [ -n "${PRIDEMAP_TOOLS_PREINSTALLED:-}" ]; then',
+            '  ok "tools are built into this image — docker is not needed here"',
+            'elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then',
             '  HAVE_DOCKER=1; ok "docker is running"',
             "else",
             '  warn "docker not available — only matters if a tool below is missing natively"',
