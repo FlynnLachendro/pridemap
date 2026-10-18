@@ -391,22 +391,25 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
             raise FileNotFoundError("run_all.sh not found in kit")
         run_script.chmod(0o755)
 
-        # Resume. run_all.sh skips any stage with a .pipeline/<id>.done marker, but it writes those
-        # markers into the container-local work dir, which dies with the container — so a retry
-        # after a failed search re-ran preflight, download and FASTA every time. Restoring the
-        # markers from the Volume, and symlinking the directory back to it, is what makes the retry
-        # resume rather than start again. Keyed by selection, so two sample selections of one
-        # dataset cannot skip each other's stages.
-        pipe_store = _resume_dir(accession, selection_from_kit(kit_bytes))
-        pipe_store.mkdir(parents=True, exist_ok=True)
-        work_pipe = work_dir / ".pipeline"
-        if work_pipe.exists():
-            shutil.rmtree(work_pipe)
-        work_pipe.symlink_to(pipe_store, target_is_directory=True)
-        resumed = sorted(p.stem for p in pipe_store.glob("*.done"))
-        if resumed:
-            _log(f"resuming: {', '.join(resumed)} already done, will be skipped")
-
+        # NO stage markers across runs, deliberately. run_all.sh's .pipeline/<id>.done markers stay
+        # in this container's work dir and die with it.
+        #
+        # Backing them with the Volume was tried and reverted. A marker asserts "this stage's work
+        # is done", but the work PRODUCTS — raw/ symlinks, fasta/, combined/ — live in this
+        # ephemeral work dir, which is new and empty on every run. So a second run skipped download
+        # and fasta, then handed MaxQuant paths to files nothing had created:
+        #
+        #   [2/5] ✓ already done — skipping (delete .pipeline/download.done to redo)
+        #   Error creating a RawFile instance from /tmp/mq-.../raw/..._01.raw:
+        #   Path does not exist, neither as a file nor as a folder.
+        #
+        # Persistent markers over ephemeral artifacts is a lie the pipeline cannot detect.
+        #
+        # The resume that actually matters is content-addressed and already here: download_raw.sh's
+        # have() finds each file in raw_vol at full size and skips the curl, so re-running costs
+        # seconds rather than tens of GB. Markers would only have saved that have() check and a
+        # ~10 s FASTA fetch.
+        #
         # raw files are already in raw_vol — download_raw.sh's have() check skips them instantly
         env = {
             **os.environ,
@@ -935,15 +938,6 @@ def selection_from_kit(kit_bytes: bytes) -> str:
 def job_key(accession: str, selection: str) -> str:
     """The registry key for one dataset + run selection. Mirrors omics.job_key exactly."""
     return f"{accession}:{selection}" if selection else accession
-
-
-def _resume_dir(accession: str, selection: str) -> pathlib.Path:
-    """Where this dataset+selection's stage markers live, on the Volume rather than in the container.
-
-    Not under the per-job directory: that is named after the FunctionCall id, so every retry gets a
-    fresh one and would see no markers at all — which is exactly why resume never worked.
-    """
-    return DATA_ROOT / "resume" / job_key(accession, selection).replace(":", "__")
 
 
 def _accession_from_kit(kit_bytes: bytes) -> str:

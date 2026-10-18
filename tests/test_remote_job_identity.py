@@ -185,42 +185,57 @@ def test_the_registry_key_follows_the_run_query_parameter():
     assert key_a != key_b
 
 
-def test_the_resume_directory_is_not_inside_the_per_job_directory():
-    """Scenario: stage markers outlive the job that wrote them.
+def test_stage_markers_are_never_carried_across_runs_on_the_volume():
+    """Scenario: a stage is never skipped on the strength of a marker that outlived its output.
 
     Slice: resume.
-    Given two job ids for the same dataset and selection,
-    When their resume directories are resolved,
-    Then both resolve to the same path, and it is not under either job's own directory — a job
-      directory is named after the FunctionCall id, so markers kept there are invisible to the
-      retry, which is precisely why resume never worked.
+    Given the search worker,
+    When its source is read,
+    Then it neither resolves a volume-backed marker directory nor redirects .pipeline onto the
+      Volume.
+
+    This is a regression guard for a fix that made things worse. Backing the markers with the
+    Volume made them persistent, but the artifacts they certify — raw/ symlinks, fasta/, combined/
+    — live in a tempfile.mkdtemp work dir that is new and empty every run. The second run then
+    skipped download and fasta and handed MaxQuant paths to files nothing had created:
+
+        [2/5] ✓ already done — skipping (delete .pipeline/download.done to redo)
+        Error creating a RawFile instance from /tmp/mq-.../raw/..._01.raw:
+        Path does not exist, neither as a file nor as a folder.
+
+    Persistent markers over ephemeral artifacts is a claim the pipeline cannot check. The resume
+    that matters is content-addressed and lives in raw_vol, which the next test covers.
     """
     ### Given / When
-    selection = _selection_key(SELECTION_A)
-    first = modal_runner._resume_dir(ACCESSION, selection)
-    second = modal_runner._resume_dir(ACCESSION, selection)
+    source = pathlib.Path(modal_runner.__file__).read_text()
 
     ### Then
-    assert first == second
-    assert "fc-" not in str(first), "must not be keyed by a FunctionCall id"
-    assert str(first).startswith(str(modal_runner.DATA_ROOT))
+    assert not hasattr(modal_runner, "_resume_dir"), (
+        "a volume-backed marker directory is what let a skipped stage outlive its own output"
+    )
+    assert ".pipeline" not in source or "symlink_to" not in source, (
+        "redirecting .pipeline onto the Volume reintroduces persistent markers over ephemeral work"
+    )
 
 
-def test_two_selections_do_not_share_a_resume_directory():
-    """Scenario: one selection's finished stages cannot be skipped by another's run.
+def test_the_raw_cache_is_what_makes_a_rerun_cheap():
+    """Scenario: re-running still avoids re-downloading tens of GB.
 
     Slice: resume.
-    Given two different run selections of the same dataset,
-    When their resume directories are resolved,
-    Then they differ, because skipping a search that ran over different raw files would produce a
-      result for runs the user did not pick.
+    Given the raw-file cache mount and the job-results mount,
+    When they are compared,
+    Then they are separate, durable locations — the raw cache is keyed by accession and checked by
+      download_raw.sh's have() at full size, so a rerun skips the curl without any marker claiming
+      a stage is done. Dropping the markers must not be read as dropping resume.
     """
     ### Given / When
-    a = modal_runner._resume_dir(ACCESSION, _selection_key(SELECTION_A))
-    b = modal_runner._resume_dir(ACCESSION, _selection_key(SELECTION_B))
+    raw, data = modal_runner.RAW_CACHE_MOUNT, modal_runner.VOLUME_MOUNT
 
     ### Then
-    assert a != b
+    assert raw != data, "the raw cache must be its own volume, not inside per-job output"
+    assert raw.startswith("/") and not raw.startswith("/tmp"), (
+        "the cache must be durable; an ephemeral path would make every rerun re-download"
+    )
 
 
 if __name__ == "__main__":

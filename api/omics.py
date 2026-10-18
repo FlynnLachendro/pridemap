@@ -1702,6 +1702,7 @@ STAGE_START=0
 STAGE_ID=""
 STAGE_N=0
 STAGE_FAILED=0
+MQ_WATCH=""
 
 stage() {  # stage <id> <label>; returns 1 when already done so the caller can skip
   STAGE_ID="$1"; local label="$2"
@@ -1763,6 +1764,12 @@ run_step() {  # run_step <script> <failure-message>
 # look healthy. One event here is the difference between "it broke at FASTA" and silence.
 _on_exit() {
   local rc=$?
+  # The MaxQuant watcher, if one is running. It used to install its OWN EXIT trap and then clear it
+  # with `trap - EXIT`, which removed this handler too — so after the search stage nothing cleaned
+  # up run.pid and nothing reported an unexplained death. A stale run.pid makes the local API
+  # answer "a run is already in progress" for a run that finished, blocking the next one. One EXIT
+  # trap, owning every cleanup, is the only arrangement a later stage cannot silently undo.
+  [ -n "${MQ_WATCH:-}" ] && kill "$MQ_WATCH" 2>/dev/null
   rm -f "$PIPE_DIR/run.pid"
   if [ "$rc" != "0" ] && [ "${STAGE_FAILED:-0}" = "0" ] && [ -n "$STAGE_ID" ] \
      && [ ! -f "$PIPE_DIR/$STAGE_ID.done" ]; then
@@ -1923,8 +1930,10 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 # MaxQuant's workers resolve paths from their own cwd, so the config needs absolute ones. The kit
                 # cannot know where it will be unpacked, so the directory is substituted here, once, per run.
                 '  step "MaxQuant writes one combined/proc/<step>.finished.txt per internal step; echoing them as they land"',
+                # No second EXIT trap here. The watcher is cleaned up by _on_exit, which owns the
+                # single trap; installing one here and clearing it with `trap - EXIT` is what used
+                # to leave run.pid behind and disarm failure reporting for the rest of the run.
                 "  watch_maxquant & MQ_WATCH=$!",
-                '  trap \'kill "$MQ_WATCH" 2>/dev/null || true\' EXIT',
                 # The config carries a placeholder rather than a path, because MaxQuant's workers resolve relative
                 # paths from their own cwd. What it resolves to differs per runner: the kit directory natively,
                 # the mount point inside the container.
@@ -1964,7 +1973,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 "  else",
                 '    fail "MaxQuant not found — preflight.sh explains the options (MAXQUANT_CMD / MAXQUANT_DIR / docker)"',
                 "  fi",
-                '  kill "$MQ_WATCH" 2>/dev/null || true; trap - EXIT',
+                '  kill "$MQ_WATCH" 2>/dev/null || true; MQ_WATCH=""',
                 '  mq_scan  # final sweep: catch steps that finished between the last poll and now',
                 f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
                 f'  step "$(($(wc -l < "{tr["output_table"]}") - 1)) protein groups in {tr["output_table"]}"',
