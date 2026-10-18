@@ -18,15 +18,13 @@ FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:3.1-bullseye
 
 COPY --from=source /usr/local/bin/ /opt/maxquant/
 
-# Modal requires Python + pip to bootstrap its runtime.  python3 (3.9.2) is already in
-# the SDK base.  Debian's minimal python3 package omits distutils, which get-pip.py
-# needs; python3-distutils is in debian main (not debian-security) so it installs
-# without 404.  The 3.9/ versioned URL is required — the unversioned script needs 3.10+.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends python3-distutils \
- && rm -rf /var/lib/apt/lists/* \
- && curl -sSL https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3 - \
- && ln -s /usr/bin/python3 /usr/bin/python
+# No Python is installed here on purpose.  Modal requires `python` AND `pip` on $PATH, and
+# this base satisfies neither: it ships python3 (3.9.2) but no `python` and no pip at all.
+# Installing them from Debian 11 means apt (python3-pip is already 404 from debian-security)
+# plus the frozen bootstrap.pypa.io/pip/3.9/ script, because 3.9 is EOL and the current
+# get-pip.py needs 3.10+.  api/modal_runner.py passes add_python= to from_dockerfile
+# instead, so Modal injects a standalone Python build and none of that applies.
+# Nothing in the pipeline reads Python — MaxQuant is .NET and the kit scripts are bash.
 
 RUN rm -f /opt/maxquant/global.json \
  && printf '#!/bin/sh\nexec dotnet /opt/maxquant/MaxQuantCmd.exe "$@"\n' \

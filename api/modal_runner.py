@@ -105,8 +105,48 @@ web_image = (
 # The SDK image (Debian Bullseye) ships curl and ca-certificates, so the static-curl
 # fetch and CA-bundle workarounds the old image required are not needed here.
 _DOCKERFILE = pathlib.Path(__file__).parent.parent / "docker" / "maxquant" / "Dockerfile"
+
+# Modal's post-build Python probe reports only "unable to determine the version of Python
+# installed in the Image" — it names neither of the two binaries it looks for and runs after the
+# build, so its output carries no diagnostics. Seven deploys were spent guessing which was
+# missing. This asserts the contract *inside* the build, where stdout reaches the deploy log,
+# and dumps the environment once so a later image fault has a baseline to diff against rather
+# than needing another deploy to inspect.
+#
+# It must stay ONE logical line.  run_commands() emits each string as a `RUN` instruction into a
+# Dockerfile that Modal parses itself, and that parser rejects an embedded newline: a `for ... done`
+# written across lines failed the whole build with `could not parse Dockerfile: expected
+# any_breakable` pointing at `done`.  Hence the `;`-joined fragments below, and `echo` rather than
+# `printf` — a literal `\n` in a RUN line is at the mercy of the Dockerfile escape handling.
+_IMAGE_PROBE = " ".join(
+    [
+        "set -eu;",
+        'echo "=== PATH ==="; echo "$PATH";',
+        'echo "=== python/pip resolution (Modal needs python and pip, not the 3-suffixed names) ===";',
+        'for b in python python3 pip pip3; do echo "$b -> $(command -v "$b" || echo MISSING)"; done;',
+        'echo "=== versions ==="; python --version 2>&1 || true; pip --version 2>&1 || true;',
+        'echo "=== dotnet SDKs (DotNetCore31Installed() needs a line starting 3.1) ===";',
+        "dotnet --list-sdks 2>&1 || true;",
+        'echo "=== /opt/maxquant ==="; ls /opt/maxquant 2>&1 | head -20 || true;',
+        'echo "=== assert Modal image contract ===";',
+        "missing='';",
+        'command -v python >/dev/null 2>&1 || missing="$missing python";',
+        'command -v pip >/dev/null 2>&1 || missing="$missing pip";',
+        'if [ -n "$missing" ]; then',
+        'echo "FATAL: not on PATH:$missing" >&2;',
+        'echo "Modal requires both python and pip on PATH. This base ships python3 only;" >&2;',
+        'echo "add_python= on from_dockerfile is what supplies them." >&2;',
+        "exit 1; fi;",
+        'echo "OK: python and pip both resolve"',
+    ]
+)
+
 image = (
-    modal.Image.from_dockerfile(_DOCKERFILE)
+    # add_python installs a reproducible standalone Python build. The alternative — apt plus the
+    # frozen get-pip.py for 3.9 — depends on Debian 11's debian-security, which has already
+    # dropped python3-pip (404) once during this work.
+    modal.Image.from_dockerfile(_DOCKERFILE, add_python="3.12")
+    .run_commands(_IMAGE_PROBE)
     .run_commands(
         # Prove TLS actually works against the two hosts this pipeline fetches from, at
         # BUILD time. A range request keeps it to a few bytes; -f makes an HTTP error a failure.
