@@ -65,6 +65,11 @@ class FakeBackend:
     def accession_from_kit(self, kit_bytes: bytes) -> str:
         return "PXD046787"
 
+    def job_key_from_kit(self, kit_bytes: bytes, accession: str) -> str:
+        # The real backend reads the selection key the kit carries; the gateway only has to pass
+        # whatever it returns through to record_job, which is what this fake lets the test observe.
+        return accession
+
     def record_job(self, accession: str, job_id: str) -> None:
         self.recorded.append((accession, job_id))
         self.jobs[accession] = job_id

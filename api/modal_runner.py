@@ -25,6 +25,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -52,16 +53,43 @@ RAW_CACHE_MOUNT = "/raw-cache" # where run_maxquant mounts `raw_vol` (cached raw
 DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
 
 
+def _on_modal() -> bool:
+    """True inside a Modal container, where a Volume exists to be committed.
+
+    Off Modal the local filesystem is already coherent and these calls raise by design, so the
+    distinction is what lets a commit failure be reported there without being reported here.
+    """
+    return bool(os.environ.get("MODAL_TASK_ID"))
+
+
 def _vol_sync(action: str, v: "Volume | None" = None) -> None:
     """Best-effort Volume commit/reload for vol (default) or any other Volume.
 
-    Off Modal there is no Volume to talk to and these calls raise; the local filesystem is already
-    coherent there, so a failure is not an error. Never let it mask a real one by propagating.
+    Reads only. A reload that fails costs nothing — the next one will pick the data up — so it stays
+    silent. For WRITES use _vol_commit: a commit that fails silently is how durable state stops
+    being durable without anyone finding out.
     """
     try:
         getattr(v or vol, action)()
     except Exception:
         pass
+
+
+def _vol_commit(v: "Volume | None" = None, *, what: str = "volume") -> bool:
+    """Commit a Volume, reporting failure. Returns True when the data is durable.
+
+    Separated from _vol_sync because resume depends on this specific call succeeding. The stage
+    markers run_all.sh writes to .pipeline/ become durable only when a commit lands; if one fails,
+    the next container re-runs every stage from scratch and nothing anywhere says why. "Best effort"
+    is the right policy for a reload and the wrong one for the write that a guarantee rests on.
+    """
+    try:
+        (v or vol).commit()
+        return True
+    except Exception as exc:
+        if _on_modal():
+            print(f"WARNING: {what} commit failed — resume may re-run stages: {exc}", flush=True)
+        return False
 
 # ----------------------------------------------------------------------------- container images
 
@@ -202,21 +230,50 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     cache_dir.mkdir(exist_ok=True)
     lock_file = cache_dir / ".downloading"
 
-    lock_acquired = False
-    if lock_file.exists():
+    def _take_lock() -> bool:
+        """Create the lock, or False if someone else holds it. O_EXCL makes this a single step.
+
+        exists()-then-touch() was two steps with a gap: both containers could see no lock and both
+        proceed, which is the exact race the lock exists to prevent — two curls resuming the same
+        partial file on the same volume, producing a corrupt raw file that fails deep inside
+        MaxQuant hours later.
+        """
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        os.close(fd)
+        return True
+
+    lock_acquired = _take_lock()
+    if not lock_acquired:
         age = time.time() - lock_file.stat().st_mtime
-        if age < _LOCK_TIMEOUT:
+        if age >= _LOCK_TIMEOUT:
+            # Left by a container that died. Its mtime is the evidence.
+            _log(f"stale lock for {accession} (age {age:.0f} s) — taking it over")
+            lock_file.unlink(missing_ok=True)
+            lock_acquired = _take_lock()
+        else:
             _log(f"another container is downloading {accession} (lock age {age:.0f} s) — waiting")
             for _ in range(72):   # up to 6 min (72 × 5 s)
                 time.sleep(5)
                 _vol_sync("reload", raw_vol)
                 if not lock_file.exists():
                     break
-            _log("concurrent download finished (or timed out) — raw_vol reloaded, skipping to search")
+            else:
+                # The wait expired with the lock still held. Returning here handed the 64 GB search
+                # worker a raw set that may be half-downloaded, and it failed deep inside MaxQuant
+                # with nothing pointing back at this moment. Failing here is cheaper and legible.
+                raise RuntimeError(
+                    f"timed out after 6 min waiting for another container to finish downloading "
+                    f"{accession}; refusing to start the search on a possibly-incomplete raw set"
+                )
+            _log("concurrent download finished — raw_vol reloaded, skipping to search")
             return   # search worker will reload and have() will find the files
-    lock_file.touch()
-    _vol_sync("commit", raw_vol)   # make the lock visible before any curl runs
-    lock_acquired = True
+
+    if not lock_acquired:  # pragma: no cover - takeover raced with another container
+        raise RuntimeError(f"could not acquire the download lock for {accession}")
+    _vol_commit(raw_vol, what="raw cache")   # make the lock visible before any curl runs
 
     work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"dl-{job_id}-"))
     with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
@@ -233,8 +290,8 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
 
     def _ship() -> None:
         while not _stop.wait(15):
-            _vol_sync("commit")
-            _vol_sync("commit", raw_vol)
+            _vol_commit()
+            _vol_commit(raw_vol, what="raw cache")
 
     t = threading.Thread(target=_ship, daemon=True)
     t.start()
@@ -250,16 +307,16 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
         for line in proc.stdout:  # type: ignore[union-attr]
             _log(line.rstrip())
         proc.wait()
-        _vol_sync("commit", raw_vol)
-        _vol_sync("commit")
+        _vol_commit(raw_vol, what="raw cache")
+        _vol_commit()
         if proc.returncode != 0:
             raise RuntimeError(f"download_raw.sh exited {proc.returncode}")
     finally:
         _stop.set()
         if lock_acquired:
             lock_file.unlink(missing_ok=True)   # release lock so concurrent jobs can proceed
-        _vol_sync("commit", raw_vol)
-        _vol_sync("commit")
+        _vol_commit(raw_vol, what="raw cache")
+        _vol_commit()
 
 
 # ----------------------------------------------------------------------------- MaxQuant worker (expensive)
@@ -314,8 +371,8 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     def _shipper() -> None:
         while not _stop_shipper.wait(15):
             _ship_stages()
-            _vol_sync("commit")
-            _vol_sync("commit", raw_vol)
+            _vol_commit()
+            _vol_commit(raw_vol, what="raw cache")
 
     shipper = threading.Thread(target=_shipper, daemon=True)
     shipper.start()
@@ -333,11 +390,30 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
             raise FileNotFoundError("run_all.sh not found in kit")
         run_script.chmod(0o755)
 
+        # Resume. run_all.sh skips any stage with a .pipeline/<id>.done marker, but it writes those
+        # markers into the container-local work dir, which dies with the container — so a retry
+        # after a failed search re-ran preflight, download and FASTA every time. Restoring the
+        # markers from the Volume, and symlinking the directory back to it, is what makes the retry
+        # resume rather than start again. Keyed by selection, so two sample selections of one
+        # dataset cannot skip each other's stages.
+        pipe_store = _resume_dir(accession, selection_from_kit(kit_bytes))
+        pipe_store.mkdir(parents=True, exist_ok=True)
+        work_pipe = work_dir / ".pipeline"
+        if work_pipe.exists():
+            shutil.rmtree(work_pipe)
+        work_pipe.symlink_to(pipe_store, target_is_directory=True)
+        resumed = sorted(p.stem for p in pipe_store.glob("*.done"))
+        if resumed:
+            _log(f"resuming: {', '.join(resumed)} already done, will be skipped")
+
         # raw files are already in raw_vol — download_raw.sh's have() check skips them instantly
         env = {
             **os.environ,
             "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT,
             "MAXQUANT_CMD": "maxquant",
+            # The tools are in the image; preflight must not warn about a Docker daemon that is not
+            # meant to exist here, in a log the UI now shows the user.
+            "PRIDEMAP_TOOLS_PREINSTALLED": "1",
         }
 
         _log("starting run_all.sh (download stage will be skipped — files already in raw_vol)")
@@ -354,7 +430,7 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
             _log(line.rstrip())
         proc.wait()
 
-        _vol_sync("commit", raw_vol)
+        _vol_commit(raw_vol, what="raw cache")
 
         # Every failure below RAISES. Writing "error" into progress.jsonl and returning normally is
         # what made a dead run report as finished: the FunctionCall completed without an exception,
@@ -382,8 +458,8 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     finally:
         _stop_shipper.set()
         _ship_stages()
-        _vol_sync("commit")
-        _vol_sync("commit", raw_vol)
+        _vol_commit()
+        _vol_commit(raw_vol, what="raw cache")
 
 
 # ----------------------------------------------------------------------------- orchestrator (lightweight)
@@ -413,7 +489,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     job_id = _job_id_for_this_run(accession)
     job_dir = DATA_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    _vol_sync("commit")   # make job_dir visible to children before they start
+    _vol_commit()   # make job_dir visible to children before they start
 
     log_path = job_dir / "run.log"
     progress_path = job_dir / "progress.jsonl"
@@ -433,7 +509,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     _write_progress(progress_path, "running", "download phase starting")
     _write_stage_event(phases_path, "run_started", "", "pipeline start")
     _write_stage_event(phases_path, "stage_started", "download", "Download raw files from PRIDE")
-    _vol_sync("commit")
+    _vol_commit()
 
     try:
         _download_raw.remote(kit_bytes, accession, job_id)
@@ -441,7 +517,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         _log(f"DOWNLOAD FAILED: {exc}")
         _write_progress(progress_path, "error", f"download failed: {exc}")
         _write_stage_event(phases_path, "stage_failed", "download", f"download failed: {exc}")
-        _vol_sync("commit")
+        _vol_commit()
         # Raising, not returning. A return here completed the FunctionCall normally, so _call_status
         # read the job as "done" and the card reported a finished run that had downloaded nothing.
         raise
@@ -451,7 +527,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     _log("phase 2/2: MaxQuant search (expensive container — 16 CPU / 64 GB)")
     _write_progress(progress_path, "running", "search phase starting")
     _write_stage_event(phases_path, "stage_started", "search_dda", "MaxQuant search starting")
-    _vol_sync("commit")
+    _vol_commit()
 
     try:
         _run_maxquant_search.remote(kit_bytes, accession, job_id)
@@ -459,7 +535,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         _log(f"MAXQUANT FAILED: {exc}")
         _write_progress(progress_path, "error", f"maxquant failed: {exc}")
         _write_stage_event(phases_path, "stage_failed", "search_dda", f"maxquant failed: {exc}")
-        _vol_sync("commit")
+        _vol_commit()
         raise
 
     return job_id
@@ -508,7 +584,7 @@ def prune_raw_cache(max_age_days: int = 30) -> dict:
             kept.append(f"{accession} ({age_days:.1f} days old)")
 
     if removed:
-        _vol_sync("commit", raw_vol)
+        _vol_commit(raw_vol, what="raw cache")
 
     return {"removed": removed, "kept": kept, "max_age_days": max_age_days}
 
@@ -603,8 +679,24 @@ class _ModalBackend:
     def accession_from_kit(self, kit_bytes: bytes) -> str:
         return _accession_from_kit(kit_bytes)
 
+    def job_key_from_kit(self, kit_bytes: bytes, accession: str) -> str:
+        return job_key(accession, selection_from_kit(kit_bytes))
+
     def record_job(self, accession: str, job_id: str) -> None:
         try:
+            # Never displace a job that is still running. The old unconditional write orphaned it:
+            # /jobs stopped reporting it while it kept billing 16 CPU / 64 GB, and /jobs is exactly
+            # what the kill procedure reads to decide what is safe to terminate. The caller is
+            # expected to have refused the second submission already; this is the backstop for the
+            # races it cannot see.
+            existing = jobs.get(accession)
+            if existing and existing != job_id and _call_status(existing) == "running":
+                print(
+                    f"WARNING: refusing to displace running job {existing} for {accession} "
+                    f"with {job_id}",
+                    flush=True,
+                )
+                return
             jobs[accession] = job_id
         except Exception as exc:
             # Non-fatal: /jobs/{accession} has a fallback. Logged rather than swallowed because a
@@ -809,6 +901,40 @@ def _read_stage_events(job_id: str) -> list[dict]:
             if isinstance(event, dict):
                 events.append(event)
     return events
+
+
+SELECTION_KEY_FILE = "selection_key.txt"
+
+
+def selection_from_kit(kit_bytes: bytes) -> str:
+    """The run-selection key the kit carries, or "" for a whole-dataset run.
+
+    `runs` never reaches this side — /run receives only the kit — so the key is computed by
+    _selection_key on the API side and carried in the zip. Reading it here rather than re-deriving
+    it is what keeps the two ends agreeing about the registry key.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
+            for name in zf.namelist():
+                if pathlib.PurePath(name).name == SELECTION_KEY_FILE:
+                    return zf.read(name).decode(errors="replace").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def job_key(accession: str, selection: str) -> str:
+    """The registry key for one dataset + run selection. Mirrors omics.job_key exactly."""
+    return f"{accession}:{selection}" if selection else accession
+
+
+def _resume_dir(accession: str, selection: str) -> pathlib.Path:
+    """Where this dataset+selection's stage markers live, on the Volume rather than in the container.
+
+    Not under the per-job directory: that is named after the FunctionCall id, so every retry gets a
+    fresh one and would see no markers at all — which is exactly why resume never worked.
+    """
+    return DATA_ROOT / "resume" / job_key(accession, selection).replace(":", "__")
 
 
 def _accession_from_kit(kit_bytes: bytes) -> str:

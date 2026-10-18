@@ -2011,7 +2011,15 @@ def search_kit(accession: str, api_base: str = "", web_base: str = "", runs: lis
     p = ctx["p"]
     fasta_path, _ = _fasta(ctx)
     files: dict[str, str] = {"download_raw.sh": _download_sh(ctx), "download_fasta.sh": _fasta_sh(ctx),
-                             "preflight.sh": preflight_sh(ctx, plan), ".gitignore": KIT_GITIGNORE}
+                             "preflight.sh": preflight_sh(ctx, plan), ".gitignore": KIT_GITIGNORE,
+                             # The run selection, carried so the far side can key its job registry
+                             # the same way this side does. `runs` never crosses the wire — the
+                             # remote /run handler receives only the kit — so without this the
+                             # registry is keyed by accession alone and two different sample
+                             # selections of one dataset overwrite each other's job id. The key is
+                             # COMPUTED here, by _selection_key, which stays its only owner; the kit
+                             # is just the carrier.
+                             SELECTION_KEY_FILE: _selection_key(runs)}
     steps = [f"1. `bash download_raw.sh` pulls the {len(ctx['raw'])} raw files from PRIDE's FTP into raw/ "
              "(runs plus their index sidecars — the readers need both).",
              f"2. `bash download_fasta.sh` fetches the protein database to `{fasta_path}`, where the configs expect it."]
@@ -2167,6 +2175,24 @@ def _require_local(request: Request):
     if not _is_local(request):
         raise HTTPException(403, "the pipeline can only be run by a local PRIDE Map; "
                                  f"set {_ALLOW_RUN_ENV}=1 on a server that really should run searches")
+
+
+#: Name of the file inside a kit that carries the run-selection key. Read by the Modal side, which
+#: only ever receives the kit, so that both ends key the job registry identically.
+SELECTION_KEY_FILE = "selection_key.txt"
+
+
+def job_key(accession: str, selection: str) -> str:
+    """The registry key for one dataset + run selection.
+
+    Keying on accession alone meant a second selection of the same dataset replaced the first's job
+    id, so the earlier job became unreachable through /jobs — the documented way to find and kill a
+    runaway 16 CPU / 64 GB container.
+
+    One function, used by both ends, because a key that two sides derive separately is a key they
+    will eventually disagree about.
+    """
+    return f"{accession}:{selection}" if selection else accession
 
 
 def _selection_key(runs: list[str] | None) -> str:
@@ -2604,21 +2630,17 @@ def pipeline_remote_active(accession: str, runs: str = ""):
     Phase 2: if the in-process cache misses (e.g. after an API restart), fall back to the Modal
     Dict via GET /jobs/{accession} on the remote server so the job is still discoverable.
     """
-    job_id = _active_remote_jobs.get(accession)
+    key = _remote_job_key(accession, runs)
+    job_id = _active_remote_jobs.get(key)
+    if job_id == _SUBMIT_PENDING:
+        # A submission for this selection is mid-flight in another request. Reporting it as active
+        # without a job id lets the card show "submitting" instead of offering a second Run button.
+        return {"job_id": None, "status": "submitting"}
 
     if not job_id:
-        # Phase 2 fallback: ask the remote server's durable Dict.
-        modal_url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
-        if modal_url:
-            try:
-                req = urllib.request.Request(f"{modal_url}/jobs/{accession}", headers=_mq_auth_headers())
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read())
-                job_id = data.get("job_id")
-                if job_id:
-                    _active_remote_jobs[accession] = job_id  # repopulate in-process cache
-            except Exception:
-                pass
+        job_id = _remote_job_from_registry(key)
+        if job_id:
+            _active_remote_jobs[key] = job_id  # repopulate in-process cache
 
     if not job_id:
         return {"job_id": None, "status": None}
@@ -2629,15 +2651,67 @@ def pipeline_remote_active(accession: str, runs: str = ""):
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         if data.get("status") in ("done", "error"):
-            _active_remote_jobs.pop(accession, None)
+            _active_remote_jobs.pop(key, None)
         return {"job_id": job_id, **_remote_stage_payload(accession, runs, data)}
     except Exception:
         return {"job_id": job_id, "status": "running", "log": "", "stage_progress": False, "stages": []}
 
 
+#: Written into _active_remote_jobs between the decision to submit and the job id coming back.
+#: Submitting takes up to 60 s (and may wake a container first), and the dict was previously only
+#: written AFTER that call returned — so two clicks could both read "nothing running" and both
+#: spawn. The local route does not have this gap because it writes run.pid synchronously.
+_SUBMIT_PENDING = "pending"
+
+
+def _remote_job_key(accession: str, runs: str) -> str:
+    """The registry key for this dataset and run selection. One owner, used by every remote route."""
+    return job_key(accession, _selection_key(parse_runs(runs)))
+
+
+def _remote_job_from_registry(key: str) -> str | None:
+    """The job id the remote server's durable Dict holds for this key, if it can be reached.
+
+    The fallback that makes a job survive an API restart: the in-process cache is gone then, but the
+    Modal Dict is not.
+    """
+    modal_url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
+    if not modal_url:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"{modal_url}/jobs/{urllib.parse.quote(key, safe='')}", headers=_mq_auth_headers()
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read()).get("job_id")
+    except Exception:
+        return None
+
+
+def _remote_job_running(job_id: str) -> bool:
+    """True when the remote server still reports this job as running."""
+    try:
+        base_url = _mq_remote_url()
+        req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read()).get("status") == "running"
+    except Exception:
+        # Cannot tell. Treated as NOT running so an unreachable server cannot permanently block
+        # resubmission — the far side's record_job is the backstop against actually orphaning one.
+        return False
+
+
 #: Files a kit must contain for run_all.sh to get as far as the search. Their absence was previously
 #: discovered inside the container, minutes and dollars after the upload.
-_REQUIRED_KIT_FILES = ("run_all.sh", "preflight.sh", "download_raw.sh", "mqpar.xml")
+_REQUIRED_KIT_FILES = (
+    "run_all.sh",
+    "preflight.sh",
+    "download_raw.sh",
+    "mqpar.xml",
+    # Without this the far side keys the job registry by accession alone, and a second run selection
+    # of the same dataset silently displaces the first job's entry.
+    SELECTION_KEY_FILE,
+)
 
 
 def remote_submission_problems(accession: str, runs: str, kit_bytes: bytes) -> list[str]:
@@ -2689,6 +2763,34 @@ def remote_submission_problems(accession: str, runs: str, kit_bytes: bytes) -> l
 def pipeline_remote_start(accession: str, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
+    key = _remote_job_key(accession, runs)
+
+    # Idempotent submit. A second click, a second tab, or a reload against a job the card lost track
+    # of used to spawn another 16 CPU / 64 GB container and overwrite the registry entry — orphaning
+    # the first job, which kept billing while being invisible to /jobs, the documented kill path.
+    # Returning the job already in flight makes POSTing twice indistinguishable from POSTing once.
+    existing = _active_remote_jobs.get(key)
+    if existing == _SUBMIT_PENDING:
+        raise HTTPException(409, "a submission for this selection is already in progress")
+    if not existing:
+        existing = _remote_job_from_registry(key)
+    if existing and _remote_job_running(existing):
+        logger.info("pipeline_remote_start  reattaching to running job %s for %s", existing, key)
+        _active_remote_jobs[key] = existing
+        return {"job_id": existing, "reattached": True}
+
+    # Claim the slot BEFORE the slow part. Submitting takes up to 60 s and may wake a container
+    # first; without this marker two concurrent requests both read "nothing running" and both spawn.
+    _active_remote_jobs[key] = _SUBMIT_PENDING
+    try:
+        return _submit_remote_job(accession, runs, key, base_url)
+    except Exception:
+        _active_remote_jobs.pop(key, None)  # a failed submission must not block the next attempt
+        raise
+
+
+def _submit_remote_job(accession: str, runs: str, key: str, base_url: str) -> dict:
+    """Build the kit, check it can succeed, and hand it to the remote server."""
     # api_base is intentionally empty: Modal downloads raw files directly from PRIDE,
     # not from the local API server which it cannot reach.
     kit_bytes, _ = search_kit(accession, "", "", runs=parse_runs(runs))
@@ -2723,8 +2825,8 @@ def pipeline_remote_start(accession: str, runs: str = ""):
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
-        logger.info("pipeline_remote_start  job_id=%s", result.get("job_id"))
-        _active_remote_jobs[accession] = result["job_id"]
+        logger.info("pipeline_remote_start  job_id=%s  key=%s", result.get("job_id"), key)
+        _active_remote_jobs[key] = result["job_id"]  # replaces the pending marker
         return result
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
@@ -2810,7 +2912,12 @@ def pipeline_remote_results(accession: str, job_id: str):
 @router.delete("/dataset/{accession}/pipeline/remote/{job_id}")
 def pipeline_remote_delete(accession: str, job_id: str):
     """Clean up a finished job's temp directory on the remote server."""
-    _active_remote_jobs.pop(accession, None)
+    # Forget THIS job, by id. Popping by accession dropped whichever entry that dataset happened to
+    # hold, so stopping one selection's job also forgot another's — and now that keys carry the run
+    # selection, an accession would not match any entry at all.
+    for k, v in list(_active_remote_jobs.items()):
+        if v == job_id:
+            _active_remote_jobs.pop(k, None)
     base_url = _mq_remote_url()
     req = urllib.request.Request(f"{base_url}/job/{job_id}", headers=_mq_auth_headers(), method="DELETE")
     try:

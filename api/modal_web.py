@@ -50,6 +50,8 @@ class Backend(Protocol):
 
     def spawn_job(self, kit_bytes: bytes, accession: str) -> str: ...
     def accession_from_kit(self, kit_bytes: bytes) -> str: ...
+
+    def job_key_from_kit(self, kit_bytes: bytes, accession: str) -> str: ...
     def record_job(self, accession: str, job_id: str) -> None: ...
     def job_status(self, job_id: str) -> str: ...
     def job_log(self, job_id: str) -> str: ...
@@ -90,8 +92,12 @@ def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = 
         kit_bytes = await kit_file.read()  # type: ignore[union-attr]
 
         accession = backend.accession_from_kit(kit_bytes)
+        # The registry is keyed by dataset AND run selection. Keying by accession alone let a second
+        # selection of the same dataset replace the first's entry, hiding a running job from /jobs.
+        # The key is carried in the kit because `runs` never reaches this side.
+        key = backend.job_key_from_kit(kit_bytes, accession)
         job_id = backend.spawn_job(kit_bytes, accession)
-        backend.record_job(accession, job_id)
+        backend.record_job(key, job_id)
         return {"job_id": job_id}
 
     @api.get("/status/{job_id}")
