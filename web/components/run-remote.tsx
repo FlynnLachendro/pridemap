@@ -13,6 +13,13 @@ type RemoteJob = {
   failure?: "network" | "server";
 };
 
+/** A polling failure that remembers WHICH layer failed, so the UI never guesses. */
+class PollError extends Error {
+  constructor(message: string, readonly failure: "network" | "server") {
+    super(message);
+  }
+}
+
 /** A one-line description of an error response, unwrapping the API's relayed upstream detail. */
 async function describeHttpError(r: Response): Promise<string> {
   const text = await r.text();
@@ -50,8 +57,15 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   }, [accession]);
 
   const poll = useCallback(async (id: string) => {
-    const r = await fetch(`${API}/dataset/${accession}/pipeline/remote/${id}/status`);
-    if (!r.ok) throw new Error(await r.text());
+    let r: Response;
+    try {
+      r = await fetch(`${API}/dataset/${accession}/pipeline/remote/${id}/status`);
+    } catch (e) {
+      // Transport failure: API down, or NEXT_PUBLIC_API_URL baked at build time now points at a
+      // dead port. Naming the URL matters — the port moves whenever dev.sh restarts.
+      throw new PollError(`lost contact with the API at ${API} — ${String(e)}`, "network");
+    }
+    if (!r.ok) throw new PollError(await describeHttpError(r), "server");
     return r.json() as Promise<{ status: string; log: string }>;
   }, [accession]);
 
@@ -71,7 +85,12 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         } else {
           setJob((j) => ({ ...j, log: s.log }));
         }
-      } catch (e) { if (live) setJob((j) => ({ ...j, status: "error", err: String(e) })); }
+      } catch (e) {
+        if (!live) return;
+        const failure = e instanceof PollError ? e.failure : "network";
+        const err = e instanceof PollError ? e.message : String(e);
+        setJob((j) => ({ ...j, status: "error", err, failure }));
+      }
     };
     const id = window.setInterval(tick, 3000);
     tick();
@@ -135,6 +154,17 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   // Mirror the local RunHere pipeline stages; map coarse remote job status onto them.
   // Always rendered (idle = all pending) so the user sees what will run before clicking.
   const st = job.status;
+  // A failed poll says NOTHING about the remote stages: the job keeps running on Modal whether or
+  // not this page can reach the API. Painting them ✗ claimed the search had failed when contact was
+  // merely lost — a lie that cost two debugging sessions, both times with a healthy job downloading
+  // raw files. Unknown is shown as pending, and the banner below names what actually broke.
+  const contactLost = st === "error" && job.failure === "network";
+  // One state for every stage that runs remotely, so they cannot disagree about the same job.
+  const remoteState: StageState = st === "submitting" ? "pending"
+    : st === "running" ? "running"
+    : st === "done" ? "done"
+    : contactLost ? "pending"
+    : st === "error" && job.job_id ? "failed" : "pending";
   const stages: { label: string; state: StageState }[] = [
     {
       label: "Check tools and disk space",
@@ -142,27 +172,9 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         : st === "error" && !job.job_id ? "failed"
         : active ? "done" : "pending",
     },
-    {
-      label: "Download raw files from PRIDE",
-      state: st === "submitting" ? "pending"
-        : st === "running" ? "running"
-        : st === "done" ? "done"
-        : st === "error" && job.job_id ? "failed" : "pending",
-    },
-    {
-      label: "Fetch the protein database",
-      state: st === "submitting" ? "pending"
-        : st === "running" ? "running"
-        : st === "done" ? "done"
-        : st === "error" && job.job_id ? "failed" : "pending",
-    },
-    {
-      label: runsLabel,
-      state: st === "submitting" ? "pending"
-        : st === "running" ? "running"
-        : st === "done" ? "done"
-        : st === "error" && job.job_id ? "failed" : "pending",
-    },
+    { label: "Download raw files from PRIDE", state: remoteState },
+    { label: "Fetch the protein database", state: remoteState },
+    { label: runsLabel, state: remoteState },
     {
       label: "Hand the tables back to PRIDE Map",
       state: st === "done" ? "done" : "pending",
@@ -186,7 +198,9 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         )}
         {job.status === "running" && <span className="pill">running…</span>}
         {job.status === "done" && <span className="pill bg-ok-soft text-ok">finished</span>}
-        {job.status === "error" && <span className="pill text-warn">stopped</span>}
+        {job.status === "error" && (
+          <span className="pill text-warn">{contactLost ? "lost contact" : "stopped"}</span>
+        )}
         {job.status === "running" && (
           <button type="button" className="btn btn-sm btn-warn ml-auto" disabled={stopping} onClick={stop}>
             {stopping ? "Stopping…" : "Stop"}
@@ -247,6 +261,15 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
                 runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
                 job.job_id ? `Job ID  : ${job.job_id}` : "",
                 "",
+                ...(contactLost
+                  ? [
+                      "This page can no longer reach the API — the job itself is unaffected and is",
+                      "most likely still running on Modal. The stages above are unknown, not failed.",
+                      `Check the API is up and that the UI points at it (currently ${API});`,
+                      "restarting the API on a new port leaves this page calling the old one.",
+                      "",
+                    ]
+                  : []),
                 job.log ? job.log.split("\n").slice(-10).join("\n") : "Waiting for output…",
                 job.status === "error" && job.err ? `\nError   : ${job.err}` : "",
               ].filter(Boolean).join("\n")}
