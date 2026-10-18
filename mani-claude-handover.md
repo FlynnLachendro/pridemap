@@ -177,7 +177,7 @@ Likely judge questions: *How accurate are the tags?* (benchmark + evidence quote
 
 ## 11. Team
 
-Flynn Lachendro (built it; reachable by Mani directly), Charlotte Ellison (problem owner, protein ID / Mascot, writes the problem line), Juri Westendorf, Ahmed Dawoud (Southampton bioinformatics), Odetta Antico (Dundee, downstream analysis; her scripts in `analysis/`). Hackathon: *Reinvent the Wheel: a tools‑for‑science hack*, Science Works / Inherent Labs, Pillar VC, King's Cross.
+Flynn Lachendro (built it; reachable by Mani directly), Charlotte Ellison (problem owner, protein ID / Mascot, writes the problem line), Juri Westendorf, Ahmed Dawoud (Southampton bioinformatics), Odetta Antico (Dundee, downstream analysis; her scripts in `analysis/`), Mani Sarkar (final build push, feature work and submission). Hackathon: *Reinvent the Wheel: a tools‑for‑science hack*, Science Works / Inherent Labs, Pillar VC, King's Cross.
 
 ## 12. How to verify you haven't broken anything
 

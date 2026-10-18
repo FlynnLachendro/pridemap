@@ -1,7 +1,7 @@
 # PRIDE Map — build spec
 
 Hackathon: Reinvent the Wheel (Science Works / Inherent), 16–18 Oct 2026.
-Team: Flynn Lachendro (build), Charlotte Ellison, Juri Westendorf, Ahmed Dawoud (Southampton bioinformatics).
+Team: Flynn Lachendro (build), Charlotte Ellison, Juri Westendorf, Ahmed Dawoud (Southampton bioinformatics), Mani Sarkar.
 Submission: public GitHub repo + commit hash by Sun 10:00. MIT licence. No pre-hackathon commits.
 Pitch: 3 min problem + demo, 2 min judge Q. Judged on Impact / Technical execution / Presentation (10 each).
 

@@ -7,16 +7,20 @@ import concurrent.futures as cf
 import datetime as dt
 import io
 import json
+import logging
 import os
 import pathlib
 import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
@@ -887,7 +891,7 @@ MAXQUANT_IMAGE = "quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1"
 MAXQUANT_IMAGE_VERSION = "2.0.3.0"
 # Our own native-architecture rebuild of the same MaxQuant release, built on the host that needs it.
 MAXQUANT_NATIVE_IMAGE = f"pridemap/maxquant:{MAXQUANT_IMAGE_VERSION}-native"
-MAXQUANT_MONO_BASE = "mono:6.12"  # multi-arch: amd64, arm64/v8, armv7, ppc64le
+MAXQUANT_RUNTIME_BASE = "mcr.microsoft.com/dotnet/sdk:3.1-bullseye"  # SDK/bullseye: (1) DotNetCore31Installed() needs a "3.1" SDK line in `dotnet --info`; runtime-only has none; dotnet resolves its own host path so a wrapper is never called. (2) ThermoRawFileReader fails on symlinks (IsError=True); only resolves real paths.
 DOCKER_MOUNT = "/data"
 
 MQ_INSTRUMENT = {"orbitrap": 0, "timstof": 1, "qtof": 2, "fticr": 0, "ion_trap": 0}
@@ -1073,6 +1077,9 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         "   <includeContaminants>True</includeContaminants>",
         f"   <maxQuantVersion>{MQ_VERSION}</maxQuantVersion>",
         "   <numThreads>8</numThreads>",
+        # Required for dotnet runtime images: prevents MaxQuant from using the non-DotNetCore path
+        # which wraps the subprocess path in literal " chars (Windows compat) causing ENOENT on Linux.
+        "   <useDotNetCore>True</useDotNetCore>",
         _xml_list("filePaths", paths),
         _xml_list("experiments", exps),
         _xml_list("fractions", ["32767"] * len(paths), "short"),
@@ -1108,7 +1115,10 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         "   <restrictProteinQuantification>True</restrictProteinQuantification>",
         _xml_list("restrictMods", RESTRICT_MODS),
         _xml_list("massDifferenceMods", []),
-        _xml_list("referenceChannel", []),
+        # referenceChannel is deliberately NOT emitted. Absent, MaxQuant's ReferenceChannels getter yields
+        # one entry per parameter group; present-but-empty makes that same getter throw
+        # IndexOutOfRangeException while the modificationSpecificPeptides table is written — job 48 of 49,
+        # after everything expensive has succeeded. Another case where empty and absent differ.
         "   <peptideFdr>0.01</peptideFdr>",
         "   <proteinFdr>0.01</proteinFdr>",
         "   <minPepLen>7</minPepLen>",
@@ -1292,15 +1302,19 @@ def _mq_docker_lib(plan: dict) -> list[str]:
         '  docker rm -f "$cid" >/dev/null 2>&1 || true',
         '  [ "$rc" = "0" ] || { rm -rf "$d"; return 1; }',
         "  cat > \"$d/Dockerfile\" <<'MQDOCKERFILE'",
-        f"FROM {MAXQUANT_MONO_BASE}",
+        f"FROM --platform=linux/amd64 {MAXQUANT_RUNTIME_BASE}",
         "COPY bin/ /opt/maxquant/",
-        "RUN printf '#!/bin/bash\\nexec mono /opt/maxquant/MaxQuantCmd.exe \"$@\"\\n' \\",
+        # SDK image satisfies DotNetCore31Installed() natively: `dotnet --info` includes "3.1.x [/path/sdk]"
+        # lines that start with "3.1" after trim.  useDotNetCore=True in mqpar.xml ensures MaxQuant uses
+        # FileName="dotnet" (not the Windows-compat quoted path that causes ENOENT on Linux).
+        "RUN rm -f /opt/maxquant/global.json \\",
+        " && printf '#!/bin/sh\\nexec dotnet /opt/maxquant/MaxQuantCmd.exe \"$@\"\\n' \\",
         "      > /usr/local/bin/maxquant \\",
         " && chmod +x /usr/local/bin/maxquant",
         f"WORKDIR {DOCKER_MOUNT}",
         "ENTRYPOINT []",
         "MQDOCKERFILE",
-        '  docker build -q -t "$MQ_IMAGE_NATIVE" "$d" >/dev/null 2>&1; rc=$?',
+        '  docker build --platform linux/amd64 -q -t "$MQ_IMAGE_NATIVE" "$d" >/dev/null 2>&1; rc=$?',
         '  rm -rf "$d"',
         '  return $rc',
         "}",
@@ -1393,16 +1407,37 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
     if "maxquant" in engines:
         out += _mq_docker_lib(plan)
         out += [
-            "# ---- MaxQuant. Native install, or the container, which we can provision and verify.",
+            # On non-amd64 hosts (arm64 macOS Apple Silicon, Linux Graviton/RPi, etc.) Docker must be able to
+            # run linux/amd64 containers for the MaxQuant build step. Docker Desktop on macOS provides this via
+            # Rosetta automatically; other runtimes (Colima, Rancher, OrbStack, bare Linux Docker) need QEMU
+            # binfmt registered. We probe first and auto-install on Linux; on macOS we point to the setting.
+            '# ---- QEMU amd64 emulation (needed on non-x86 hosts to build/run the MaxQuant container)',
+            'if [ "${HAVE_DOCKER:-0}" = "1" ] && [ "$MQ_NEED_NATIVE" = "1" ]; then',
+            '  if docker run --rm --platform linux/amd64 --entrypoint uname busybox -m >/dev/null 2>&1; then',
+            '    ok "QEMU amd64 emulation available (Docker can run --platform linux/amd64)"',
+            "  else",
+            '    _os="$(uname -s)"',
+            '    if [ "$_os" = "Linux" ]; then',
+            '      warn "QEMU amd64 emulation missing — installing via tonistiigi/binfmt (needs --privileged)…"',
+            '      if docker run --privileged --rm tonistiigi/binfmt --install amd64 >/dev/null 2>&1 \\',
+            '           && docker run --rm --platform linux/amd64 --entrypoint uname busybox -m >/dev/null 2>&1; then',
+            '        ok "QEMU amd64 emulation installed"',
+            "      else",
+            '        bad "QEMU amd64 emulation still unavailable. Run manually: docker run --privileged --rm tonistiigi/binfmt --install all"',
+            "      fi",
+            '    elif [ "$_os" = "Darwin" ]; then',
+            '      bad "Docker cannot run linux/amd64 on this $MQ_ARCH Mac. Enable Rosetta emulation: Docker Desktop → Settings → General → \'Use Rosetta for x86/amd64 emulation\' → Apply & Restart"',
+            "    else",
+            '      bad "Docker cannot run linux/amd64 containers on this $MQ_ARCH host. Install QEMU binfmt support."',
+            "    fi",
+            "  fi",
+            "fi",
+            "",
+            "# ---- MaxQuant. Docker container is preferred (consistent, pre-configured); native install is the",
+            "# fallback. Checked in that order so Docker users never need to install MaxQuant locally.",
             "MQ_RUNNER=none",
             "NEED_MQ_PULL=0",
-            'if [ -n "${MAXQUANT_CMD:-}" ] && command -v "$MAXQUANT_CMD" >/dev/null 2>&1; then',
-            '  MQ_RUNNER=native; ok "MaxQuant via \\$MAXQUANT_CMD"',
-            'elif command -v MaxQuantCmd.exe >/dev/null 2>&1; then',
-            '  MQ_RUNNER=native; ok "MaxQuantCmd.exe"',
-            'elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
-            '  MQ_RUNNER=mono; ok "MaxQuant via mono (\\$MAXQUANT_DIR)"',
-            'elif [ "${HAVE_DOCKER:-0}" = "1" ]; then',
+            'if [ "${HAVE_DOCKER:-0}" = "1" ]; then',
             "  MQ_RUNNER=docker",
             '  if ! docker image inspect "$MQ_IMAGE" >/dev/null 2>&1; then',
             "    NEED_MQ_PULL=1",
@@ -1429,9 +1464,15 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
             'Rosetta in Docker Desktop (Settings > General) and re-run, or run this kit on an x86_64 machine."',
             "    fi",
             "  fi",
+            'elif [ -n "${MAXQUANT_CMD:-}" ] && command -v "$MAXQUANT_CMD" >/dev/null 2>&1; then',
+            '  MQ_RUNNER=native; ok "MaxQuant via \\$MAXQUANT_CMD"',
+            'elif command -v MaxQuantCmd.exe >/dev/null 2>&1; then',
+            '  MQ_RUNNER=native; ok "MaxQuantCmd.exe"',
+            'elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
+            '  MQ_RUNNER=mono; ok "MaxQuant via mono (\\$MAXQUANT_DIR)"',
             "else",
-            '  bad "MaxQuant not found, and docker is not running. Either start Docker (the container is fetched '
-            'for you), or install MaxQuant from https://maxquant.org/download_asset/maxquant/latest and set '
+            '  bad "MaxQuant not found. Start Docker (the container is fetched automatically) or install '
+            'MaxQuant from https://maxquant.org/download_asset/maxquant/latest and set '
             'MAXQUANT_CMD=/path/to/MaxQuantCmd.exe."',
             "fi",
             'echo "$MQ_RUNNER" > .pipeline_mq_runner 2>/dev/null || true',
@@ -1651,6 +1692,9 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         "# Needs: curl, and whichever of msconvert / MaxQuant / DIA-NN the stages below use.",
         "set -euo pipefail",
         'cd "$(dirname "$0")"',
+        # Clean up the PID file on any exit so a later resume attempt is never blocked by a stale PID
+        # that the OS has recycled for an unrelated process.
+        "trap 'rm -f .pipeline/run.pid' EXIT",
         "",
         # Every stage except the final 'analyse', which is yours to make in the browser.
         f"TOTAL_STAGES={max(1, total - 1)}",
@@ -1675,21 +1719,24 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         "# ---------------------------------------------------------------- 0. preflight",
         '# Fails here, in seconds, rather than after the download. Nothing is fetched until this passes.',
         'if stage preflight "Check tools and disk space"; then',
-        '  bash preflight.sh || fail "preflight failed — nothing was downloaded"',
+        '  bash preflight.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
+        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "preflight failed — nothing was downloaded"',
         "  stage_done",
         "fi",
         "",
         "# ---------------------------------------------------------------- 1. raw files",
         'if stage download "Download raw files from PRIDE"; then',
         '  step "fetching into raw/ — this is the slow one, expect tens of GB"',
-        '  bash download_raw.sh || fail "raw download failed (re-run to resume; curl -C - continues part files)"',
+        '  bash download_raw.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
+        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "raw download failed (re-run to resume; curl -C - continues part files)"',
         '  step "$(find raw -type f | wc -l | tr -d " ") files in raw/"',
         "  stage_done",
         "fi",
         "",
         "# ---------------------------------------------------------------- 2. protein database",
         'if stage fasta "Fetch the protein database"; then',
-        f'  bash download_fasta.sh || fail "FASTA download failed"',
+        '  bash download_fasta.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
+        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "FASTA download failed"',
         f'  [ -s "{fasta_path}" ] || fail "{fasta_path} is missing or empty"',
         f'  step "$(grep -c \'^>\' "{fasta_path}" || echo 0) sequences in {fasta_path}"',
         "  stage_done",
@@ -1701,7 +1748,8 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
             "# ---------------------------------------------------------------- 3. vendor format -> mzML",
             f'if stage convert "Convert {plan["vendor_label"]} to mzML"; then',
             '  command -v msconvert >/dev/null 2>&1 || fail "msconvert not on PATH — see convert_to_mzml.sh for the Docker alternative"',
-            '  bash convert_to_mzml.sh || fail "msconvert failed"',
+            '  bash convert_to_mzml.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
+            '  [ "${PIPESTATUS[0]}" = "0" ] || fail "msconvert failed"',
             '  step "$(find mzml -name \'*.mzML\' | wc -l | tr -d \' \') mzML files written"',
             "  stage_done",
             "fi",
@@ -1732,8 +1780,29 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 '  elif command -v docker >/dev/null 2>&1; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#{DOCKER_MOUNT}#g" {tr["config"]} > {_docker_config(tr["config"])}',
                 f'    step "running MaxQuant in $MQ_IMAGE; paths resolved against {DOCKER_MOUNT}"',
-                f'    docker run --rm $MQ_RUN_OPTS -v "$PWD":{DOCKER_MOUNT} -w {DOCKER_MOUNT} \\',
-                f'      "$MQ_IMAGE" maxquant {DOCKER_MOUNT}/{_docker_config(tr["config"])} \\',
+                # raw/*.raw entries may be symlinks to a shared cache outside $PWD (e.g. /var/folders/…).
+                # ThermoRawFileReader.RawFileAccessBase fails with IsError=True when given a symlink path
+                # even when the link target is mounted. Replace each symlink path in the docker mqpar with
+                # the real path BEFORE running MaxQuant so the reader receives a non-symlink path.
+                # Also add each symlink target's parent directory as a bind-mount at the same path.
+                # Use readlink (not realpath): on macOS realpath canonicalises /var→/private/var but the
+                # symlink target keeps /var/…, leaving it dangling inside the container.
+                '    MQ_SYMLINK_MOUNTS=""',
+                '    for _f in raw/*.raw raw/*.RAW; do',
+                '      [ -L "$_f" ] || continue',
+                '      _link=$(readlink "$_f" 2>/dev/null) || continue',
+                '      _dir=$(dirname "$_link")',
+                '      _base=$(basename "$_f")',
+                # Replace /data/raw/<base> → real path in docker mqpar so Thermo reader gets a real path.
+                f'      _tmp=$(mktemp) && sed "s#{DOCKER_MOUNT}/raw/$_base#$_link#g" {_docker_config(tr["config"])} > "$_tmp" && mv "$_tmp" {_docker_config(tr["config"])}',
+                '      case "$MQ_SYMLINK_MOUNTS" in *"-v $_dir:$_dir"*) ;; *)',
+                '        MQ_SYMLINK_MOUNTS="$MQ_SYMLINK_MOUNTS -v $_dir:$_dir" ;; esac',
+                '    done',
+                # The biocontainers maxquant wrapper ignores the passed config path and always reads
+                # mqpar.xml from the working directory. Override it with a second bind mount so that
+                # both the explicit argument and the default cwd lookup hit the substituted config.
+                f'    docker run --rm $MQ_RUN_OPTS $MQ_SYMLINK_MOUNTS -v "$PWD":{DOCKER_MOUNT} -v "$PWD/{_docker_config(tr["config"])}":{DOCKER_MOUNT}/{tr["config"]} -w {DOCKER_MOUNT} \\',
+                f'      "$MQ_IMAGE" maxquant {DOCKER_MOUNT}/{tr["config"]} \\',
                 '      || fail "MaxQuant (docker) failed — see combined/proc/ for the step it stopped on"',
                 "  else",
                 '    fail "MaxQuant not found — preflight.sh explains the options (MAXQUANT_CMD / MAXQUANT_DIR / docker)"',
@@ -1752,7 +1821,8 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
                 '  [ -n "$DIANN" ] || fail "DIA-NN not found — set DIANN_CMD, see preflight.sh"',
                 '  step "library-free: DIA-NN predicts a spectral library from the FASTA first"',
-                f'  bash run_diann_{kind}.sh || fail "DIA-NN failed"',
+                f'  bash run_diann_{kind}.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
+                f'  [ "${{PIPESTATUS[0]}}" = "0" ] || fail "DIA-NN failed"',
                 f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
                 f'  step "$(($(wc -l < "{tr["output_table"]}") - 1)) protein groups in {tr["output_table"]}"',
                 "  stage_done",
@@ -2030,8 +2100,14 @@ def _pid_alive(pid: int) -> bool:
     except (ProcessLookupError, ValueError):
         return False
     except PermissionError:
+        pass  # process exists; fall through to zombie check
+    # os.kill(0) succeeds for zombie processes too — check the actual state.
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+        stat = result.stdout.strip()
+        return bool(stat) and not stat.startswith("Z")
+    except Exception:
         return True
-    return True
 
 
 @router.post("/dataset/{accession}/pipeline/start")
@@ -2049,14 +2125,24 @@ def pipeline_start(accession: str, request: Request, web: str = "", runs: str = 
     state = d / ".pipeline" / "run.pid"
     if state.exists():
         try:
-            if _pid_alive(int(state.read_text().strip())):
+            pid = int(state.read_text().strip())
+            # If events already recorded a failure or completion, our pipeline has exited even if the OS
+            # recycled the PID for an unrelated process — trust the events over _pid_alive in that case.
+            events = _read_progress(d)
+            pipeline_done = any(e.get("event") in ("stage_failed", "run_finished") for e in events)
+            if not pipeline_done and _pid_alive(pid):
                 raise HTTPException(409, "a run is already in progress for this dataset")
+            # Stale or finished PID — remove so the next run can write a fresh one.
+            state.unlink(missing_ok=True)
         except ValueError:
-            pass
+            state.unlink(missing_ok=True)
     d = _write_kit(accession, _api_base(request), _safe_origin(web), runs=sel)
     if not (d / "run_all.sh").exists():
         raise HTTPException(400, "this dataset has no runnable pipeline (nothing for an engine to do)")
     (d / ".pipeline").mkdir(exist_ok=True)
+    # Clear stale logs from prior runs so the UI starts fresh.
+    (d / "progress.jsonl").unlink(missing_ok=True)
+    (d / "run.log").unlink(missing_ok=True)
     log = open(d / "run.log", "ab", buffering=0)
     proc = subprocess.Popen(["bash", "run_all.sh"], cwd=d, stdout=log, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, start_new_session=True)
@@ -2073,7 +2159,11 @@ def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str 
     sel = parse_runs(runs)
     d = run_dir(accession, sel)
     plan = dataset_search_plan(accession, sel)
-    events = _read_progress(d)
+    all_events = _read_progress(d)
+    # Only consider events from the last run_started so stale failures from a prior run
+    # don't bleed into the current run's status.
+    last_run_idx = max((i for i, e in enumerate(all_events) if e.get("event") == "run_started"), default=-1)
+    events = all_events[last_run_idx:] if last_run_idx >= 0 else all_events
     by_stage: dict[str, dict] = {}
     for e in events:
         sid = e.get("stage") or ""
@@ -2183,12 +2273,6 @@ def corrections_stats():
             "applied": con.execute("SELECT count(*) FROM tags WHERE model LIKE '%(corrected)'").fetchone()[0]}
 
 
-@router.get("/remote-mq")
-def remote_mq_info():
-    """Tells the UI whether a remote MaxQuant server is configured (MQ_SERVER_URL in .env)."""
-    return {"available": bool(os.environ.get("MQ_SERVER_URL", "").strip())}
-
-
 # ----------------------------------------------------------------------------- remote MaxQuant server (Devin/cloud)
 # Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to a remote Linux machine running the Devin-provisioned
 # mq_server. Temporary: tear down by unsetting MQ_SERVER_URL.
@@ -2207,6 +2291,78 @@ def _mq_remote_url() -> str:
 def _mq_auth_headers() -> dict:
     token = os.environ.get("MQ_TOKEN", "")
     return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _mq_health_check(base_url: str) -> dict:
+    """Probe GET {base_url}/health. Returns {ok, status_code, detail}. Always logs."""
+    url = f"{base_url}/health"
+    logger.info("remote MQ health check → %s", url)
+    try:
+        req = urllib.request.Request(url, headers=_mq_auth_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode(errors="replace")
+            logger.info("remote MQ health check ✓  %s  body=%r", url, body[:120])
+            return {"ok": True, "status_code": resp.status, "detail": body}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        logger.warning("remote MQ health check ✗  %s  HTTP %s  %r", url, e.code, detail[:120])
+        return {"ok": False, "status_code": e.code, "detail": detail}
+    except Exception as e:
+        logger.warning("remote MQ health check ✗  %s  %s", url, e)
+        return {"ok": False, "status_code": None, "detail": str(e)}
+
+
+@router.get("/remote-mq")
+def remote_mq_info():
+    """Tells the UI whether a remote MaxQuant server is reachable (MQ_SERVER_URL in .env + /health probe)."""
+    url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
+    if not url:
+        return {"available": False, "detail": "MQ_SERVER_URL not set"}
+    health = _mq_health_check(url)
+    return {"available": health["ok"], "detail": health["detail"]}
+
+
+@router.get("/local-mq")
+def local_mq_info():
+    """Health checks for MaxQuant on the local machine: Docker image presence and native binary."""
+    import shutil
+
+    # ---- Docker daemon + MaxQuant image ----
+    docker_result: dict = {"available": False, "image": None, "detail": ""}
+    if shutil.which("docker"):
+        daemon = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
+                                capture_output=True, text=True, timeout=5)
+        if daemon.returncode == 0:
+            # Prefer native-arch rebuild; fall back to amd64 image.
+            for img in (MAXQUANT_NATIVE_IMAGE, MAXQUANT_IMAGE):
+                probe = subprocess.run(["docker", "images", "-q", img],
+                                       capture_output=True, text=True, timeout=5)
+                if probe.stdout.strip():
+                    docker_result = {"available": True, "image": img,
+                                     "detail": f"image present (Docker {daemon.stdout.strip()})"}
+                    break
+            else:
+                docker_result = {"available": False, "image": None,
+                                 "detail": f"Docker running but neither MaxQuant image is pulled"}
+        else:
+            docker_result = {"available": False, "image": None,
+                             "detail": "Docker installed but daemon not running"}
+    else:
+        docker_result = {"available": False, "image": None, "detail": "docker not found in PATH"}
+
+    # ---- Native MaxQuant binary ----
+    native_result: dict = {"available": False, "version": None, "detail": ""}
+    for binary in ("MaxQuantCmd.exe", "MaxQuantCmd", "maxquant"):
+        path = shutil.which(binary)
+        if path:
+            ver_run = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+            version = (ver_run.stdout + ver_run.stderr).strip().split("\n")[0] if ver_run.returncode == 0 else None
+            native_result = {"available": True, "version": version, "detail": f"found at {path}"}
+            break
+    else:
+        native_result = {"available": False, "version": None, "detail": "MaxQuant binary not found in PATH"}
+
+    return {"docker": docker_result, "native": native_result}
 
 
 @router.get("/dataset/{accession}/pipeline/remote/active")
@@ -2231,7 +2387,13 @@ def pipeline_remote_active(accession: str):
 def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
+    # Health-gate: fail fast with a clear message before building/uploading the kit.
+    health = _mq_health_check(base_url)
+    if not health["ok"]:
+        raise HTTPException(502, f"remote MQ server health check failed: {health['detail']}")
     kit_bytes, _ = search_kit(accession, _api_base(request), "", runs=parse_runs(runs))
+    kit_kb = len(kit_bytes) / 1024
+    logger.info("pipeline_remote_start  accession=%s  kit=%.1f KB  url=%s/run", accession, kit_kb, base_url)
     boundary = "PrideMapBoundary"
     body = (
         f"--{boundary}\r\n"
@@ -2244,13 +2406,20 @@ def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
+        logger.info("pipeline_remote_start  job_id=%s", result.get("job_id"))
         _active_remote_jobs[accession] = result["job_id"]
         return result
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        body_text = e.read().decode(errors="replace")
+        logger.error("pipeline_remote_start  HTTP %s from %s/run: %r", e.code, base_url, body_text[:300])
+        raise HTTPException(e.code, body_text)
+    except TimeoutError as e:
+        logger.error("pipeline_remote_start  timeout after 60 s calling %s/run: %s", base_url, e)
+        raise HTTPException(504, f"remote MQ server timed out (60 s): {e}")
     except Exception as e:
+        logger.error("pipeline_remote_start  unexpected error calling %s/run: %s", base_url, e)
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
@@ -2258,13 +2427,23 @@ def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
 def pipeline_remote_status(accession: str, job_id: str):
     """Poll job status from the remote server. Returns {status, log}."""
     base_url = _mq_remote_url()
-    req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
+    url = f"{base_url}/status/{job_id}"
+    logger.debug("pipeline_remote_status  job_id=%s → %s", job_id, url)
+    req = urllib.request.Request(url, headers=_mq_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read())
+            data = json.loads(resp.read())
+        logger.debug("pipeline_remote_status  job_id=%s  status=%s", job_id, data.get("status"))
+        return data
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        body_text = e.read().decode(errors="replace")
+        logger.error("pipeline_remote_status  HTTP %s from %s: %r", e.code, url, body_text[:300])
+        raise HTTPException(e.code, body_text)
+    except TimeoutError as e:
+        logger.error("pipeline_remote_status  timeout after 15 s calling %s: %s", url, e)
+        raise HTTPException(504, f"remote MQ server timed out polling status (15 s): {e}")
     except Exception as e:
+        logger.error("pipeline_remote_status  unexpected error calling %s: %s", url, e)
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
@@ -2272,15 +2451,24 @@ def pipeline_remote_status(accession: str, job_id: str):
 def pipeline_remote_results(accession: str, job_id: str):
     """Download proteinGroups.txt from a completed remote job."""
     base_url = _mq_remote_url()
-    req = urllib.request.Request(f"{base_url}/results/{job_id}", headers=_mq_auth_headers())
+    url = f"{base_url}/results/{job_id}"
+    logger.info("pipeline_remote_results  job_id=%s → %s", job_id, url)
+    req = urllib.request.Request(url, headers=_mq_auth_headers())
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             data = resp.read()
+        logger.info("pipeline_remote_results  job_id=%s  bytes=%d", job_id, len(data))
         return Response(content=data, media_type="text/tab-separated-values",
                         headers={"Content-Disposition": f'attachment; filename="{accession}_proteinGroups.txt"'})
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        body_text = e.read().decode(errors="replace")
+        logger.error("pipeline_remote_results  HTTP %s from %s: %r", e.code, url, body_text[:300])
+        raise HTTPException(e.code, body_text)
+    except TimeoutError as e:
+        logger.error("pipeline_remote_results  timeout after 120 s calling %s: %s", url, e)
+        raise HTTPException(504, f"remote MQ server timed out fetching results (120 s): {e}")
     except Exception as e:
+        logger.error("pipeline_remote_results  unexpected error calling %s: %s", url, e)
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
