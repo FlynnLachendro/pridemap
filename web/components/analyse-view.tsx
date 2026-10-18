@@ -258,7 +258,7 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
   }, [poll, running]);
 
   const stages: RunStage[] = status?.stages ?? [];
-  const timing = useStageTiming(stages, running, status?.exists ?? true);
+  const timing = useStageTiming(stages, running);
 
   // When the run hands a table back, open it: the point of the whole exercise is the table, not the run.
   useEffect(() => {

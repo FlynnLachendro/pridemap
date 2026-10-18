@@ -1,6 +1,14 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API } from "@/lib/api";
+import {
+  PipelineStages,
+  StagePill,
+  fmtSecs,
+  useStageTiming,
+  type RunStage,
+  type StageState,
+} from "@/components/pipeline-stages";
 
 // `failure` separates "the API never answered" from "the API answered with an error". Conflating
 // them told the user to restart a local server that was running fine, while the real fault was a
@@ -11,7 +19,15 @@ type RemoteJob = {
   log: string;
   err: string | null;
   failure?: "network" | "server";
+  // Stage-level progress relayed from the remote run's own progress.jsonl. `stage_progress` says
+  // whether the remote server reported any at all: a server deployed before stage shipping existed
+  // sends none, and "we cannot see the stages" must not be drawn as "no stage has started".
+  stages?: RunStage[];
+  stage_progress?: boolean;
 };
+
+/** What a poll of the remote job returns, once the API has reduced the relayed stage events. */
+type RemoteStatus = { status: string; log: string; stages?: RunStage[]; stage_progress?: boolean };
 
 /** A polling failure that remembers WHICH layer failed, so the UI never guesses. */
 class PollError extends Error {
@@ -42,32 +58,37 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   const seen = useRef<string | null>(null);
   const submitStart = useRef<number | null>(null);
 
+  // The run selection decides which stages the plan contains, so every status call carries it —
+  // without it the relayed events are matched against the wrong stage list.
+  const runsQS = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
+
   // Resume an in-progress job after UI close/reopen
   useEffect(() => {
     let live = true;
-    fetch(`${API}/dataset/${accession}/pipeline/remote/active`)
+    fetch(`${API}/dataset/${accession}/pipeline/remote/active${runsQS}`)
       .then((r) => r.ok ? r.json() : null)
       .then((d) => {
         if (!live || !d?.job_id) return;
         const s = (d.status === "done" || d.status === "error") ? d.status : "running";
-        setJob({ status: s as RemoteJob["status"], job_id: d.job_id, log: d.log ?? "", err: null });
+        setJob({ status: s as RemoteJob["status"], job_id: d.job_id, log: d.log ?? "", err: null,
+                 stages: d.stages ?? [], stage_progress: d.stage_progress ?? false });
       })
       .catch(() => {});
     return () => { live = false; };
-  }, [accession]);
+  }, [accession, runsQS]);
 
   const poll = useCallback(async (id: string) => {
     let r: Response;
     try {
-      r = await fetch(`${API}/dataset/${accession}/pipeline/remote/${id}/status`);
+      r = await fetch(`${API}/dataset/${accession}/pipeline/remote/${id}/status${runsQS}`);
     } catch (e) {
       // Transport failure: API down, or NEXT_PUBLIC_API_URL baked at build time now points at a
       // dead port. Naming the URL matters — the port moves whenever dev.sh restarts.
       throw new PollError(`lost contact with the API at ${API} — ${String(e)}`, "network");
     }
     if (!r.ok) throw new PollError(await describeHttpError(r), "server");
-    return r.json() as Promise<{ status: string; log: string }>;
-  }, [accession]);
+    return r.json() as Promise<RemoteStatus>;
+  }, [accession, runsQS]);
 
   useEffect(() => {
     if (!job.job_id || job.status !== "running") return;
@@ -76,14 +97,15 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
       try {
         const s = await poll(job.job_id!);
         if (!live) return;
+        const progress = { stages: s.stages ?? [], stage_progress: s.stage_progress ?? false };
         if (s.status === "done" || s.status === "error") {
           setJob((j) => {
-            const next = { ...j, status: s.status as "done" | "error", log: s.log };
+            const next = { ...j, status: s.status as "done" | "error", log: s.log, ...progress };
             if (s.status === "done" && j.job_id && onDone) onDone(j.job_id);
             return next;
           });
         } else {
-          setJob((j) => ({ ...j, log: s.log }));
+          setJob((j) => ({ ...j, log: s.log, ...progress }));
         }
       } catch (e) {
         if (!live) return;
@@ -107,13 +129,19 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     };
   }, [accession, job.job_id, job.status]);
 
-  // Tick elapsed seconds while submitting so user sees cold-start progress
+  // Tick elapsed seconds from submission onwards: during cold-start it is the only progress there
+  // is, and once the job is running it keeps counting so the card always answers "how long has this
+  // been going?". It survives the submitting → running transition because submitStart is only reset
+  // when a new submission begins. A job resumed after a page reload has no known start time, so
+  // nothing is ticked and the elapsed figure comes from the stages instead — a guessed start time
+  // would read as fact.
   useEffect(() => {
-    if (job.status !== "submitting") { setElapsed(0); return; }
-    submitStart.current = Date.now();
-    const id = window.setInterval(() => {
-      setElapsed(Math.floor((Date.now() - (submitStart.current ?? Date.now())) / 1000));
-    }, 1000);
+    if (job.status !== "submitting" && job.status !== "running") return;
+    if (job.status === "submitting") submitStart.current = Date.now();
+    if (submitStart.current == null) return;
+    const tick = () => setElapsed(Math.floor((Date.now() - submitStart.current!) / 1000));
+    tick();
+    const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
   }, [job.status]);
 
@@ -148,7 +176,6 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   const busy = job.status === "submitting" || job.status === "running";
   const active = busy || job.status === "done" || job.status === "error";
 
-  type StageState = "pending" | "running" | "done" | "failed";
   const STAGE_MARK: Record<StageState, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
   const runsLabel = runs?.length ? `${engineLabel} — ${runs.length} run${runs.length !== 1 ? "s" : ""}` : `${engineLabel} search`;
   // Mirror the local RunHere pipeline stages; map coarse remote job status onto them.
@@ -165,7 +192,18 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     : st === "done" ? "done"
     : contactLost ? "pending"
     : st === "error" && job.job_id ? "failed" : "pending";
-  const stages: { label: string; state: StageState }[] = [
+  // What the remote run itself reported, when it could be read: the same stage records a local run
+  // produces, so they render through the same component with the same elapsed time and ETA.
+  const liveStages: RunStage[] = job.stage_progress ? (job.stages ?? []) : [];
+  const timing = useStageTiming(liveStages, st === "running");
+  const showLiveStages = liveStages.length > 0 && (st === "running" || st === "done") && !contactLost;
+  // Wall-clock time since this page submitted the job. Only known for a job submitted in this
+  // session, which is why it is null rather than 0 for a resumed one.
+  const wallElapsed = submitStart.current != null && elapsed > 0 ? elapsed : null;
+  // The coarse view: six fixed labels driven by the job's overall status alone. It is what the card
+  // can honestly show before the first stage event arrives, after contact is lost, or against a
+  // remote server too old to report stages.
+  const coarseStages: { label: string; state: StageState }[] = [
     {
       label: "Check tools and disk space",
       state: st === "submitting" ? "running"
@@ -196,7 +234,11 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
             Remote {engineLabel} connected
           </span>
         )}
-        {job.status === "running" && <span className="pill">running…</span>}
+        {job.status === "running" && (
+          showLiveStages
+            ? <StagePill timing={timing} />
+            : <span className="pill">running{wallElapsed != null ? ` · elapsed ${fmtSecs(wallElapsed)}` : "…"}</span>
+        )}
         {job.status === "done" && <span className="pill bg-ok-soft text-ok">finished</span>}
         {job.status === "error" && (
           <span className="pill text-warn">{contactLost ? "lost contact" : "stopped"}</span>
@@ -220,14 +262,18 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         page; the job keeps running and results are loaded into Analyse automatically when the search finishes.
       </p>
       {job.err && <p className="text-xs text-warn">{job.err}</p>}
-      <ol className="grid gap-0.5 text-xs">
-          {stages.map((s) => (
-            <li key={s.label} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
-              <span aria-hidden className="inline-block w-4">{STAGE_MARK[s.state]}</span>
-              {s.label}
-            </li>
-          ))}
-        </ol>
+      {showLiveStages
+        ? <PipelineStages stages={liveStages} timing={timing} runLabels={runs ?? []} />
+        : (
+          <ol className="grid gap-0.5 text-xs">
+            {coarseStages.map((s) => (
+              <li key={s.label} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
+                <span aria-hidden className="inline-block w-4">{STAGE_MARK[s.state]}</span>
+                {s.label}
+              </li>
+            ))}
+          </ol>
+        )}
       {(busy || job.status === "error") && (
         <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">
           {job.status === "submitting"

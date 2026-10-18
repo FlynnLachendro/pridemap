@@ -2221,10 +2221,15 @@ def progress_by_stage(events: list[dict]) -> dict[str, dict]:
         sid = e.get("stage") or ""
         if not sid:
             continue
-        s = by_stage.setdefault(sid, {"state": "pending", "seconds": None, "steps": [], "message": None})
+        s = by_stage.setdefault(sid, {"state": "pending", "seconds": None, "steps": [], "message": None,
+                                      "started": None})
         ev = e.get("event")
         if ev == "stage_started":
             s["state"] = "running"
+            # When the running stage began, so elapsed time is derived from the run rather than from
+            # when a browser happened to start watching it. Without this a page reload restarted the
+            # clock at zero mid-stage, and a job resumed in a new tab could show no elapsed time at all.
+            s["started"] = e.get("ts")
         elif ev == "stage_finished":
             s["state"] = "done"
             s["seconds"] = e.get("seconds")
@@ -2243,7 +2248,8 @@ def stage_view(plan: dict, by_stage: dict[str, dict]) -> list[dict]:
     """The plan's stages annotated with how far the run has got — what the UI draws."""
     return [
         {**s, "state": st.get("state", "pending"), "seconds": st.get("seconds"),
-         "steps": (st.get("steps") or [])[-6:], "message": st.get("message")}
+         "steps": (st.get("steps") or [])[-6:], "message": st.get("message"),
+         "started": st.get("started")}
         for s in (plan.get("stages") or [])
         for st in (by_stage.get(s["id"], {}),)
     ]

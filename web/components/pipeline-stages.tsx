@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 /* Single owner of "how a pipeline run is drawn": the stage list, elapsed time, ETA and the
  * per-sample progress rows. Both run cards render through this — the one that runs the pipeline on
@@ -13,7 +13,11 @@ export type Stage = {
   engine?: string; engine_label?: string; output_table?: string; substages?: Substage[];
 };
 export type StageState = "pending" | "running" | "done" | "failed";
-export type RunStage = Stage & { state: StageState; seconds: number | null; steps: string[]; message: string | null };
+export type RunStage = Stage & {
+  state: StageState; seconds: number | null; steps: string[]; message: string | null;
+  /** ISO instant the stage began, recorded by the run itself; null until it starts. */
+  started?: string | null;
+};
 
 export const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
 
@@ -56,44 +60,30 @@ export type StageTiming = {
   totalStages: number;
 };
 
-/** Elapsed time and ETA for a run, from the stage states the server reports.
+/** Elapsed time and ETA for a run, from the stage records the server reports.
  *
- * A finished stage carries its own duration; the running one is timed from the wall clock, which is
- * why this keeps a per-stage start time and a one-second tick. `exists` resets that bookkeeping when
- * a fresh run begins, so a second run never inherits the first one's clock. */
-export function useStageTiming(stages: RunStage[], running: boolean, exists = true): StageTiming {
-  const runStartRef = useRef<number | null>(null);
-  const stageStartRef = useRef<Map<string, number>>(new Map());
+ * A finished stage carries its own duration and the running one carries the instant it started, so
+ * every figure here is derived from the run itself. That is deliberate: timing it from when this
+ * component mounted meant a page reload restarted the clock at zero halfway through a stage, and a
+ * job picked up in a new tab showed no elapsed time at all. */
+export function useStageTiming(stages: RunStage[], running: boolean): StageTiming {
   const [now, setNow] = useState(() => Date.now());
 
   // Live clock while running — drives elapsed time display.
   useEffect(() => {
     if (!running) return;
-    if (!runStartRef.current) runStartRef.current = Date.now();
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [running]);
 
-  // Track when each stage transitions to "running".
-  useEffect(() => {
-    for (const s of stages) {
-      if (s.state === "running" && !stageStartRef.current.has(s.id))
-        stageStartRef.current.set(s.id, Date.now());
-    }
-  }, [stages]);
-
-  // Reset timing refs when a fresh run starts.
-  useEffect(() => {
-    if (!exists) { runStartRef.current = null; stageStartRef.current.clear(); }
-  }, [exists]);
-
-  // Elapsed seconds for a stage: use the server's recorded value for done stages,
-  // and a live wall-clock delta for the currently running one.
+  // Elapsed seconds for a stage: the server's recorded duration once it is done, otherwise the time
+  // since it started. A start in the future (a small clock difference between the machine running
+  // the search and this browser) reads as 0 rather than as a negative age.
   const stageElapsed = (s: RunStage): number | null => {
     if (s.seconds != null) return s.seconds;
-    if (s.state === "running") {
-      const start = stageStartRef.current.get(s.id);
-      if (start) return Math.floor((now - start) / 1000);
+    if (s.state === "running" && s.started) {
+      const start = Date.parse(s.started);
+      if (!Number.isNaN(start)) return Math.max(0, Math.floor((now - start) / 1000));
     }
     return null;
   };
