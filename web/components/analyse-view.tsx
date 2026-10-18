@@ -13,7 +13,6 @@ import {
   useStageTiming,
   type RunStage,
   type Stage as PipelineStage,
-  type Substage as PipelineSubstage,
 } from "@/components/pipeline-stages";
 
 type Group = { stem: string; columns: string[]; fill: number };
@@ -54,7 +53,6 @@ const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" :
 type PrideTable = { file_name: string; category: string; size_bytes: number | null; kind: string; openable: boolean };
 /** Which search engine can actually run on this dataset's raw files — decided by the API from vendor + acquisition. */
 type Track = { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string; why: string };
-type Substage = PipelineSubstage;
 type Stage = PipelineStage;
 type SearchPlan = {
   vendor: string | null; vendor_label: string; acquisition: string; tag_acquisition: string | null; raw_count: number;
