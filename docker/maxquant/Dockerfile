@@ -19,10 +19,10 @@ FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:3.1-bullseye
 COPY --from=source /usr/local/bin/ /opt/maxquant/
 
 # Modal requires Python + pip to bootstrap its runtime.  python3 (3.9.2) is already in
-# the SDK base.  Install pip via the versioned bootstrap script (3.9/ prefix required —
-# the unversioned get-pip.py only supports Python 3.10+).  Use wget, which ships with
-# the SDK base, rather than curl.
-RUN wget -qO- https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3 -
+# the SDK base.  Install pip via the versioned bootstrap script — the unversioned
+# get-pip.py requires Python 3.10+; the 3.9/ path is the version-specific URL the
+# error message itself recommends.
+RUN curl -sSL https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3 -
 
 RUN rm -f /opt/maxquant/global.json \
  && printf '#!/bin/sh\nexec dotnet /opt/maxquant/MaxQuantCmd.exe "$@"\n' \
