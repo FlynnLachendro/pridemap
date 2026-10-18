@@ -89,37 +89,27 @@ web_image = (
 )
 
 # Heavy MaxQuant image for the compute worker.
+#
+# Uses the same SDK-based image as the local macOS Docker setup for exact parity.
+# The biocontainers image (quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1) has .NET
+# runtime only; MaxQuant's DotNetCore31Installed() checks `dotnet --info` for a line starting
+# with "3.1" (an installed SDK). The runtime-only image has no such line and the run fails
+# immediately with "Please install .NET Core 3.1 SDK" — before mqpar.xml is even read.
+# mcr.microsoft.com/dotnet/sdk:3.1-bullseye (the base of pridemap/maxquant:2.0.3.0-native)
+# outputs "3.1.426 [/usr/share/dotnet/sdk]" which satisfies the check.
+#
+# The SDK image is Debian Bullseye and ships curl and ca-certificates; the static-curl
+# and CA-bundle workarounds the previous image needed are not required here.
 image = (
     modal.Image.from_registry(
-        "quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1"
+        "pridemap/maxquant:2.0.3.0-native",
+        force_build=False,
     )
     .run_commands(
-        # The base image (Debian buster, stripped) has wget but no apt-get, no conda,
-        # and no curl. Fetch a static curl binary so download_raw.sh can use it.
-        "wget -qO /usr/local/bin/curl "
-        "https://github.com/moparisthebest/static-curl/releases/download/v8.6.0/curl-amd64 "
-        "&& chmod +x /usr/local/bin/curl "
-        "&& curl --version"
-    )
-    .run_commands(
-        # That static curl is compiled to read its trust store from this exact path, and the
-        # stripped base image has no CA bundle at all. Every HTTPS fetch therefore died with
-        # `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt` —
-        # 37 minutes into a run, in the FASTA stage, after the raw download had already burned
-        # 38 minutes. wget is used to fetch it because curl cannot yet verify anything.
-        "mkdir -p /etc/ssl/certs "
-        "&& wget -qO /etc/ssl/certs/ca-certificates.crt https://curl.se/ca/cacert.pem "
-        "&& test -s /etc/ssl/certs/ca-certificates.crt"
-    )
-    .run_commands(
-        # Prove TLS actually works, against the two hosts this pipeline really fetches from, at
-        # BUILD time. `curl --version` above passes with no trust store at all, so it could never
-        # have caught this; only a request that completes a handshake can. A range request keeps
-        # it to a few bytes, and -f makes an HTTP error status a build failure.
+        # Prove TLS actually works against the two hosts this pipeline fetches from, at
+        # BUILD time. A range request keeps it to a few bytes; -f makes an HTTP error a failure.
         "curl -fsS -r 0-99 -o /dev/null "
         "https://ftp.pride.ebi.ac.uk/pride/data/archive/2024/01/PXD046787/2019_12_13_Daria_01.raw",
-        # A single entry, not the proteome stream: /stream ignores size=1 and would pull 7.5 MB on
-        # every build. The host and its certificate chain are what is under test, not the query.
         "curl -fsS -o /dev/null https://rest.uniprot.org/uniprotkb/P01308.fasta",
     )
     .run_commands("which maxquant")   # fail at BUILD time if binary is missing
