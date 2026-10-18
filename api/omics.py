@@ -1801,6 +1801,35 @@ watch_maxquant() {
   : > "$MQ_SEEN"
   while :; do mq_scan; sleep 5; done
 }
+
+# Rewrite every raw/<file> path in a search config to the symlink's REAL target, and echo each
+# target's parent directory (one per line, deduplicated by the caller if it needs mounts).
+#
+# ThermoFisher's RawFileReaderAdapter.FileFactory() sets IsError=True when handed a SYMLINK path;
+# SelectInstrument then throws, and MaxQuant reports it as
+#
+#     NoSelectedDeviceException: RunHeaderEx
+#
+# with no mention of symlinks anywhere in the message. The identical file at its real path reads
+# fine. download_raw.sh builds raw/ with `ln -sf` from a shared cache, so EVERY runner hands
+# MaxQuant symlinks — not just the containerised one. This lived inline in the docker branch only,
+# which is why it kept happening on Modal: that takes the native branch, and the fix was never
+# there. One helper, called by all three, so a future runner cannot be added without it.
+#
+# <prefix> is whatever raw/ resolves to inside the config: $PWD natively, the mount point in docker.
+# readlink, not realpath: on macOS realpath canonicalises /var -> /private/var while the symlink
+# target keeps /var/..., which leaves a docker bind mount dangling.
+resolve_raw_paths() {  # resolve_raw_paths <config> <prefix>
+  local config="$1" prefix="$2" f link base tmp
+  for f in raw/*.raw raw/*.RAW; do
+    [ -L "$f" ] || continue
+    link=$(readlink "$f" 2>/dev/null) || continue
+    base=$(basename "$f")
+    tmp=$(mktemp) || continue
+    sed "s#$prefix/raw/$base#$link#g" "$config" > "$tmp" && mv "$tmp" "$config"
+    dirname "$link"
+  done
+}
 '''
 
 
@@ -1854,7 +1883,14 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         'if stage download "Download raw files from PRIDE"; then',
         '  step "fetching into raw/ — this is the slow one, expect tens of GB"',
         '  run_step download_raw.sh "raw download failed (re-run to resume; curl -C - continues part files)"',
-        '  step "$(find raw -type f | wc -l | tr -d " ") files in raw/"',
+        # -type f alone counted ZERO, every time: download_raw.sh fills raw/ with `ln -sf` symlinks,
+        # which are type l. So the stage printed "0 files in raw/" and then declared itself done —
+        # a false all-clear sitting directly above the real failure, which was MaxQuant being handed
+        # those same symlinks. Counting both, and refusing to continue on an empty raw/, turns the
+        # most misleading line in the log into the one that stops the run.
+        '  _n_raw=$(find raw -mindepth 1 \\( -type f -o -type l \\) | wc -l | tr -d " ")',
+        '  step "$_n_raw files in raw/"',
+        '  [ "$_n_raw" -gt 0 ] || fail "raw/ is empty after the download stage — there is nothing to search"',
         "  stage_done",
         "fi",
         "",
@@ -1894,33 +1930,31 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 # the mount point inside the container.
                 '  if [ -n "$MQ" ]; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
+                # The native runner reads raw/ through the same `ln -sf` symlinks the container does,
+                # and the Thermo reader refuses them identically. This is the branch Modal takes.
+                f'    resolve_raw_paths {_local_config(tr["config"])} "$PWD" >/dev/null',
                 f'    step "paths resolved against $PWD -> {_local_config(tr["config"])}"',
                 f'    "$MQ" {_local_config(tr["config"])} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
                 '  elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
+                f'    resolve_raw_paths {_local_config(tr["config"])} "$PWD" >/dev/null',
                 f'    mono "$MAXQUANT_DIR/bin/MaxQuantCmd.exe" {_local_config(tr["config"])} \\',
                 '      || fail "MaxQuant (mono) failed — see combined/proc/ for the step it stopped on"',
                 '  elif command -v docker >/dev/null 2>&1; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#{DOCKER_MOUNT}#g" {tr["config"]} > {_docker_config(tr["config"])}',
                 f'    step "running MaxQuant in $MQ_IMAGE; paths resolved against {DOCKER_MOUNT}"',
-                # raw/*.raw entries may be symlinks to a shared cache outside $PWD (e.g. /var/folders/…).
-                # ThermoRawFileReader.RawFileAccessBase fails with IsError=True when given a symlink path
-                # even when the link target is mounted. Replace each symlink path in the docker mqpar with
-                # the real path BEFORE running MaxQuant so the reader receives a non-symlink path.
-                # Also add each symlink target's parent directory as a bind-mount at the same path.
-                # Use readlink (not realpath): on macOS realpath canonicalises /var→/private/var but the
-                # symlink target keeps /var/…, leaving it dangling inside the container.
+                # Same rewrite as the two branches above, through the same helper — plus a bind mount
+                # for each resolved target directory, since a real path outside $PWD is not visible
+                # in the container unless it is mounted at that same path.
                 '    MQ_SYMLINK_MOUNTS=""',
-                '    for _f in raw/*.raw raw/*.RAW; do',
-                '      [ -L "$_f" ] || continue',
-                '      _link=$(readlink "$_f" 2>/dev/null) || continue',
-                '      _dir=$(dirname "$_link")',
-                '      _base=$(basename "$_f")',
-                # Replace /data/raw/<base> → real path in docker mqpar so Thermo reader gets a real path.
-                f'      _tmp=$(mktemp) && sed "s#{DOCKER_MOUNT}/raw/$_base#$_link#g" {_docker_config(tr["config"])} > "$_tmp" && mv "$_tmp" {_docker_config(tr["config"])}',
+                f'    _mq_dirs=$(resolve_raw_paths {_docker_config(tr["config"])} {DOCKER_MOUNT})',
+                '    while IFS= read -r _dir; do',
+                '      [ -n "$_dir" ] || continue',
                 '      case "$MQ_SYMLINK_MOUNTS" in *"-v $_dir:$_dir"*) ;; *)',
                 '        MQ_SYMLINK_MOUNTS="$MQ_SYMLINK_MOUNTS -v $_dir:$_dir" ;; esac',
-                '    done',
+                '    done <<EOF',
+                '$_mq_dirs',
+                'EOF',
                 # The biocontainers maxquant wrapper ignores the passed config path and always reads
                 # mqpar.xml from the working directory. Override it with a second bind mount so that
                 # both the explicit argument and the default cwd lookup hit the substituted config.

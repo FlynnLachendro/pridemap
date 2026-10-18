@@ -91,6 +91,12 @@ def _kit(tmp_path: pathlib.Path, failing: str | None, exit_code: int = 7) -> pat
             body = f'echo "working on it"\necho "it broke" >&2\ntouch ran_{stage}\nexit {exit_code}\n'
         else:
             body = f'touch ran_{stage}\nexit 0\n'
+        # A download that succeeds has to leave something in raw/. The stage now refuses an empty
+        # raw/ — an empty one can only fail later, inside MaxQuant, where the cause is
+        # unrecognisable — so a stub that fetches nothing would stop the run here and the later
+        # stages under test would never start.
+        if script == "download_raw.sh" and script != failing:
+            body = "mkdir -p raw\n: > raw/sample.raw\n" + body
         (d / script).write_text(body)
     # The fasta stage checks the file it just "downloaded" is non-empty.
     (d / "fasta").mkdir(exist_ok=True)
