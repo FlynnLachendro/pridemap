@@ -43,13 +43,26 @@ secret = Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
 # ----------------------------------------------------------------------------- container images
 
 # Lightweight image for the ASGI web gateway.
-# python-multipart: required by Starlette's request.form(); omitting it raises
-#   AssertionError on every kit upload (not obvious from FastAPI docs).
-# Build-time smoke test: catches a missing package before the container starts.
+#
+# Versions are pinned: an unpinned pip_install resolves at BUILD time, so the image's behaviour can
+# change with no commit. That is how the missing-multipart bug became a hard failure — a Starlette
+# release turned absent form support into an AssertionError inside request.form().
+#
+# python-multipart is required by Starlette's request.form() and is an implicit dependency of a
+# feature, not of any import in this repo, so no import scan can find it missing.
+#
+# The build assertion checks the *capability* rather than a package name: Starlette sets
+# parse_options_header to None when multipart support is unavailable, and that is the exact symbol
+# whose None-ness produced the 500. Asserting `import multipart` instead would track a deprecated
+# alias and can pass while form parsing is broken (or fail while it works).
 web_image = (
     modal.Image.debian_slim()
-    .pip_install("fastapi", "uvicorn", "python-multipart")
-    .run_commands("python -c 'import fastapi, uvicorn, multipart'")  # fail at BUILD time
+    .pip_install("fastapi==0.143.5", "uvicorn==0.54.0", "python-multipart==0.0.32")
+    .run_commands(
+        'python -c "from starlette.requests import parse_options_header as p; '
+        'assert p is not None, \'form parsing unavailable: python-multipart missing\'"'
+    )
+    .add_local_python_source("modal_web")   # the gateway module, imported inside web() only
 )
 
 # Heavy MaxQuant image for the compute worker.
@@ -185,78 +198,43 @@ def _find_protein_groups(work_dir: pathlib.Path) -> pathlib.Path | None:
 
 # ----------------------------------------------------------------------------- ASGI web endpoints
 
-@app.function(
-    image=web_image,
-    volumes={"/data": vol},   # required: /status and /results read run.log and proteinGroups.txt
-    secrets=[secret],
-    scaledown_window=1800,  # stay warm 30 min after last request (Modal default is 300 s)
-    # keep_warm=1,          # uncomment to always keep one container hot (eliminates cold starts, costs ~$0.06/h)
-)
-@modal.asgi_app(label="pridemap-mq")
-def web() -> object:
-    from fastapi import FastAPI, Header, HTTPException, Request
-    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+class _ModalBackend:
+    """Modal-side implementation of modal_web.Backend.
 
-    api = FastAPI()
+    Deliberately free of FastAPI imports: this module is also loaded in the MaxQuant worker image,
+    which has no FastAPI installed.
+    """
 
-    def _check_token(authorization: str = "") -> None:
-        expected = os.environ.get("MQ_TOKEN", "")
-        if not expected:
-            return  # no token configured — open (dev mode)
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or token != expected:
-            raise HTTPException(401, "Unauthorized")
+    def spawn_job(self, kit_bytes: bytes, accession: str) -> str:
+        # object_id is read before responding so the caller always receives a pollable id.
+        return run_maxquant.spawn(kit_bytes, accession).object_id
 
-    @api.get("/health")
-    def health() -> dict:
-        return {"ok": True}
+    def accession_from_kit(self, kit_bytes: bytes) -> str:
+        return _accession_from_kit(kit_bytes)
 
-    @api.post("/run")
-    async def run(request: Request, authorization: str = Header(default="")) -> dict:
-        _check_token(authorization)
-        form = await request.form()
-        kit_file = form.get("kit")
-        if kit_file is None:
-            raise HTTPException(400, "missing multipart field 'kit'")
-        kit_bytes = await kit_file.read()  # type: ignore[union-attr]
-
-        # Extract accession from the kit's mqpar.xml to key the jobs dict.
-        accession = _accession_from_kit(kit_bytes)
-
-        call = run_maxquant.spawn(kit_bytes, accession)
-        # Store the call object_id durably BEFORE responding.
-        job_id = call.object_id
+    def record_job(self, accession: str, job_id: str) -> None:
         try:
             jobs[accession] = job_id
-        except Exception:
-            pass  # Dict write failure is non-fatal; Phase 2 fallback still tries
+        except Exception as exc:
+            # Non-fatal: /jobs/{accession} has a fallback. Logged rather than swallowed because a
+            # silent miss makes /jobs under-report, and an empty /jobs is exactly what gets used to
+            # decide whether terminating this app's containers would destroy running work.
+            print(f"WARNING: jobs dict write failed for {accession}: {exc}", flush=True)
 
-        return {"job_id": job_id}
+    def job_status(self, job_id: str) -> str:
+        return _call_status(job_id)
 
-    @api.get("/status/{job_id}")
-    def status(job_id: str, authorization: str = Header(default="")) -> dict:
-        _check_token(authorization)
-        return {"status": _call_status(job_id), "log": _read_log(job_id)}
+    def job_log(self, job_id: str) -> str:
+        return _read_log(job_id)
 
-    @api.get("/results/{job_id}")
-    def results(job_id: str, authorization: str = Header(default="")) -> StreamingResponse:
-        _check_token(authorization)
+    def results_path(self, job_id: str) -> pathlib.Path | None:
         vol.reload()
-        protein_path = pathlib.Path(f"/data/{job_id}/combined/txt/proteinGroups.txt")
-        if not protein_path.exists():
-            raise HTTPException(404, "proteinGroups.txt not found — job may still be running or failed")
-        return StreamingResponse(
-            open(protein_path, "rb"),
-            media_type="text/tab-separated-values",
-            headers={"Content-Disposition": f'attachment; filename="proteinGroups.txt"'},
-        )
+        path = pathlib.Path(f"/data/{job_id}/combined/txt/proteinGroups.txt")
+        return path if path.exists() else None
 
-    @api.delete("/job/{job_id}")
-    def delete_job(job_id: str, authorization: str = Header(default="")) -> dict:
-        _check_token(authorization)
-        # This is the budget stop-button, so every step reports what it actually
-        # did. Swallowing a failed cancel here means a 16-core job keeps billing
-        # while the caller is told it stopped.
+    def delete_job(self, job_id: str) -> dict:
+        # This is the budget stop-button, so every step reports what it actually did. Swallowing a
+        # failed cancel here means a 16-core job keeps billing while the caller is told it stopped.
         problems: list[str] = []
 
         try:
@@ -286,31 +264,38 @@ def web() -> object:
 
         return {"deleted": not problems, "cancelled": cancelled, "problems": problems}
 
-    @api.get("/jobs")
-    def list_jobs(authorization: str = Header(default="")) -> dict:
-        """Every job the Dict knows about, with live status — find orphans without the dashboard."""
-        _check_token(authorization)
-        try:
-            entries = list(jobs.items())
-        except Exception as exc:
-            raise HTTPException(503, f"jobs dict unreadable: {exc}")
-        return {
-            "jobs": [
-                {"accession": acc, "job_id": jid, "status": _call_status(jid)}
-                for acc, jid in entries
-            ]
-        }
+    def list_jobs(self) -> list[tuple[str, str]]:
+        return list(jobs.items())
 
-    @api.get("/jobs/{accession}")
-    def jobs_for_accession(accession: str, authorization: str = Header(default="")) -> dict:
-        _check_token(authorization)
+    def job_for_accession(self, accession: str) -> str | None:
         try:
-            job_id = jobs.get(accession)
+            return jobs.get(accession)
         except Exception:
-            job_id = None
-        return {"job_id": job_id}
+            return None
 
-    return api
+
+@app.function(
+    image=web_image,
+    volumes={"/data": vol},   # required: /status and /results read run.log and proteinGroups.txt
+    secrets=[secret],
+    scaledown_window=1800,  # stay warm 30 min after last request (Modal default is 300 s)
+    # keep_warm=1,          # uncomment to always keep one container hot (eliminates cold starts, costs ~$0.06/h)
+)
+@modal.asgi_app(label="pridemap-mq")
+def web() -> object:
+    # Imported here rather than at module level because the MaxQuant worker image has no FastAPI,
+    # and importing it there would break run_maxquant at container start. The handlers themselves
+    # live in modal_web, where the FastAPI types ARE module-level and therefore always resolvable
+    # by get_type_hints() — see that module's docstring for why that distinction matters.
+    import modal_web
+
+    return modal_web.build_app(
+        _ModalBackend(),
+        expected_token=os.environ.get("MQ_TOKEN", ""),
+        fingerprint=modal_web.source_fingerprint(
+            [pathlib.Path(__file__), pathlib.Path(modal_web.__file__)]
+        ),
+    )
 
 
 def _call_status(job_id: str) -> str:
