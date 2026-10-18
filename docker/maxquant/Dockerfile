@@ -19,9 +19,11 @@ FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:3.1-bullseye
 COPY --from=source /usr/local/bin/ /opt/maxquant/
 
 # Modal requires Python to be present in the image so it can bootstrap its own runtime.
-# The .NET SDK base ships none; install the system Python from Bullseye's apt repository.
+# python3 (3.9.2) is already included in the .NET SDK base; the explicit install is a
+# no-op that documents the requirement and guards against a future base-image change.
+# python3-pip is intentionally omitted: its debian-security package is 404 on Bullseye.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-pip \
+ && apt-get install -y --no-install-recommends python3 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN rm -f /opt/maxquant/global.json \
