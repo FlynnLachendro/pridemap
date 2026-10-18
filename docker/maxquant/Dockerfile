@@ -25,7 +25,8 @@ COPY --from=source /usr/local/bin/ /opt/maxquant/
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3-distutils \
  && rm -rf /var/lib/apt/lists/* \
- && curl -sSL https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3 -
+ && curl -sSL https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3 - \
+ && ln -s /usr/bin/python3 /usr/bin/python
 
 RUN rm -f /opt/maxquant/global.json \
  && printf '#!/bin/sh\nexec dotnet /opt/maxquant/MaxQuantCmd.exe "$@"\n' \
