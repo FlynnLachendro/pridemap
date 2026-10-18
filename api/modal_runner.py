@@ -99,6 +99,27 @@ image = (
         "&& chmod +x /usr/local/bin/curl "
         "&& curl --version"
     )
+    .run_commands(
+        # That static curl is compiled to read its trust store from this exact path, and the
+        # stripped base image has no CA bundle at all. Every HTTPS fetch therefore died with
+        # `curl: (77) error setting certificate file: /etc/ssl/certs/ca-certificates.crt` —
+        # 37 minutes into a run, in the FASTA stage, after the raw download had already burned
+        # 38 minutes. wget is used to fetch it because curl cannot yet verify anything.
+        "mkdir -p /etc/ssl/certs "
+        "&& wget -qO /etc/ssl/certs/ca-certificates.crt https://curl.se/ca/cacert.pem "
+        "&& test -s /etc/ssl/certs/ca-certificates.crt"
+    )
+    .run_commands(
+        # Prove TLS actually works, against the two hosts this pipeline really fetches from, at
+        # BUILD time. `curl --version` above passes with no trust store at all, so it could never
+        # have caught this; only a request that completes a handshake can. A range request keeps
+        # it to a few bytes, and -f makes an HTTP error status a build failure.
+        "curl -fsS -r 0-99 -o /dev/null "
+        "https://ftp.pride.ebi.ac.uk/pride/data/archive/2024/01/PXD046787/2019_12_13_Daria_01.raw",
+        # A single entry, not the proteome stream: /stream ignores size=1 and would pull 7.5 MB on
+        # every build. The host and its certificate chain are what is under test, not the query.
+        "curl -fsS -o /dev/null https://rest.uniprot.org/uniprotkb/P01308.fasta",
+    )
     .run_commands("which maxquant")   # fail at BUILD time if binary is missing
 )
 
