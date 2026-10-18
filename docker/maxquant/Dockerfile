@@ -19,10 +19,13 @@ FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:3.1-bullseye
 COPY --from=source /usr/local/bin/ /opt/maxquant/
 
 # Modal requires Python + pip to bootstrap its runtime.  python3 (3.9.2) is already in
-# the SDK base.  Install pip via the versioned bootstrap script — the unversioned
-# get-pip.py requires Python 3.10+; the 3.9/ path is the version-specific URL the
-# error message itself recommends.
-RUN curl -sSL https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3 -
+# the SDK base.  Debian's minimal python3 package omits distutils, which get-pip.py
+# needs; python3-distutils is in debian main (not debian-security) so it installs
+# without 404.  The 3.9/ versioned URL is required — the unversioned script needs 3.10+.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3-distutils \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -sSL https://bootstrap.pypa.io/pip/3.9/get-pip.py | python3 -
 
 RUN rm -f /opt/maxquant/global.json \
  && printf '#!/bin/sh\nexec dotnet /opt/maxquant/MaxQuantCmd.exe "$@"\n' \
