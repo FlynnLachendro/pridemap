@@ -402,16 +402,27 @@ function SearchKit({ plan, accession, remoteAvailable, localMq }: { plan: Search
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
       {plan.maxquant_offered && (
         <div className="flex flex-wrap gap-2 text-xs">
-          {localMq.docker && (
-            <span className="pill bg-ok-soft text-ok" title={localMq.dockerImage ?? ""}>
-              Local MaxQuant (Docker) ready
-            </span>
-          )}
-          {localMq.native && (
-            <span className="pill bg-ok-soft text-ok">Local MaxQuant (native) ready</span>
-          )}
-          {!localMq.docker && !localMq.native && (
-            <span className="pill text-faint">Local MaxQuant not detected — run preflight.sh to pull the Docker image</span>
+          {runMethod === "local" ? (
+            <>
+              {localMq.docker && (
+                <span className="pill bg-ok-soft text-ok" title={localMq.dockerImage ?? ""}>
+                  Local MaxQuant (Docker) ready
+                </span>
+              )}
+              {localMq.native && (
+                <span className="pill bg-ok-soft text-ok">Local MaxQuant (native) ready</span>
+              )}
+              {!localMq.docker && !localMq.native && (
+                <span className="pill text-faint">Local MaxQuant not detected — run preflight.sh to pull the Docker image</span>
+              )}
+            </>
+          ) : (
+            <>
+              {remoteAvailable
+                ? <span className="pill bg-ok-soft text-ok">Modal cloud ready</span>
+                : <span className="pill text-faint">Modal cloud not configured — set MQ_SERVER_URL in .env</span>
+              }
+            </>
           )}
         </div>
       )}
