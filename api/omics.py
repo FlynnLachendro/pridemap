@@ -1679,6 +1679,7 @@ emit() {  # emit <event> <stage-id> <message> [extra-json]
 STAGE_START=0
 STAGE_ID=""
 STAGE_N=0
+STAGE_FAILED=0
 
 stage() {  # stage <id> <label>; returns 1 when already done so the caller can skip
   STAGE_ID="$1"; local label="$2"
@@ -1710,8 +1711,44 @@ step() {  # a sub-step inside a stage
 fail() {
   printf '\n      ✗ FAILED: %s\n' "$1" >&2
   emit stage_failed "$STAGE_ID" "$1"
+  STAGE_FAILED=1   # the trap has already been told why; it must not emit a second, vaguer event
   exit 1
 }
+
+# Run a sub-script inside the current stage, echoing its output as steps, and report WHY it failed.
+#
+# The obvious form of this is a landmine:
+#
+#     bash x.sh 2>&1 | while IFS= read -r l; do step "$l"; done
+#     [ "${PIPESTATUS[0]}" = "0" ] || fail "..."
+#
+# Under `set -e` with `pipefail` a failing pipeline exits the script THERE, so the guard on the next
+# line never runs and fail() — the only emitter of stage_failed — is unreachable. Every stage was
+# written that way, which is why a broken cloud run reported no reason at all: the UI received a
+# stage stuck at "running" and an overall status of "done". Running the pipeline as the condition of
+# an `if` suspends `set -e` for it, so the failure is ours to report rather than the shell's to
+# act on.
+run_step() {  # run_step <script> <failure-message>
+  local script="$1" msg="$2"
+  if ! bash "$script" 2>&1 | while IFS= read -r _line; do step "$_line"; done; then
+    fail "$msg"
+  fi
+}
+
+# Last line of defence. Any exit before stage_done that did not go through fail() — a `set -e` abort
+# inside a stage body, a syntax error, an unset variable, a SIGTERM from the runner — would otherwise
+# leave the stage pinned at "running" for ever, which is exactly the state that made a failed run
+# look healthy. One event here is the difference between "it broke at FASTA" and silence.
+_on_exit() {
+  local rc=$?
+  rm -f "$PIPE_DIR/run.pid"
+  if [ "$rc" != "0" ] && [ "${STAGE_FAILED:-0}" = "0" ] && [ -n "$STAGE_ID" ] \
+     && [ ! -f "$PIPE_DIR/$STAGE_ID.done" ]; then
+    emit stage_failed "$STAGE_ID" "stopped unexpectedly (exit $rc) — see the log above for the last step"
+  fi
+  exit $rc
+}
+trap _on_exit EXIT
 
 warn_up() {  # non-fatal: the search already succeeded, only the hand-off didn't
   printf '        ! %s\n' "$1"
@@ -1760,9 +1797,9 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         "# Needs: curl, and whichever of msconvert / MaxQuant / DIA-NN the stages below use.",
         "set -euo pipefail",
         'cd "$(dirname "$0")"',
-        # Clean up the PID file on any exit so a later resume attempt is never blocked by a stale PID
-        # that the OS has recycled for an unrelated process.
-        "trap 'rm -f .pipeline/run.pid' EXIT",
+        # The PID file is cleaned up by _on_exit in the stage library below, which also reports an
+        # unexplained death as stage_failed. Two EXIT traps cannot coexist — the second replaces the
+        # first — so this one stage of cleanup is deliberately owned there and not duplicated here.
         "",
         # Every stage except the final 'analyse', which is yours to make in the browser.
         f"TOTAL_STAGES={max(1, total - 1)}",
@@ -1787,24 +1824,21 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         "# ---------------------------------------------------------------- 0. preflight",
         '# Fails here, in seconds, rather than after the download. Nothing is fetched until this passes.',
         'if stage preflight "Check tools and disk space"; then',
-        '  bash preflight.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "preflight failed — nothing was downloaded"',
+        '  run_step preflight.sh "preflight failed — nothing was downloaded"',
         "  stage_done",
         "fi",
         "",
         "# ---------------------------------------------------------------- 1. raw files",
         'if stage download "Download raw files from PRIDE"; then',
         '  step "fetching into raw/ — this is the slow one, expect tens of GB"',
-        '  bash download_raw.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "raw download failed (re-run to resume; curl -C - continues part files)"',
+        '  run_step download_raw.sh "raw download failed (re-run to resume; curl -C - continues part files)"',
         '  step "$(find raw -type f | wc -l | tr -d " ") files in raw/"',
         "  stage_done",
         "fi",
         "",
         "# ---------------------------------------------------------------- 2. protein database",
         'if stage fasta "Fetch the protein database"; then',
-        '  bash download_fasta.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "FASTA download failed"',
+        '  run_step download_fasta.sh "FASTA download failed"',
         f'  [ -s "{fasta_path}" ] || fail "{fasta_path} is missing or empty"',
         f'  step "$(grep -c \'^>\' "{fasta_path}" || echo 0) sequences in {fasta_path}"',
         "  stage_done",
@@ -1816,8 +1850,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
             "# ---------------------------------------------------------------- 3. vendor format -> mzML",
             f'if stage convert "Convert {plan["vendor_label"]} to mzML"; then',
             '  command -v msconvert >/dev/null 2>&1 || fail "msconvert not on PATH — see convert_to_mzml.sh for the Docker alternative"',
-            '  bash convert_to_mzml.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-            '  [ "${PIPESTATUS[0]}" = "0" ] || fail "msconvert failed"',
+            '  run_step convert_to_mzml.sh "msconvert failed"',
             '  step "$(find mzml -name \'*.mzML\' | wc -l | tr -d \' \') mzML files written"',
             "  stage_done",
             "fi",
@@ -1889,8 +1922,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
                 '  [ -n "$DIANN" ] || fail "DIA-NN not found — set DIANN_CMD, see preflight.sh"',
                 '  step "library-free: DIA-NN predicts a spectral library from the FASTA first"',
-                f'  bash run_diann_{kind}.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-                f'  [ "${{PIPESTATUS[0]}}" = "0" ] || fail "DIA-NN failed"',
+                f'  run_step run_diann_{kind}.sh "DIA-NN failed"',
                 f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
                 f'  step "$(($(wc -l < "{tr["output_table"]}") - 1)) protein groups in {tr["output_table"]}"',
                 "  stage_done",
