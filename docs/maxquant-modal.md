@@ -100,11 +100,23 @@ property that lets any machine drive a run.
 
 ## Step-by-step setup
 
-### 1. Install the Modal SDK
+### 1. Modal SDK — no install step needed
 
-```bash
-uv add modal
+`api/modal_runner.py` carries a [PEP 723](https://peps.python.org/pep-0723/) inline
+dependency declaration:
+
+```python
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["modal>=0.73"]
+# ///
 ```
+
+`uv run` reads this and pulls `modal` into an isolated ephemeral environment
+automatically. The project has no `pyproject.toml`, so **`uv add modal` will
+fail** — that command only works against a project lockfile. Use `uv run modal …`
+everywhere below instead; it always resolves the right `modal` version from the
+script's own declaration.
 
 **`api/main.py`'s dependency block must not gain `modal`.** The API talks to
 Modal over plain HTTP via `urllib` (`api/omics.py:2276–2487`). Pulling the SDK
@@ -114,7 +126,7 @@ benefit of this path.
 ### 2. Authenticate (once per machine)
 
 ```bash
-python3 -m modal setup      # opens a browser, writes ~/.modal.toml
+uv run modal setup      # opens a browser, writes ~/.modal.toml
 ```
 
 On a headless machine or in CI there is no browser. Create a token in the
@@ -130,7 +142,7 @@ is the cleaner option. If you belong to more than one Modal workspace, confirm
 the right one is active before deploying:
 
 ```bash
-modal profile list
+uv run modal profile list
 ```
 
 ### 3. Create the shared secret
@@ -140,13 +152,13 @@ This token is what stops strangers from spending your compute — see
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"   # generate one
-modal secret create pridemap-mq-token MQ_TOKEN=<that-token>
+uv run modal secret create pridemap-mq-token MQ_TOKEN=<that-token>
 ```
 
 ### 4. Deploy
 
 ```bash
-modal deploy api/modal_runner.py
+uv run modal deploy api/modal_runner.py
 ```
 
 Use `modal deploy`, not `modal serve`: serve is for local development and dies
@@ -162,8 +174,8 @@ Checklist for the deploy to actually work:
       function. Omitting it deploys cleanly and then throws `KeyError` on
       `os.environ["MQ_TOKEN"]` at the first request — a confusing 500 where you
       expected a 401.
-- [ ] `modal app list` shows `pridemap-maxquant` as `deployed`.
-- [ ] `modal app logs pridemap-maxquant` shows the first image build completing.
+- [ ] `uv run modal app list` shows `pridemap-maxquant` as `deployed`.
+- [ ] `uv run modal app logs pridemap-maxquant` shows the first image build completing.
 
 Redeploying later is idempotent: the URL does not change, `.env` needs no edit,
 and in-flight runs are not interrupted — new invocations pick up the new image
@@ -257,17 +269,17 @@ does anything other than fail fast, stop and fix it before running a real search
 | Deploy fails during image build | `modal app logs pridemap-maxquant` — the build log names the failing layer |
 | `/run` returns 500 instead of 401 | The ASGI function is missing `secrets=[secret]`, so `os.environ["MQ_TOKEN"]` raises `KeyError` |
 | `/remote-mq` says unavailable | `MQ_SERVER_URL` wrong or API not restarted after editing `.env` |
-| Run appears stuck | `modal volume ls pridemap-runs`, then `modal volume get pridemap-runs <job_id>/run.log /tmp/run.log` to read the live log |
+| Run appears stuck | `uv run modal volume ls pridemap-runs`, then `uv run modal volume get pridemap-runs <job_id>/run.log /tmp/run.log` to read the live log |
 | First search takes minutes before anything happens | Cold start pulling a multi-GB image — expected, 2–5 min |
-| Job finished but no results | `modal volume ls pridemap-runs` — check `<job_id>/combined/txt/` exists; if not, the search failed, see `run.log` |
+| Job finished but no results | `uv run modal volume ls pridemap-runs` — check `<job_id>/combined/txt/` exists; if not, the search failed, see `run.log` |
 
 ## Teardown
 
 ```bash
-modal app stop pridemap-maxquant
-modal volume delete pridemap-runs      # NOT done by app stop — see below
-modal dict delete pridemap-jobs
-modal secret delete pridemap-mq-token
+uv run modal app stop pridemap-maxquant
+uv run modal volume delete pridemap-runs      # NOT done by app stop — see below
+uv run modal dict delete pridemap-jobs
+uv run modal secret delete pridemap-mq-token
 ```
 
 Then unset `MQ_SERVER_URL` and `MQ_TOKEN` in `.env` and restart the API. The
@@ -275,7 +287,7 @@ Then unset `MQ_SERVER_URL` and `MQ_TOKEN` in `.env` and restart the API. The
 
 > **`modal app stop` does not delete the Volume.** It stops the app and kills
 > live containers, but `pridemap-runs` keeps billing for stored data until you
-> run `modal volume delete`. Someone who stops the app and closes the laptop
+> run `uv run modal volume delete`. Someone who stops the app and closes the laptop
 > believes they have torn down and is still paying.
 
 Two other things survive a partial teardown:
