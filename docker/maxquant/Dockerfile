@@ -5,7 +5,9 @@
 #
 # Stage 1: source of MaxQuant assemblies (Conda / biocontainers build).
 #   The assemblies live in /usr/local/bin/ in this image.
-FROM quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1 AS source
+#   --platform=linux/amd64 is explicit: the biocontainers image is amd64-only and
+#   BuildKit on an arm64 host must not attempt to resolve a non-existent arm64 variant.
+FROM --platform=linux/amd64 quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1 AS source
 
 # Stage 2: SDK base — identical to the local macOS build (see api/omics.py MAXQUANT_RUNTIME_BASE).
 #   mcr.microsoft.com/dotnet/sdk:3.1-bullseye satisfies MaxQuant's DotNetCore31Installed() check:
