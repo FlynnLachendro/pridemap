@@ -1090,7 +1090,7 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         f"   <fixedCombinedFolder>{_xml(KIT_DIR_TOKEN)}</fixedCombinedFolder>",
         "   <includeContaminants>True</includeContaminants>",
         f"   <maxQuantVersion>{MQ_VERSION}</maxQuantVersion>",
-        "   <numThreads>8</numThreads>",
+        "   <numThreads>16</numThreads>",
         # Required for dotnet runtime images: prevents MaxQuant from using the non-DotNetCore path
         # which wraps the subprocess path in literal " chars (Windows compat) causing ENOENT on Linux.
         "   <useDotNetCore>True</useDotNetCore>",
