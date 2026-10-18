@@ -407,14 +407,14 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
                 {(() => {
                   if (s.state !== "running" || !elapsed || s.steps.length === 0) return null;
                   const perRun = mqLatestPerRun(s.steps);
-                  if (perRun.size === 0) return overallEtaSecs != null && overallEtaSecs > 0
-                    ? <span className="text-faint"> · ETA: {fmtMins(overallEtaSecs)}</span> : null;
                   const total = MQ_STAGE_ORDER.length;
-                  const avgIdx = Array.from(perRun.values())
-                    .reduce((sum, name) => sum + Math.max(0, MQ_STAGE_ORDER.indexOf(name)), 0) / perRun.size;
+                  const avgIdx = perRun.size > 0
+                    ? Array.from(perRun.values()).reduce((sum, name) => sum + Math.max(0, MQ_STAGE_ORDER.indexOf(name)), 0) / perRun.size
+                    : -1;
+                  // Use step-position ETA when available; fall back to pipeline estimate during global steps.
                   const eta = avgIdx > 0
                     ? Math.round(elapsed * (total - avgIdx) / avgIdx)
-                    : overallEtaSecs;
+                    : (overallEtaSecs ?? null);
                   return eta != null && eta > 0 ? <span className="text-faint"> · ETA: {fmtMins(eta)}</span> : null;
                 })()}
                 {s.message && <span className="text-faint"> · {s.message}</span>}
@@ -438,7 +438,7 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
                               const total = MQ_STAGE_ORDER.length;
                               const etaSecs = elapsed && idx > 0
                                 ? Math.round(elapsed * (total - idx) / idx)
-                                : overallEtaSecs;
+                                : (elapsed ? overallEtaSecs : null);
                               const pct = idx >= 0 ? Math.round(((idx + 1) / total) * 100) : 0;
                               return (
                                 <div key={runIdx} className="flex items-center gap-1.5 text-faint flex-wrap">
