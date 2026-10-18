@@ -1938,4 +1938,9 @@ def _log_env_config() -> None:
 
 if __name__ == "__main__":
     _log_env_config()
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=True, app_dir=str(pathlib.Path(__file__).parent))
+    # PRIDEMAP_API_RELOAD=0 turns the auto-reloader off. It is on by default for editing, but a
+    # background service wants it off: the reloader restarts on every write, and a save that fails
+    # to import leaves the parent process alive with no listening socket — an API that looks up
+    # from the process table and is not up from the browser. api.sh starts with it off.
+    reload = os.environ.get("PRIDEMAP_API_RELOAD", "1") not in ("0", "false", "False", "")
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=reload, app_dir=str(pathlib.Path(__file__).parent))
