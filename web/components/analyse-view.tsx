@@ -6,6 +6,14 @@ import { useCompare } from "@/lib/compare-store";
 import { API } from "@/lib/api";
 import { markAnalysed } from "@/lib/progress-store";
 import { RunRemote } from "@/components/run-remote";
+import {
+  PipelineStages,
+  StagePill,
+  fmtSecs,
+  useStageTiming,
+  type RunStage,
+  type Stage as PipelineStage,
+} from "@/components/pipeline-stages";
 
 type Group = { stem: string; columns: string[]; fill: number };
 type MzTab = {
@@ -45,11 +53,7 @@ const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" :
 type PrideTable = { file_name: string; category: string; size_bytes: number | null; kind: string; openable: boolean };
 /** Which search engine can actually run on this dataset's raw files — decided by the API from vendor + acquisition. */
 type Track = { kind: string; engine: string; engine_label: string; run_count: number; output_table: string; config: string; why: string };
-type Substage = { name: string; detail: string };
-type Stage = {
-  id: string; label: string; detail: string; where: string;
-  engine?: string; engine_label?: string; output_table?: string; substages?: Substage[];
-};
+type Stage = PipelineStage;
 type SearchPlan = {
   vendor: string | null; vendor_label: string; acquisition: string; tag_acquisition: string | null; raw_count: number;
   engine: string | null; engine_label: string | null; why: string | null; output_table: string | null;
@@ -67,28 +71,10 @@ const NO_SUB = () => () => {};
 const getOrigin = () => window.location.origin;
 const getOriginServer = () => "";
 
-type RunStage = Stage & { state: "pending" | "running" | "done" | "failed"; seconds: number | null; steps: string[]; message: string | null };
 type RunStatus = {
   accession: string; can_run: boolean; exists: boolean; running: boolean; finished: boolean; failed: boolean;
   stages: RunStage[]; log: string[]; uploads: string[]; dir: string | null;
 };
-const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
-
-/** Parse MaxQuant proc-file step names and group by sample.
- *  Proc files: "Feature_detection 12.finished.txt" → suffix first digit = 1-based run index.
- *  Returns map of runIndex → latest stage label (underscores → spaces, suffix stripped). */
-function mqLatestPerRun(steps: string[]): Map<number, string> {
-  const latest = new Map<number, string>();
-  for (const step of steps) {
-    const m = step.match(/^(.*?)\s+(\d+)$/);
-    if (!m) continue;
-    const label = m[1].replace(/_/g, " ");
-    const runIdx = parseInt(m[2][0], 10);
-    latest.set(runIdx, label);
-  }
-  return latest;
-}
-
 /** Lets the user pick up to 2 runs for A vs B comparison. Raw file names show immediately;
  *  clicking "Load sample annotations" fetches SDRF / Samplelist.xlsx and maps metadata columns. */
 function SamplePicker({ accession, rawNames, onSelect }: { accession: string; rawNames: string[]; onSelect: (runs: string[], labelA: string, labelB: string) => void }) {
@@ -241,22 +227,6 @@ function SamplePicker({ accession, rawNames, onSelect }: { accession: string; ra
   );
 }
 
-// MaxQuant internal stage order (proc file names, spaces not underscores).
-// Used to estimate progress and ETA per sample.
-const MQ_STAGE_ORDER = [
-  "Configuring", "Assemble run info", "Finish run info",
-  "Testing fasta files", "Testing raw files",
-  "Feature detection", "Deisotoping", "Calculating peak properties",
-  "MS/MS preparation", "Combining apl files for first search",
-  "Preparing searches", "MS/MS first search", "Mass recalibration",
-  "MS/MS search", "Applying FDR", "Matching between runs",
-  "Assembling proteins", "Protein FDR", "Label-free quantification",
-  "Writing tables",
-];
-
-const fmtSecs = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-const fmtMins = (s: number) => { const m = Math.round(s / 60); return m <= 0 ? "<1 min" : `${m} min${m !== 1 ? "s" : ""}`; };
-
 /** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
 function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: string[]; hintA?: string; hintB?: string }) {
   const router = useRouter();
@@ -265,9 +235,6 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const seen = useRef<string | null>(null);
-  const runStartRef = useRef<number | null>(null);
-  const stageStartRef = useRef<Map<string, number>>(new Map());
-  const [now, setNow] = useState(() => Date.now());
 
   const runsQS = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
 
@@ -288,27 +255,8 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
     return () => { live = false; window.clearTimeout(first); window.clearInterval(id); };
   }, [poll, running]);
 
-  // Live clock while running — drives elapsed time display.
-  useEffect(() => {
-    if (!running) return;
-    if (!runStartRef.current) runStartRef.current = Date.now();
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [running]);
-
-  // Track when each stage transitions to "running".
-  const stages = status?.stages ?? [];
-  useEffect(() => {
-    for (const s of stages) {
-      if (s.state === "running" && !stageStartRef.current.has(s.id))
-        stageStartRef.current.set(s.id, Date.now());
-    }
-  }, [stages]);
-
-  // Reset timing refs when a fresh run starts.
-  useEffect(() => {
-    if (!status?.exists) { runStartRef.current = null; stageStartRef.current.clear(); }
-  }, [status?.exists]);
+  const stages: RunStage[] = status?.stages ?? [];
+  const timing = useStageTiming(stages, running);
 
   // When the run hands a table back, open it: the point of the whole exercise is the table, not the run.
   useEffect(() => {
@@ -341,33 +289,13 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
     } catch (e) { setErr(String(e)); } finally { setStopping(false); }
   };
 
-  const done = stages.filter((s) => s.state === "done").length;
-
-  // Elapsed seconds for a stage: use the server's recorded value for done stages,
-  // and a live wall-clock delta for the currently running one.
-  const stageElapsed = (s: RunStage): number | null => {
-    if (s.seconds != null) return s.seconds;
-    if (s.state === "running") {
-      const start = stageStartRef.current.get(s.id);
-      if (start) return Math.floor((now - start) / 1000);
-    }
-    return null;
-  };
-
-  // Overall elapsed = sum of all stage durations we know about.
-  const overallSecs = stages.reduce((acc, s) => acc + (stageElapsed(s) ?? 0), 0);
-  const totalStages = stages.length - 1; // last stage is upload/finalise
-  const overallEtaSecs = done > 0 && totalStages > done
-    ? Math.round(overallSecs * (totalStages - done) / done)
-    : null;
-
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2" data-tour="run-here">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm font-semibold">Run on this machine</span>
         {status?.running
-          ? <span className="pill">running · {done}/{totalStages} stages · elapsed {fmtSecs(overallSecs)}{overallEtaSecs != null ? ` · ETA ${fmtMins(overallEtaSecs)}` : ""}</span>
-          : status?.finished ? <span className="pill bg-ok-soft text-ok">finished · {fmtSecs(overallSecs)}</span>
+          ? <StagePill timing={timing} />
+          : status?.finished ? <span className="pill bg-ok-soft text-ok">finished · {fmtSecs(timing.overallSecs)}</span>
           : status?.failed ? <span className="pill text-warn">stopped</span> : null}
         {status?.running && (
           <button type="button" className="btn btn-sm btn-warn ml-auto" disabled={stopping} onClick={stop}>
@@ -395,78 +323,11 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
         );
       })()}
       {stages.length > 0 && (status?.running || status?.finished) && (
-        <ol className="grid gap-0.5 text-xs">
-          {stages.map((s) => {
-            const runLabels = [hintA || runs?.[0], hintB || runs?.[1]].filter(Boolean) as string[];
-            const elapsed = stageElapsed(s);
-            return (
-              <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
-                <span aria-hidden className="inline-block w-4">{STATE_MARK[s.state]}</span>
-                {s.label}
-                {elapsed != null && <span className="text-faint"> · elapsed: {fmtSecs(elapsed)}</span>}
-                {(() => {
-                  if (s.state !== "running" || !elapsed || s.steps.length === 0) return null;
-                  const perRun = mqLatestPerRun(s.steps);
-                  const total = MQ_STAGE_ORDER.length;
-                  const avgIdx = perRun.size > 0
-                    ? Array.from(perRun.values()).reduce((sum, name) => sum + Math.max(0, MQ_STAGE_ORDER.indexOf(name)), 0) / perRun.size
-                    : -1;
-                  // Use step-position ETA when available; fall back to pipeline estimate during global steps.
-                  const eta = avgIdx > 0
-                    ? Math.round(elapsed * (total - avgIdx) / avgIdx)
-                    : (overallEtaSecs ?? null);
-                  return eta != null && eta > 0 ? <span className="text-faint"> · ETA: {fmtMins(eta)}</span> : null;
-                })()}
-                {s.message && <span className="text-faint"> · {s.message}</span>}
-                {(s.state === "running" || s.state === "failed") && s.steps.length > 0 && (
-                  <div className="pl-6 grid gap-0.5">
-                    {s.state === "failed"
-                      ? s.steps.map((t, i) => <div key={i} className="text-faint">{t}</div>)
-                      : (() => {
-                          const perRun = mqLatestPerRun(s.steps);
-                          // Last global step (fallback when per-run steps not yet available)
-                          const lastGlobal = s.steps[s.steps.length - 1]
-                            ?.replace(/^MaxQuant:\s*/, "").replace(/_/g, " ").replace(/\s+\d+$/, "");
-                          if (runLabels.length > 1) {
-                            // Always show A/B rows when 2 runs are selected.
-                            // Use per-run step when available, fall back to the current global step.
-                            return runLabels.map((label, i) => {
-                              const runIdx = i + 1;
-                              const stageName = perRun.get(runIdx) ?? lastGlobal ?? "";
-                              const letter = i === 0 ? "A" : "B";
-                              const idx = MQ_STAGE_ORDER.indexOf(stageName);
-                              const total = MQ_STAGE_ORDER.length;
-                              const etaSecs = elapsed && idx > 0
-                                ? Math.round(elapsed * (total - idx) / idx)
-                                : (elapsed ? overallEtaSecs : null);
-                              const pct = idx >= 0 ? Math.round(((idx + 1) / total) * 100) : 0;
-                              return (
-                                <div key={runIdx} className="flex items-center gap-1.5 text-faint flex-wrap">
-                                  <span className="text-[10px] font-bold shrink-0 w-3">{letter}</span>
-                                  <span className="truncate max-w-[140px] shrink-0" title={label}>{label}</span>
-                                  <span className="text-[10px] shrink-0">·</span>
-                                  <span className="shrink-0">{stageName}</span>
-                                  <span className="spinner shrink-0" aria-hidden />
-                                  {idx >= 0 && <span className="text-[10px] shrink-0">({idx + 1}/{total})</span>}
-                                  <div className="h-1.5 w-20 rounded-full bg-muted shrink-0 overflow-hidden" title={`${pct}%`}>
-                                    <div className="h-full rounded-full bg-teal transition-all duration-500 animate-pulse" style={{ width: `${pct}%` }} />
-                                  </div>
-                                  {elapsed != null && <span className="text-[10px] shrink-0">· elapsed: {fmtSecs(elapsed)}</span>}
-                                  {etaSecs != null && etaSecs > 0 && <span className="text-[10px] shrink-0">· ETA: {fmtMins(etaSecs)}</span>}
-                                </div>
-                              );
-                            });
-                          }
-                          // Single run or global step: show last step
-                          return <div className="text-faint">{lastGlobal}</div>;
-                        })()
-                    }
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ol>
+        <PipelineStages
+          stages={stages}
+          timing={timing}
+          runLabels={[hintA || runs?.[0], hintB || runs?.[1]].filter(Boolean) as string[]}
+        />
       )}
       {status?.log && status.log.length > 0 && !status?.failed && (
         status?.running
@@ -523,7 +384,7 @@ function SearchKit({ plan, accession, remoteAvailable, localMq }: { plan: Search
 
   const showRemote = remoteAvailable && plan.maxquant_offered;
   type RunMethod = "local" | "remote";
-  const [runMethod, setRunMethod] = useState<RunMethod>("local");
+  const [runMethod, setRunMethod] = useState<RunMethod>(showRemote ? "remote" : "local");
 
   const handleRemoteDone = (jobId: string) => {
     const hints = labelA ? `&hint_a=${encodeURIComponent(labelA)}${labelB ? `&hint_b=${encodeURIComponent(labelB)}` : ""}` : "";
@@ -541,34 +402,45 @@ function SearchKit({ plan, accession, remoteAvailable, localMq }: { plan: Search
       {plan.conflict && <p className="text-warn text-xs">⚠ {plan.conflict}</p>}
       {plan.maxquant_offered && (
         <div className="flex flex-wrap gap-2 text-xs">
-          {localMq.docker && (
-            <span className="pill bg-ok-soft text-ok" title={localMq.dockerImage ?? ""}>
-              Local MaxQuant (Docker) ready
-            </span>
-          )}
-          {localMq.native && (
-            <span className="pill bg-ok-soft text-ok">Local MaxQuant (native) ready</span>
-          )}
-          {!localMq.docker && !localMq.native && (
-            <span className="pill text-faint">Local MaxQuant not detected — run preflight.sh to pull the Docker image</span>
+          {runMethod === "local" ? (
+            <>
+              {localMq.docker && (
+                <span className="pill bg-ok-soft text-ok" title={localMq.dockerImage ?? ""}>
+                  Local MaxQuant (Docker) ready
+                </span>
+              )}
+              {localMq.native && (
+                <span className="pill bg-ok-soft text-ok">Local MaxQuant (native) ready</span>
+              )}
+              {!localMq.docker && !localMq.native && (
+                <span className="pill text-faint">Local MaxQuant not detected — run preflight.sh to pull the Docker image</span>
+              )}
+            </>
+          ) : (
+            <>
+              {remoteAvailable
+                ? <span className="pill bg-ok-soft text-ok">Modal cloud ready</span>
+                : <span className="pill text-faint">Modal cloud not configured — set MQ_SERVER_URL in .env</span>
+              }
+            </>
           )}
         </div>
       )}
 
-      <SamplePicker accession={accession} rawNames={plan.raw_names ?? []} onSelect={handleSelect} />
-
-      {selectedRuns.length > 0 && showRemote && (
+      {plan.maxquant_offered && (
         <div className="flex gap-4 text-sm">
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="radio" name="run-method" value="local" checked={runMethod === "local"} onChange={() => setRunMethod("local")} className="accent-teal" />
             Run on this machine
           </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="run-method" value="remote" checked={runMethod === "remote"} onChange={() => setRunMethod("remote")} className="accent-teal" />
-            Run on cloud (Devin)
+          <label className={`flex items-center gap-2 ${remoteAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}>
+            <input type="radio" name="run-method" value="remote" checked={runMethod === "remote"} onChange={() => setRunMethod("remote")} className="accent-teal" disabled={!remoteAvailable} />
+            Run on cloud (Modal){!remoteAvailable && <span className="text-xs text-faint">(set MQ_SERVER_URL in .env)</span>}
           </label>
         </div>
       )}
+
+      <SamplePicker accession={accession} rawNames={plan.raw_names ?? []} onSelect={handleSelect} />
 
       {selectedRuns.length > 0 && (!showRemote || runMethod === "local") && (
         <RunHere accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} hintA={labelA} hintB={labelB} />

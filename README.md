@@ -51,9 +51,15 @@ See [Getting the data](#getting-the-data) for the standalone command and the oth
 Create `.env` in the repo root:
 
 ```dotenv
-ANTHROPIC_API_KEY=sk-ant-...   # for tag.py and /ask (Claude)
-HF_TOKENS=hf_a,hf_b,...        # for tag_oai.py --provider hf (optional, rotated)
+ANTHROPIC_API_KEY=sk-ant-...        # for tag.py and /ask (Claude)
+HF_TOKENS=hf_a,hf_b,...             # for tag_oai.py --provider hf (optional, rotated)
+OPENROUTER_API_KEY=sk-or-...        # for tag_oai.py --provider openrouter and tag_bench.py (optional)
 NEXT_PUBLIC_API_URL=http://localhost:8000   # web → API base (default if omitted)
+
+# MaxQuant remote runner (Modal offload) — optional, only needed to run /analyse/from_pride
+MQ_SERVER_URL=https://your-modal-app.modal.run   # URL of the running mq_server (api/modal_runner.py)
+MQ_TOKEN=your-secret-token                        # auth token checked by the server
+
 ```
 
 **2. Get `data/pride.db`** — one of three ways, cheapest first:

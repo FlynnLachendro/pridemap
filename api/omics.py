@@ -263,11 +263,25 @@ def _annot_cache_dir() -> pathlib.Path:
     return p
 
 
+def pride_https_url(ftp: str) -> str:
+    """An EBI archive path served over HTTPS instead of FTP.
+
+    EBI serves the same path under https:// with byte-range support, so `curl -C -` still resumes.
+    The index records ftp:// URLs, but plain FTP is unusable from a Modal container: a two-run
+    download sat for 38 minutes and fetched 0 bytes while the stage still reported success. HTTPS
+    also gives `curl -f` something to act on — a stalled FTP control channel has no status code.
+
+    Single owner of the rewrite, so the raw-file manifest and the annotation fetch cannot disagree
+    about which transport is used.
+    """
+    return ftp.replace("ftp://", "https://", 1)
+
+
 def _fetch_annot_bytes(ftp: str | None) -> bytes | None:
-    """Fetch annotation file bytes, caching locally so EBI FTP is only hit once per file."""
+    """Fetch annotation file bytes, caching locally so EBI is only hit once per file."""
     if not ftp:
         return None
-    url = ftp.replace("ftp://", "https://", 1)
+    url = pride_https_url(ftp)
     # Stable cache key: last two path components (accession/filename) joined with __
     parts = url.rstrip("/").split("/")
     cache_name = "__".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
@@ -1218,21 +1232,75 @@ def _download_sh(ctx: dict) -> str:
              '  [ "$n" = "$2" ]',
              "}",
              ""]
+    # fetch_one <name> <size> <url> — checks cache, resumes via curl -C -, then links into raw/.
+    lines += [
+        "fetch_one() {",
+        "  local name=$1 size=$2 url=$3",
+        '  if have "$name" "$size"; then',
+        '    echo "  ✓ $name already downloaded"',
+        "  else",
+        '    echo "  ↓ $name"',
+        # -f: without it an FTP/HTTP error page is written into $name as if it were the raw file and
+        #     curl still exits 0, so the failure only surfaces much later as an unreadable spectrum.
+        # -sS: the downloads run N-way in parallel into one log; progress meters from concurrent
+        #     curls interleave character-by-character and shred the log. Errors still print.
+        '    curl -fsS -C - -o "$CACHE/$name" "$url"',
+        "  fi",
+        '  ln -sf "$CACHE/$name" "raw/$name"',
+        "}",
+        "",
+    ]
+
+    # Build manifest: one entry per file that has an FTP URL.
+    manifest_rows = []
     for f in ctx["raw"]:
         if not f.get("ftp"):
             continue
         name = pathlib.PurePath(f.get("file_name") or "").name
         size = f.get("size_bytes") or ""
-        lines += [
-            f'if have "{name}" "{size}"; then',
-            f'  echo "  ✓ {name} already downloaded"',
-            "else",
-            f'  echo "  ↓ {name}"',
-            f'  curl -C - -o "$CACHE/{name}" "{f["ftp"]}"',
-            "fi",
-            f'ln -sf "$CACHE/{name}" "raw/{name}"',
-        ]
-    lines.append("")
+        manifest_rows.append((name, size, pride_https_url(f["ftp"])))
+
+    if not manifest_rows:
+        lines.append("")
+        return "\n".join(lines)
+
+    # Emit a tab-separated manifest and a wave loop (PRIDEMAP_DOWNLOAD_JOBS-way parallel,
+    # default 4). Portable bash 3.2 (macOS): no wait -n; use fixed-size waves instead.
+    # Error reporting: record each PID alongside its filename so a failed download names itself.
+    lines += [
+        "# Manifest: name<TAB>size<TAB>url",
+        "MANIFEST=(",
+    ]
+    for name, size, url in manifest_rows:
+        lines.append(f'  "{name}\t{size}\t{url}"')
+    lines += [
+        ")",
+        "",
+        'N="${PRIDEMAP_DOWNLOAD_JOBS:-4}"',
+        "wave_pids=()   # parallel: PID",
+        "wave_names=()  # parallel: matching filename for error messages",
+        "",
+        "flush_wave() {",
+        "  local i ok=0",
+        "  for i in \"${!wave_pids[@]}\"; do",
+        "    wait \"${wave_pids[$i]}\" || { echo \"ERROR: download failed for ${wave_names[$i]}\"; ok=1; }",
+        "  done",
+        "  wave_pids=(); wave_names=()",
+        "  return $ok",
+        "}",
+        "",
+        "for entry in \"${MANIFEST[@]}\"; do",
+        "  IFS=$'\\t' read -r _name _size _url <<< \"$entry\"",
+        "  fetch_one \"$_name\" \"$_size\" \"$_url\" &",
+        "  wave_pids+=(\"$!\")",
+        "  wave_names+=(\"$_name\")",
+        "  if [ \"${#wave_pids[@]}\" -ge \"$N\" ]; then",
+        "    flush_wave || exit 1",
+        "  fi",
+        "done",
+        "[ \"${#wave_pids[@]}\" -gt 0 ] && { flush_wave || exit 1; }",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -2150,29 +2218,32 @@ def pipeline_start(accession: str, request: Request, web: str = "", runs: str = 
     return {"accession": accession, "started": True, "pid": proc.pid, "dir": str(d), "runs": sel}
 
 
-@router.get("/dataset/{accession}/pipeline/status")
-def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str = ""):
-    """Where the run has got to: one entry per stage, plus the last lines of output.
-
-    `runs` must match the selection the run was started with, since each selection has its own directory."""
-    local = _is_local(request)
-    sel = parse_runs(runs)
-    d = run_dir(accession, sel)
-    plan = dataset_search_plan(accession, sel)
-    all_events = _read_progress(d)
-    # Only consider events from the last run_started so stale failures from a prior run
-    # don't bleed into the current run's status.
+def current_run_events(all_events: list[dict]) -> list[dict]:
+    """Only the events from the latest run_started, so a prior run's failure cannot bleed through."""
     last_run_idx = max((i for i, e in enumerate(all_events) if e.get("event") == "run_started"), default=-1)
-    events = all_events[last_run_idx:] if last_run_idx >= 0 else all_events
+    return all_events[last_run_idx:] if last_run_idx >= 0 else all_events
+
+
+def progress_by_stage(events: list[dict]) -> dict[str, dict]:
+    """Reduce progress.jsonl events to one state/duration/step-list per stage id.
+
+    Single owner of that reduction: run_all.sh emits the same events wherever it runs, so a local run
+    and a Modal run are read by this one function rather than by two that can drift apart.
+    """
     by_stage: dict[str, dict] = {}
     for e in events:
         sid = e.get("stage") or ""
         if not sid:
             continue
-        s = by_stage.setdefault(sid, {"state": "pending", "seconds": None, "steps": [], "message": None})
+        s = by_stage.setdefault(sid, {"state": "pending", "seconds": None, "steps": [], "message": None,
+                                      "started": None})
         ev = e.get("event")
         if ev == "stage_started":
             s["state"] = "running"
+            # When the running stage began, so elapsed time is derived from the run rather than from
+            # when a browser happened to start watching it. Without this a page reload restarted the
+            # clock at zero mid-stage, and a job resumed in a new tab could show no elapsed time at all.
+            s["started"] = e.get("ts")
         elif ev == "stage_finished":
             s["state"] = "done"
             s["seconds"] = e.get("seconds")
@@ -2184,6 +2255,31 @@ def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str 
             s["message"] = e.get("message")
         elif ev in ("substage", "maxquant_step", "uploaded", "warning"):
             s["steps"].append(e.get("message"))
+    return by_stage
+
+
+def stage_view(plan: dict, by_stage: dict[str, dict]) -> list[dict]:
+    """The plan's stages annotated with how far the run has got — what the UI draws."""
+    return [
+        {**s, "state": st.get("state", "pending"), "seconds": st.get("seconds"),
+         "steps": (st.get("steps") or [])[-6:], "message": st.get("message"),
+         "started": st.get("started")}
+        for s in (plan.get("stages") or [])
+        for st in (by_stage.get(s["id"], {}),)
+    ]
+
+
+@router.get("/dataset/{accession}/pipeline/status")
+def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str = ""):
+    """Where the run has got to: one entry per stage, plus the last lines of output.
+
+    `runs` must match the selection the run was started with, since each selection has its own directory."""
+    local = _is_local(request)
+    sel = parse_runs(runs)
+    d = run_dir(accession, sel)
+    plan = dataset_search_plan(accession, sel)
+    events = current_run_events(_read_progress(d))
+    by_stage = progress_by_stage(events)
     pid_file = d / ".pipeline" / "run.pid"
     running = False
     if pid_file.exists():
@@ -2191,11 +2287,7 @@ def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str 
             running = _pid_alive(int(pid_file.read_text().strip()))
         except ValueError:
             running = False
-    stages = []
-    for s in plan.get("stages") or []:
-        st = by_stage.get(s["id"], {})
-        stages.append({**s, "state": st.get("state", "pending"), "seconds": st.get("seconds"),
-                       "steps": (st.get("steps") or [])[-6:], "message": st.get("message")})
+    stages = stage_view(plan, by_stage)
     log_lines: list[str] = []
     lg = d / "run.log"
     if lg.exists():
@@ -2293,33 +2385,119 @@ def _mq_auth_headers() -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def _mq_health_check(base_url: str) -> dict:
-    """Probe GET {base_url}/health. Returns {ok, status_code, detail}. Always logs."""
+def _mq_upstream_error(url: str, status: int, body: str) -> HTTPException:
+    """Relay a remote-server error together with its provenance.
+
+    `HTTPException(status, raw_body)` nests the remote JSON inside this API's own `detail` string,
+    producing `{"detail": "{\\"detail\\": [...]}"}`. The caller then has to decode twice, and nothing
+    in the payload says the failure came from the remote server rather than from this API — which is
+    how a remote 422 was read as "the local API is down" for several rounds on 2026-10-18.
+    """
+    try:
+        upstream = json.loads(body)
+    except ValueError:
+        upstream = body[:2000]
+    return HTTPException(status, {"source": url, "status": status, "upstream": upstream})
+
+
+def _mq_health_check(base_url: str, attempt_timeout: int = 10) -> dict:
+    """Probe GET {base_url}/health once. Returns {ok, status_code, detail}."""
     url = f"{base_url}/health"
-    logger.info("remote MQ health check → %s", url)
     try:
         req = urllib.request.Request(url, headers=_mq_auth_headers())
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=attempt_timeout) as resp:
             body = resp.read().decode(errors="replace")
-            logger.info("remote MQ health check ✓  %s  body=%r", url, body[:120])
+            logger.info("remote MQ health ✓  %s  body=%r", url, body[:120])
             return {"ok": True, "status_code": resp.status, "detail": body}
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
-        logger.warning("remote MQ health check ✗  %s  HTTP %s  %r", url, e.code, detail[:120])
+        logger.warning("remote MQ health ✗  %s  HTTP %s  %r", url, e.code, detail[:120])
         return {"ok": False, "status_code": e.code, "detail": detail}
     except Exception as e:
-        logger.warning("remote MQ health check ✗  %s  %s", url, e)
+        logger.warning("remote MQ health ✗  %s  %s", url, e)
         return {"ok": False, "status_code": None, "detail": str(e)}
+
+
+def _fetch_modal_logs(app_name: str = "pridemap-maxquant", tail: int = 30) -> str:
+    """Best-effort fetch of recent Modal container logs via the CLI.
+
+    Returns the last `tail` lines as a string, or empty string on any failure.
+    Never raises — diagnostic only.
+    """
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["uvx", "modal", "app", "logs", app_name, "--tail", str(tail)],
+            capture_output=True, text=True, timeout=15,
+        )
+        output = (result.stdout + result.stderr).strip()
+        return output if output else ""
+    except Exception as exc:
+        logger.debug("_fetch_modal_logs failed: %s", exc)
+        return ""
+
+
+def _mq_await_ready(
+    base_url: str,
+    wall_timeout: int = 120,
+    poll_interval: int = 8,
+    attempt_timeout: int = 8,
+) -> None:
+    """Block until the Modal MQ server responds to /health or wall_timeout seconds pass.
+
+    Modal serverless containers cold-start in 20-60 s. This function retries with
+    short per-attempt timeouts so one slow probe doesn't consume the whole budget.
+    Raises HTTPException(503) if the server never comes up within wall_timeout.
+
+    Use this at the start of every function that calls the Modal API.
+    """
+    import time as _time
+    start = _time.monotonic()
+    deadline = start + wall_timeout
+    attempt = 0
+    last_detail = ""
+    logger.info("mq_await_ready  starting  url=%s  budget=%ds", base_url, wall_timeout)
+    while _time.monotonic() < deadline:
+        attempt += 1
+        elapsed = int(_time.monotonic() - start)
+        remaining = deadline - _time.monotonic()
+        this_timeout = min(attempt_timeout, max(1, int(remaining)))
+        logger.info("mq_await_ready  attempt=%d  elapsed=%ds  remaining=%ds  probe_timeout=%ds",
+                    attempt, elapsed, int(remaining), this_timeout)
+        result = _mq_health_check(base_url, attempt_timeout=this_timeout)
+        if result["ok"]:
+            logger.info("mq_await_ready  READY  attempt=%d  elapsed=%ds", attempt, int(_time.monotonic() - start))
+            return
+        last_detail = result["detail"]
+        logger.info("mq_await_ready  not ready yet  attempt=%d  detail=%r", attempt, last_detail[:80])
+        # Don't sleep if we've already used the budget.
+        sleep_for = min(poll_interval, max(0, deadline - _time.monotonic()))
+        if sleep_for > 0:
+            _time.sleep(sleep_for)
+    modal_logs = _fetch_modal_logs()
+    if modal_logs:
+        logger.error("mq_await_ready  TIMEOUT — Modal container logs:\n%s", modal_logs)
+    raise HTTPException(
+        503,
+        f"Modal MQ server did not become ready within {wall_timeout}s "
+        f"(last error: {last_detail})"
+        + (f"\n\nModal container logs (last 30 lines):\n{modal_logs}" if modal_logs else ""),
+    )
 
 
 @router.get("/remote-mq")
 def remote_mq_info():
-    """Tells the UI whether a remote MaxQuant server is reachable (MQ_SERVER_URL in .env + /health probe)."""
+    """Tells the UI whether a remote MaxQuant server is configured.
+
+    Availability is determined by config presence only — no live probe — because
+    Modal serverless apps cold-start on first request (20-60 s) and would time out
+    here every time the app has been idle. The real health gate runs at job
+    submission time in pipeline_remote_start().
+    """
     url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
     if not url:
         return {"available": False, "detail": "MQ_SERVER_URL not set"}
-    health = _mq_health_check(url)
-    return {"available": health["ok"], "detail": health["detail"]}
+    return {"available": True, "detail": f"configured: {url}"}
 
 
 @router.get("/local-mq")
@@ -2366,11 +2544,31 @@ def local_mq_info():
 
 
 @router.get("/dataset/{accession}/pipeline/remote/active")
-def pipeline_remote_active(accession: str):
-    """Return the active job for this accession (if any) so the UI can resume after a page reload."""
+def pipeline_remote_active(accession: str, runs: str = ""):
+    """Return the active job for this accession (if any) so the UI can resume after a page reload.
+
+    Phase 2: if the in-process cache misses (e.g. after an API restart), fall back to the Modal
+    Dict via GET /jobs/{accession} on the remote server so the job is still discoverable.
+    """
     job_id = _active_remote_jobs.get(accession)
+
+    if not job_id:
+        # Phase 2 fallback: ask the remote server's durable Dict.
+        modal_url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
+        if modal_url:
+            try:
+                req = urllib.request.Request(f"{modal_url}/jobs/{accession}", headers=_mq_auth_headers())
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
+                job_id = data.get("job_id")
+                if job_id:
+                    _active_remote_jobs[accession] = job_id  # repopulate in-process cache
+            except Exception:
+                pass
+
     if not job_id:
         return {"job_id": None, "status": None}
+
     base_url = _mq_remote_url()
     req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
     try:
@@ -2378,20 +2576,19 @@ def pipeline_remote_active(accession: str):
             data = json.loads(resp.read())
         if data.get("status") in ("done", "error"):
             _active_remote_jobs.pop(accession, None)
-        return {"job_id": job_id, **data}
+        return {"job_id": job_id, **_remote_stage_payload(accession, runs, data)}
     except Exception:
-        return {"job_id": job_id, "status": "running", "log": ""}
+        return {"job_id": job_id, "status": "running", "log": "", "stage_progress": False, "stages": []}
 
 
 @router.post("/dataset/{accession}/pipeline/remote")
-def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
+def pipeline_remote_start(accession: str, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
-    # Health-gate: fail fast with a clear message before building/uploading the kit.
-    health = _mq_health_check(base_url)
-    if not health["ok"]:
-        raise HTTPException(502, f"remote MQ server health check failed: {health['detail']}")
-    kit_bytes, _ = search_kit(accession, _api_base(request), "", runs=parse_runs(runs))
+    _mq_await_ready(base_url)  # waits up to 120 s for Modal cold-start before uploading
+    # api_base is intentionally empty: Modal downloads raw files directly from PRIDE,
+    # not from the local API server which it cannot reach.
+    kit_bytes, _ = search_kit(accession, "", "", runs=parse_runs(runs))
     kit_kb = len(kit_bytes) / 1024
     logger.info("pipeline_remote_start  accession=%s  kit=%.1f KB  url=%s/run", accession, kit_kb, base_url)
     boundary = "PrideMapBoundary"
@@ -2414,7 +2611,7 @@ def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
         logger.error("pipeline_remote_start  HTTP %s from %s/run: %r", e.code, base_url, body_text[:300])
-        raise HTTPException(e.code, body_text)
+        raise _mq_upstream_error(f"{base_url}/run", e.code, body_text)
     except TimeoutError as e:
         logger.error("pipeline_remote_start  timeout after 60 s calling %s/run: %s", base_url, e)
         raise HTTPException(504, f"remote MQ server timed out (60 s): {e}")
@@ -2423,9 +2620,29 @@ def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
+def _remote_stage_payload(accession: str, runs: str, data: dict) -> dict:
+    """Add per-stage progress to a remote /status reply, when the remote server reported any.
+
+    Modal runs the same run_all.sh as a local run, so its progress.jsonl carries the same events and
+    is reduced by the same `progress_by_stage`. A server deployed before stage shipping existed sends
+    no `progress` key; that is reported as stage_progress=False rather than as an all-pending run,
+    because "we cannot see the stages" and "no stage has started" are different claims.
+    """
+    events = data.get("progress")
+    if not isinstance(events, list):
+        return {**data, "stage_progress": False, "stages": []}
+    plan = dataset_search_plan(accession, parse_runs(runs))
+    by_stage = progress_by_stage(current_run_events([e for e in events if isinstance(e, dict)]))
+    return {**data, "stage_progress": True, "stages": stage_view(plan, by_stage)}
+
+
 @router.get("/dataset/{accession}/pipeline/remote/{job_id}/status")
-def pipeline_remote_status(accession: str, job_id: str):
-    """Poll job status from the remote server. Returns {status, log}."""
+def pipeline_remote_status(accession: str, job_id: str, runs: str = ""):
+    """Poll job status from the remote server. Returns {status, log, stages, stage_progress}.
+
+    `runs` must match the selection the job was submitted with: it decides which stages the plan
+    contains, and therefore what the relayed events are matched against.
+    """
     base_url = _mq_remote_url()
     url = f"{base_url}/status/{job_id}"
     logger.debug("pipeline_remote_status  job_id=%s → %s", job_id, url)
@@ -2434,11 +2651,11 @@ def pipeline_remote_status(accession: str, job_id: str):
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         logger.debug("pipeline_remote_status  job_id=%s  status=%s", job_id, data.get("status"))
-        return data
+        return _remote_stage_payload(accession, runs, data)
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
         logger.error("pipeline_remote_status  HTTP %s from %s: %r", e.code, url, body_text[:300])
-        raise HTTPException(e.code, body_text)
+        raise _mq_upstream_error(url, e.code, body_text)
     except TimeoutError as e:
         logger.error("pipeline_remote_status  timeout after 15 s calling %s: %s", url, e)
         raise HTTPException(504, f"remote MQ server timed out polling status (15 s): {e}")
@@ -2463,7 +2680,7 @@ def pipeline_remote_results(accession: str, job_id: str):
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
         logger.error("pipeline_remote_results  HTTP %s from %s: %r", e.code, url, body_text[:300])
-        raise HTTPException(e.code, body_text)
+        raise _mq_upstream_error(url, e.code, body_text)
     except TimeoutError as e:
         logger.error("pipeline_remote_results  timeout after 120 s calling %s: %s", url, e)
         raise HTTPException(504, f"remote MQ server timed out fetching results (120 s): {e}")
@@ -2482,6 +2699,6 @@ def pipeline_remote_delete(accession: str, job_id: str):
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        raise _mq_upstream_error(f"{base_url}/job/{job_id}", e.code, e.read().decode(errors="replace"))
     except Exception as e:
         raise HTTPException(502, f"remote MQ server unreachable: {e}")

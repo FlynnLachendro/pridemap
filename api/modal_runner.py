@@ -1,0 +1,702 @@
+"""
+Modal serverless runner for MaxQuant.
+
+Deploy:  modal deploy api/modal_runner.py
+Verify:  curl $MQ_SERVER_URL/health
+
+Contract (consumed by api/omics.py lines 2276-2487):
+  GET  /health                → {"ok": true}
+  POST /run                   → {"job_id": "..."}   multipart field: kit (zip)
+  GET  /status/{job_id}       → {"status": "running"|"done"|"error", "log": "...", "progress": [...]}
+                                 progress carries run_all.sh's own stage events, which is what lets
+                                 the caller show stages, elapsed time and ETA for a remote job.
+  GET  /results/{job_id}      → proteinGroups.txt (TSV)
+  DELETE /job/{job_id}        → {"deleted": bool, "cancelled": bool, "problems": [...]}
+  GET  /jobs/{accession}      → {"job_id": "..."|null}   (Phase 2: durable lookup)
+  GET  /jobs                  → {"jobs": [{"accession", "job_id", "status"}, ...]}
+"""
+
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["modal>=0.73"]
+# ///
+
+import io
+import json
+import os
+import pathlib
+import subprocess
+import tempfile
+import threading
+import time
+import zipfile
+
+import modal
+import modal.exception
+from modal import Secret, Volume
+
+# ----------------------------------------------------------------------------- module-level objects (all four required)
+
+app     = modal.App("pridemap-maxquant")
+vol     = Volume.from_name("pridemap-runs", create_if_missing=True)
+raw_vol = Volume.from_name("pridemap-raw",  create_if_missing=True)
+jobs    = modal.Dict.from_name("pridemap-jobs", create_if_missing=True)
+secret  = Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
+
+# Where job directories live. In a Modal container this is the Volume mount point; off Modal
+# (a local run, a test, a plain host serving the same gateway) nothing is mounted at /data and it
+# may not even be writable, so the root is overridable. One owner, so the worker that writes a job
+# directory and the gateway that reads it can never diverge.
+VOLUME_MOUNT   = "/data"       # where both @app.function decorators mount `vol` (job results)
+RAW_CACHE_MOUNT = "/raw-cache" # where run_maxquant mounts `raw_vol` (cached raw files, cross-job)
+DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
+
+
+def _vol_sync(action: str, v: "Volume | None" = None) -> None:
+    """Best-effort Volume commit/reload for vol (default) or any other Volume.
+
+    Off Modal there is no Volume to talk to and these calls raise; the local filesystem is already
+    coherent there, so a failure is not an error. Never let it mask a real one by propagating.
+    """
+    try:
+        getattr(v or vol, action)()
+    except Exception:
+        pass
+
+# ----------------------------------------------------------------------------- container images
+
+# Lightweight image for the ASGI web gateway.
+#
+# Versions are pinned: an unpinned pip_install resolves at BUILD time, so the image's behaviour can
+# change with no commit. That is how the missing-multipart bug became a hard failure — a Starlette
+# release turned absent form support into an AssertionError inside request.form().
+#
+# python-multipart is required by Starlette's request.form() and is an implicit dependency of a
+# feature, not of any import in this repo, so no import scan can find it missing.
+#
+# The build assertion checks the *capability* rather than a package name: Starlette sets
+# parse_options_header to None when multipart support is unavailable, and that is the exact symbol
+# whose None-ness produced the 500. Asserting `import multipart` instead would track a deprecated
+# alias and can pass while form parsing is broken (or fail while it works).
+web_image = (
+    modal.Image.debian_slim()
+    .pip_install("fastapi==0.143.5", "uvicorn==0.54.0", "python-multipart==0.0.32")
+    .run_commands(
+        'python -c "from starlette.requests import parse_options_header as p; '
+        'assert p is not None, \'form parsing unavailable: python-multipart missing\'"'
+    )
+    .add_local_python_source("modal_web")   # the gateway module, imported inside web() only
+)
+
+# Heavy MaxQuant image for the compute worker.
+#
+# Built from docker/maxquant/Dockerfile (a multi-stage build) so Modal constructs the image
+# at deploy time without a separate registry push.  The Dockerfile replicates what
+# preflight.sh does locally: copies MaxQuant assemblies from the biocontainers image onto
+# the .NET SDK base (mcr.microsoft.com/dotnet/sdk:3.1-bullseye), giving exact parity with
+# the local macOS Docker setup.
+#
+# Why the SDK base is required: MaxQuant's DotNetCore31Installed() checks `dotnet --info`
+# for a line starting with "3.1" (an installed SDK).  The biocontainers image has .NET
+# runtime only; no such line exists and the run fails immediately with
+# "Please install .NET Core 3.1 SDK" — before mqpar.xml is even read.
+# The SDK image outputs "3.1.426 [/usr/share/dotnet/sdk]" which satisfies the check.
+#
+# The SDK image (Debian Bullseye) ships curl and ca-certificates, so the static-curl
+# fetch and CA-bundle workarounds the old image required are not needed here.
+_DOCKERFILE = pathlib.Path(__file__).parent.parent / "docker" / "maxquant" / "Dockerfile"
+image = (
+    modal.Image.from_dockerfile(_DOCKERFILE)
+    .run_commands(
+        # Prove TLS actually works against the two hosts this pipeline fetches from, at
+        # BUILD time. A range request keeps it to a few bytes; -f makes an HTTP error a failure.
+        "curl -fsS -r 0-99 -o /dev/null "
+        "https://ftp.pride.ebi.ac.uk/pride/data/archive/2024/01/PXD046787/2019_12_13_Daria_01.raw",
+        "curl -fsS -o /dev/null https://rest.uniprot.org/uniprotkb/P01308.fasta",
+    )
+    .run_commands("which maxquant")   # fail at BUILD time if binary is missing
+)
+
+# ----------------------------------------------------------------------------- worker
+
+# ----------------------------------------------------------------------------- download worker (cheap)
+
+@app.function(
+    image=image,
+    volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
+    secrets=[secret],
+    cpu=2,
+    memory=4096,
+    timeout=7200,   # 2 h — enough for any current public PRIDE dataset
+)
+def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
+    """Download raw files for one accession into raw_vol. Cheap container (~10× less than MaxQuant).
+
+    Runs only download_raw.sh. raw_vol.reload() at start means an already-cached accession
+    finishes in seconds — have() returns true for each file and curl is never invoked.
+    raw_vol is committed every 15 s so an interrupted container leaves a partial file that
+    the next run resumes via curl -C - rather than restarting.
+    """
+    job_dir = DATA_ROOT / job_id
+    log_path = job_dir / "run.log"
+
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+        try:
+            with log_path.open("a") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass   # job_dir may not be visible before the first reload
+
+    _vol_sync("reload")        # see the job_dir the orchestrator created and committed
+    _vol_sync("reload", raw_vol)
+    _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
+
+    # Concurrent-download guard: two containers downloading the same accession simultaneously
+    # both run `curl -C -` against the same partial file on raw_vol, producing a corrupt result.
+    # A lock file on raw_vol prevents the second container from starting its own curl run.
+    # The lock's mtime is the evidence of liveness — anything older than the download timeout
+    # (7200 s) was left by a crashed container and is ignored.
+    _LOCK_TIMEOUT = 7200  # matches this function's Modal timeout
+    cache_dir = pathlib.Path(RAW_CACHE_MOUNT) / accession
+    cache_dir.mkdir(exist_ok=True)
+    lock_file = cache_dir / ".downloading"
+
+    lock_acquired = False
+    if lock_file.exists():
+        age = time.time() - lock_file.stat().st_mtime
+        if age < _LOCK_TIMEOUT:
+            _log(f"another container is downloading {accession} (lock age {age:.0f} s) — waiting")
+            for _ in range(72):   # up to 6 min (72 × 5 s)
+                time.sleep(5)
+                _vol_sync("reload", raw_vol)
+                if not lock_file.exists():
+                    break
+            _log("concurrent download finished (or timed out) — raw_vol reloaded, skipping to search")
+            return   # search worker will reload and have() will find the files
+    lock_file.touch()
+    _vol_sync("commit", raw_vol)   # make the lock visible before any curl runs
+    lock_acquired = True
+
+    work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"dl-{job_id}-"))
+    with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
+        zf.extractall(work_dir)
+
+    dl_script = work_dir / "download_raw.sh"
+    if not dl_script.exists():
+        raise FileNotFoundError("download_raw.sh not found in kit")
+    dl_script.chmod(0o755)
+
+    env = {**os.environ, "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT}
+
+    _stop = threading.Event()
+
+    def _ship() -> None:
+        while not _stop.wait(15):
+            _vol_sync("commit")
+            _vol_sync("commit", raw_vol)
+
+    t = threading.Thread(target=_ship, daemon=True)
+    t.start()
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(dl_script)],
+            cwd=str(work_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        for line in proc.stdout:  # type: ignore[union-attr]
+            _log(line.rstrip())
+        proc.wait()
+        _vol_sync("commit", raw_vol)
+        _vol_sync("commit")
+        if proc.returncode != 0:
+            raise RuntimeError(f"download_raw.sh exited {proc.returncode}")
+    finally:
+        _stop.set()
+        if lock_acquired:
+            lock_file.unlink(missing_ok=True)   # release lock so concurrent jobs can proceed
+        _vol_sync("commit", raw_vol)
+        _vol_sync("commit")
+
+
+# ----------------------------------------------------------------------------- MaxQuant worker (expensive)
+
+@app.function(
+    image=image,
+    volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
+    secrets=[secret],
+    cpu=16,
+    memory=65536,   # 64 GB
+    timeout=86400,  # 24 h
+)
+def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
+    """Run MaxQuant. Raw files are already in raw_vol — download_raw.sh's have() skips them.
+
+    The expensive 64 GB container only starts after _download_raw has committed all raw files,
+    so it spends zero time waiting for downloads.
+    """
+    job_dir = DATA_ROOT / job_id
+    log_path = job_dir / "run.log"
+    progress_path = job_dir / "progress.jsonl"
+
+    # Reload before first write so the log lines from _download_raw are visible in the file
+    # we append to, and so the raw files committed by _download_raw are on-disk.
+    _vol_sync("reload")
+    _vol_sync("reload", raw_vol)
+
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+        try:
+            with log_path.open("a") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass
+
+    _log(f"raw cache: {RAW_CACHE_MOUNT} (reloaded — raw files should already be present)")
+
+    # run_all.sh writes its own stage events next to itself in the container-local work dir.
+    # Copying that file to the Volume on every sync is what lets /status report stages,
+    # elapsed time and ETA while the search runs.
+    kit_progress: list[pathlib.Path] = []
+
+    def _ship_stages() -> None:
+        for src in kit_progress:
+            try:
+                (job_dir / "stages.jsonl").write_bytes(src.read_bytes())
+            except OSError:
+                pass
+
+    _stop_shipper = threading.Event()
+
+    def _shipper() -> None:
+        while not _stop_shipper.wait(15):
+            _ship_stages()
+            _vol_sync("commit")
+            _vol_sync("commit", raw_vol)
+
+    shipper = threading.Thread(target=_shipper, daemon=True)
+    shipper.start()
+
+    try:
+        work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"mq-{job_id}-"))
+        kit_progress.append(work_dir / "progress.jsonl")
+
+        with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
+            zf.extractall(work_dir)
+        _log("kit unpacked")
+
+        run_script = work_dir / "run_all.sh"
+        if not run_script.exists():
+            raise FileNotFoundError("run_all.sh not found in kit")
+        run_script.chmod(0o755)
+
+        # raw files are already in raw_vol — download_raw.sh's have() check skips them instantly
+        env = {
+            **os.environ,
+            "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT,
+            "MAXQUANT_CMD": "maxquant",
+        }
+
+        _log("starting run_all.sh (download stage will be skipped — files already in raw_vol)")
+        _write_progress(progress_path, "running", "starting run_all.sh")
+        proc = subprocess.Popen(
+            ["bash", str(run_script)],
+            cwd=str(work_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        for line in proc.stdout:  # type: ignore[union-attr]
+            _log(line.rstrip())
+        proc.wait()
+
+        _vol_sync("commit", raw_vol)
+
+        if proc.returncode != 0:
+            _write_progress(progress_path, "error", f"run_all.sh exited {proc.returncode}")
+            _log(f"FAILED exit={proc.returncode}")
+        else:
+            protein_src = _find_protein_groups(work_dir)
+            if protein_src:
+                out_dir = job_dir / "combined" / "txt"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "proteinGroups.txt").write_bytes(protein_src.read_bytes())
+                _log("proteinGroups.txt copied to volume")
+                _write_progress(progress_path, "done", "complete")
+            else:
+                _write_progress(progress_path, "error", "proteinGroups.txt not found")
+                _log("FAILED: proteinGroups.txt not found")
+
+    except Exception as exc:
+        _log(f"EXCEPTION: {exc}")
+        _write_progress(progress_path, "error", str(exc))
+    finally:
+        _stop_shipper.set()
+        _ship_stages()
+        _vol_sync("commit")
+        _vol_sync("commit", raw_vol)
+
+
+# ----------------------------------------------------------------------------- orchestrator (lightweight)
+
+@app.function(
+    image=image,
+    volumes={VOLUME_MOUNT: vol},
+    secrets=[secret],
+    cpu=1,
+    memory=1024,
+    timeout=86400,   # Modal's maximum (24 h). _download_raw is capped at 2 h, leaving up to
+                     # 22 h for MaxQuant — sufficient for all but the largest public datasets.
+)
+def run_maxquant(kit_bytes: bytes, accession: str) -> str:
+    """Lightweight orchestrator: sequences download (cheap) then search (expensive).
+
+    Returning this function's own call_id keeps the polling contract unchanged:
+    /status maps call_id → "running" while this orchestrator is alive (i.e. while either
+    phase is in progress), and → "done" when it returns. The job directory is named after
+    this call_id so /results and /logs resolve correctly without any gateway changes.
+
+    Cost model vs the old single-function approach:
+      download phase: 2 CPU / 4 GB  (~10× cheaper than 16 CPU / 64 GB)
+      search phase:   16 CPU / 64 GB (unchanged)
+      orchestrator:   1 CPU / 1 GB  (negligible; it just blocks waiting for children)
+    """
+    job_id = _job_id_for_this_run(accession)
+    job_dir = DATA_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    _vol_sync("commit")   # make job_dir visible to children before they start
+
+    log_path = job_dir / "run.log"
+    progress_path = job_dir / "progress.jsonl"
+
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+        with log_path.open("a") as f:
+            f.write(msg + "\n")
+
+    _log(f"job_id={job_id}  accession={accession}")
+    _log("phase 1/2: download (cheap container — 2 CPU / 4 GB)")
+    _write_progress(progress_path, "running", "download phase starting")
+    _vol_sync("commit")
+
+    try:
+        _download_raw.remote(kit_bytes, accession, job_id)
+    except Exception as exc:
+        _log(f"DOWNLOAD FAILED: {exc}")
+        _write_progress(progress_path, "error", f"download failed: {exc}")
+        _vol_sync("commit")
+        return job_id
+
+    _vol_sync("reload")   # pull log lines written by the download worker
+    _log("phase 2/2: MaxQuant search (expensive container — 16 CPU / 64 GB)")
+    _write_progress(progress_path, "running", "search phase starting")
+    _vol_sync("commit")
+
+    try:
+        _run_maxquant_search.remote(kit_bytes, accession, job_id)
+    except Exception as exc:
+        _log(f"MAXQUANT FAILED: {exc}")
+        _write_progress(progress_path, "error", f"maxquant failed: {exc}")
+        _vol_sync("commit")
+
+    return job_id
+
+
+# ----------------------------------------------------------------------------- cache eviction
+
+@app.function(
+    image=image,
+    volumes={RAW_CACHE_MOUNT: raw_vol},
+    cpu=1,
+    memory=1024,
+    timeout=3600,
+)
+def prune_raw_cache(max_age_days: int = 30) -> dict:
+    """Remove accession directories from raw_vol that have not been accessed recently.
+
+    Only removes a directory when EVERY raw file inside it is older than max_age_days, so
+    an accession that is currently downloading or was recently used is never touched.
+    Lock files (.downloading) are ignored when measuring age — only .raw files count.
+
+    Run manually:  modal run api/modal_runner.py::prune_raw_cache
+    Override age:  modal run api/modal_runner.py::prune_raw_cache --max-age-days 7
+    """
+    import shutil
+
+    _vol_sync("reload", raw_vol)
+    cutoff = time.time() - max_age_days * 86400
+    cache_root = pathlib.Path(RAW_CACHE_MOUNT)
+    removed: list[str] = []
+    kept: list[str] = []
+
+    for entry in sorted(cache_root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        accession = entry.name
+        raw_files = [f for f in entry.rglob("*") if f.is_file() and not f.name.startswith(".")]
+        if not raw_files:
+            continue
+        newest_mtime = max(f.stat().st_mtime for f in raw_files)
+        age_days = (time.time() - newest_mtime) / 86400
+        if newest_mtime < cutoff:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(f"{accession} ({age_days:.0f} days old)")
+        else:
+            kept.append(f"{accession} ({age_days:.1f} days old)")
+
+    if removed:
+        _vol_sync("commit", raw_vol)
+
+    return {"removed": removed, "kept": kept, "max_age_days": max_age_days}
+
+
+def _job_id_for_this_run(accession: str) -> str:
+    """The id this run's directory is named after.
+
+    It must be the id the CLIENT polls, which is the FunctionCall id that spawn_job() returns:
+    /status and /results look under DATA_ROOT/{that id}. Naming the directory anything else makes
+    the whole run invisible — run.log never appears (the UI shows "Waiting for output…" for hours)
+    and /results 404s even after a successful search.
+
+    Off Modal there is no call id (and older clients may not expose the accessor at all), so the
+    fallback keeps local runs working with a directory name that is still unique per run.
+    """
+    current_id = getattr(modal, "current_function_call_id", lambda: None)
+    try:
+        call_id = current_id()
+    except Exception:
+        call_id = None
+    return call_id or f"{accession}-{int(time.time())}"
+
+
+def _write_progress(path: pathlib.Path, status: str, message: str) -> None:
+    with path.open("a") as f:
+        f.write(json.dumps({"status": status, "message": message, "ts": time.time()}) + "\n")
+
+
+def _find_protein_groups(work_dir: pathlib.Path) -> pathlib.Path | None:
+    for p in work_dir.rglob("proteinGroups.txt"):
+        return p
+    return None
+
+
+# ----------------------------------------------------------------------------- ASGI web endpoints
+
+class _ModalBackend:
+    """Modal-side implementation of modal_web.Backend.
+
+    Deliberately free of FastAPI imports: this module is also loaded in the MaxQuant worker image,
+    which has no FastAPI installed.
+    """
+
+    def spawn_job(self, kit_bytes: bytes, accession: str) -> str:
+        # object_id is read before responding so the caller always receives a pollable id.
+        return run_maxquant.spawn(kit_bytes, accession).object_id
+
+    def accession_from_kit(self, kit_bytes: bytes) -> str:
+        return _accession_from_kit(kit_bytes)
+
+    def record_job(self, accession: str, job_id: str) -> None:
+        try:
+            jobs[accession] = job_id
+        except Exception as exc:
+            # Non-fatal: /jobs/{accession} has a fallback. Logged rather than swallowed because a
+            # silent miss makes /jobs under-report, and an empty /jobs is exactly what gets used to
+            # decide whether terminating this app's containers would destroy running work.
+            print(f"WARNING: jobs dict write failed for {accession}: {exc}", flush=True)
+
+    def job_status(self, job_id: str) -> str:
+        return _call_status(job_id)
+
+    def job_log(self, job_id: str) -> str:
+        return _read_log(job_id)
+
+    def job_progress(self, job_id: str) -> list[dict]:
+        return _read_stage_events(job_id)
+
+    def results_path(self, job_id: str) -> pathlib.Path | None:
+        job_dir = _job_dir(job_id)
+        if job_dir is None:
+            return None
+        path = job_dir / "combined" / "txt" / "proteinGroups.txt"
+        return path if path.exists() else None
+
+    def delete_job(self, job_id: str) -> dict:
+        # This is the budget stop-button, so every step reports what it actually did. Swallowing a
+        # failed cancel here means a 16-core job keeps billing while the caller is told it stopped.
+        problems: list[str] = []
+
+        try:
+            modal.FunctionCall.from_id(job_id).cancel()
+            cancelled = True
+        except Exception as exc:
+            cancelled = False
+            problems.append(f"cancel failed: {exc}")
+
+        job_dir = _job_dir(job_id)
+        if job_dir is not None and job_dir.exists():
+            import shutil
+            shutil.rmtree(job_dir, ignore_errors=True)
+            if job_dir.exists():
+                problems.append("volume directory could not be removed")
+            try:
+                vol.commit()
+            except Exception as exc:
+                problems.append(f"volume commit failed: {exc}")
+
+        try:
+            for acc, jid in list(jobs.items()):
+                if jid == job_id:
+                    del jobs[acc]
+        except Exception as exc:
+            problems.append(f"jobs dict cleanup failed: {exc}")
+
+        return {"deleted": not problems, "cancelled": cancelled, "problems": problems}
+
+    def list_jobs(self) -> list[tuple[str, str]]:
+        return list(jobs.items())
+
+    def job_for_accession(self, accession: str) -> str | None:
+        try:
+            return jobs.get(accession)
+        except Exception:
+            return None
+
+
+@app.function(
+    image=web_image,
+    volumes={VOLUME_MOUNT: vol},   # required: /status and /results read run.log and proteinGroups.txt
+    secrets=[secret],
+    scaledown_window=1800,  # stay warm 30 min after last request (Modal default is 300 s)
+    # keep_warm=1,          # uncomment to always keep one container hot (eliminates cold starts, costs ~$0.06/h)
+)
+@modal.asgi_app(label="pridemap-mq")
+def web() -> object:
+    # Imported here rather than at module level because the MaxQuant worker image has no FastAPI,
+    # and importing it there would break run_maxquant at container start. The handlers themselves
+    # live in modal_web, where the FastAPI types ARE module-level and therefore always resolvable
+    # by get_type_hints() — see that module's docstring for why that distinction matters.
+    import modal_web
+
+    return modal_web.build_app(
+        _ModalBackend(),
+        expected_token=os.environ.get("MQ_TOKEN", ""),
+        fingerprint=modal_web.source_fingerprint(
+            [pathlib.Path(__file__), pathlib.Path(modal_web.__file__)]
+        ),
+    )
+
+
+# Which exception means "this call has not finished yet" is an implementation detail of the modal
+# client version, and getting it wrong is silent: the status simply reads "error" for healthy jobs.
+# modal/_functions.py imports no TimeoutError from modal.exception, so its `raise TimeoutError()`
+# resolves to the BUILTIN — matching only modal.exception.TimeoutError never fired, and every
+# running job fell through to `except Exception` and reported failure seconds after submission.
+# Both are listed so either client behaviour maps correctly, and each lookup tolerates its absence
+# in older or newer clients (an unresolvable name in an `except` clause raises AttributeError at
+# handling time, turning a version skew into a 500).
+_PENDING_ERRORS: tuple[type[BaseException], ...] = tuple(
+    {TimeoutError, getattr(modal.exception, "TimeoutError", TimeoutError)}
+)
+# OutputExpiredError subclasses modal's TimeoutError, so it must be caught FIRST: a result that has
+# been garbage-collected is a failure to surface, not work still in progress. An empty tuple never
+# matches, which is the right behaviour when a client has no such class.
+_EXPIRED_ERRORS: tuple[type[BaseException], ...] = tuple(
+    c for c in (getattr(modal.exception, "OutputExpiredError", None),) if c is not None
+)
+
+
+def _call_status(job_id: str) -> str:
+    """"running" | "done" | "error" for a spawned call. Shared by /status and /jobs."""
+    try:
+        modal.FunctionCall.from_id(job_id).get(timeout=0)
+        return "done"
+    except _EXPIRED_ERRORS:
+        return "error"
+    except _PENDING_ERRORS:
+        return "running"
+    except Exception:
+        return "error"
+
+
+def _job_dir(job_id: str) -> pathlib.Path | None:
+    """The directory holding this job's run.log and results, or None.
+
+    Single owner of job-id → path resolution, so the worker that writes a job directory and the
+    /status and /results handlers that read it cannot disagree about where output lives.
+    """
+    _vol_sync("reload")
+    direct = DATA_ROOT / job_id
+    if direct.exists():
+        return direct
+
+    # Transitional: jobs spawned before the id unification named their directory
+    # "{accession}-{timestamp}" while the client was handed the FunctionCall id, so their output is
+    # only reachable by reversing the jobs Dict. Delete this branch once no such job is in flight.
+    try:
+        accession = next((acc for acc, jid in jobs.items() if jid == job_id), None)
+    except Exception:
+        accession = None
+    if accession:
+        legacy = sorted(DATA_ROOT.glob(f"{accession}-*"))
+        if legacy:
+            return legacy[-1]
+    return None
+
+
+def _read_log(job_id: str) -> str:
+    job_dir = _job_dir(job_id)
+    if job_dir is None:
+        return ""
+    try:
+        return (job_dir / "run.log").read_text(errors="replace")[-8000:]  # last 8 KB
+    except FileNotFoundError:
+        return ""
+
+
+def _read_stage_events(job_id: str) -> list[dict]:
+    """run_all.sh's stage events for this job, oldest first.
+
+    A half-written final line is expected: the file is copied while the script is appending to it,
+    so an unparseable line is dropped rather than failing the whole poll.
+    """
+    job_dir = _job_dir(job_id)
+    if job_dir is None:
+        return []
+    try:
+        text = (job_dir / "stages.jsonl").read_text(errors="replace")
+    except FileNotFoundError:
+        return []
+    events = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _accession_from_kit(kit_bytes: bytes) -> str:
+    """Extract the dataset accession from the kit zip (best-effort; falls back to timestamp)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
+            for name in zf.namelist():
+                if name.endswith("mqpar.xml"):
+                    text = zf.read(name).decode(errors="replace")
+                    # <filePaths> contains paths like …/PXD001234/raw/…
+                    import re
+                    m = re.search(r"(PXD\d{6})", text)
+                    if m:
+                        return m.group(1)
+    except Exception:
+        pass
+    return f"unknown-{int(time.time())}"
