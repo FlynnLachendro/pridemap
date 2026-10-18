@@ -25,7 +25,6 @@ import io
 import json
 import os
 import pathlib
-import shutil
 import subprocess
 import tempfile
 import threading
