@@ -891,7 +891,7 @@ MAXQUANT_IMAGE = "quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1"
 MAXQUANT_IMAGE_VERSION = "2.0.3.0"
 # Our own native-architecture rebuild of the same MaxQuant release, built on the host that needs it.
 MAXQUANT_NATIVE_IMAGE = f"pridemap/maxquant:{MAXQUANT_IMAGE_VERSION}-native"
-MAXQUANT_MONO_BASE = "mono:6.12"  # multi-arch: amd64, arm64/v8, armv7, ppc64le
+MAXQUANT_RUNTIME_BASE = "mcr.microsoft.com/dotnet/sdk:3.1-bullseye"  # SDK/bullseye: (1) DotNetCore31Installed() needs a "3.1" SDK line in `dotnet --info`; runtime-only has none; dotnet resolves its own host path so a wrapper is never called. (2) ThermoRawFileReader fails on symlinks (IsError=True); only resolves real paths.
 DOCKER_MOUNT = "/data"
 
 MQ_INSTRUMENT = {"orbitrap": 0, "timstof": 1, "qtof": 2, "fticr": 0, "ion_trap": 0}
@@ -1077,6 +1077,9 @@ def mqpar_xml(ctx: dict, plan: dict, run_names: list[str]) -> str:
         "   <includeContaminants>True</includeContaminants>",
         f"   <maxQuantVersion>{MQ_VERSION}</maxQuantVersion>",
         "   <numThreads>8</numThreads>",
+        # Required for dotnet runtime images: prevents MaxQuant from using the non-DotNetCore path
+        # which wraps the subprocess path in literal " chars (Windows compat) causing ENOENT on Linux.
+        "   <useDotNetCore>True</useDotNetCore>",
         _xml_list("filePaths", paths),
         _xml_list("experiments", exps),
         _xml_list("fractions", ["32767"] * len(paths), "short"),
@@ -1299,15 +1302,19 @@ def _mq_docker_lib(plan: dict) -> list[str]:
         '  docker rm -f "$cid" >/dev/null 2>&1 || true',
         '  [ "$rc" = "0" ] || { rm -rf "$d"; return 1; }',
         "  cat > \"$d/Dockerfile\" <<'MQDOCKERFILE'",
-        f"FROM {MAXQUANT_MONO_BASE}",
+        f"FROM --platform=linux/amd64 {MAXQUANT_RUNTIME_BASE}",
         "COPY bin/ /opt/maxquant/",
-        "RUN printf '#!/bin/bash\\nexec mono /opt/maxquant/MaxQuantCmd.exe \"$@\"\\n' \\",
+        # SDK image satisfies DotNetCore31Installed() natively: `dotnet --info` includes "3.1.x [/path/sdk]"
+        # lines that start with "3.1" after trim.  useDotNetCore=True in mqpar.xml ensures MaxQuant uses
+        # FileName="dotnet" (not the Windows-compat quoted path that causes ENOENT on Linux).
+        "RUN rm -f /opt/maxquant/global.json \\",
+        " && printf '#!/bin/sh\\nexec dotnet /opt/maxquant/MaxQuantCmd.exe \"$@\"\\n' \\",
         "      > /usr/local/bin/maxquant \\",
         " && chmod +x /usr/local/bin/maxquant",
         f"WORKDIR {DOCKER_MOUNT}",
         "ENTRYPOINT []",
         "MQDOCKERFILE",
-        '  docker build -q -t "$MQ_IMAGE_NATIVE" "$d" >/dev/null 2>&1; rc=$?',
+        '  docker build --platform linux/amd64 -q -t "$MQ_IMAGE_NATIVE" "$d" >/dev/null 2>&1; rc=$?',
         '  rm -rf "$d"',
         '  return $rc',
         "}",
@@ -1748,15 +1755,20 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 f'    sed "s#{KIT_DIR_TOKEN}#{DOCKER_MOUNT}#g" {tr["config"]} > {_docker_config(tr["config"])}',
                 f'    step "running MaxQuant in $MQ_IMAGE; paths resolved against {DOCKER_MOUNT}"',
                 # raw/*.raw entries may be symlinks to a shared cache outside $PWD (e.g. /var/folders/…).
-                # Docker bind-mounts do not follow symlinks across mount boundaries, so the Thermo reader
-                # would get a dangling link and throw RequireDevice. Resolve every symlink's real parent
-                # directory and add it as an additional bind-mount at the same path so links resolve inside
-                # the container.
+                # ThermoRawFileReader.RawFileAccessBase fails with IsError=True when given a symlink path
+                # even when the link target is mounted. Replace each symlink path in the docker mqpar with
+                # the real path BEFORE running MaxQuant so the reader receives a non-symlink path.
+                # Also add each symlink target's parent directory as a bind-mount at the same path.
+                # Use readlink (not realpath): on macOS realpath canonicalises /var→/private/var but the
+                # symlink target keeps /var/…, leaving it dangling inside the container.
                 '    MQ_SYMLINK_MOUNTS=""',
                 '    for _f in raw/*.raw raw/*.RAW; do',
                 '      [ -L "$_f" ] || continue',
-                '      _real=$(realpath "$_f" 2>/dev/null) || continue',
-                '      _dir=$(dirname "$_real")',
+                '      _link=$(readlink "$_f" 2>/dev/null) || continue',
+                '      _dir=$(dirname "$_link")',
+                '      _base=$(basename "$_f")',
+                # Replace /data/raw/<base> → real path in docker mqpar so Thermo reader gets a real path.
+                f'      _tmp=$(mktemp) && sed "s#{DOCKER_MOUNT}/raw/$_base#$_link#g" {_docker_config(tr["config"])} > "$_tmp" && mv "$_tmp" {_docker_config(tr["config"])}',
                 '      case "$MQ_SYMLINK_MOUNTS" in *"-v $_dir:$_dir"*) ;; *)',
                 '        MQ_SYMLINK_MOUNTS="$MQ_SYMLINK_MOUNTS -v $_dir:$_dir" ;; esac',
                 '    done',
