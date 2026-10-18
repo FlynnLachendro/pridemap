@@ -5,6 +5,7 @@ import {
   PipelineStages,
   StagePill,
   fmtSecs,
+  fmtMins,
   useStageTiming,
   type RunStage,
   type StageState,
@@ -235,9 +236,21 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
           </span>
         )}
         {job.status === "running" && (
-          showLiveStages
+          // Show StagePill only once stage timing is actually ticking (overallSecs > 0 means at
+          // least one stage has a started timestamp). Before that, fall back to wall-clock elapsed
+          // so the card never regresses to "0s elapsed" when stages arrive but are still all-pending.
+          showLiveStages && timing.overallSecs > 0
             ? <StagePill timing={timing} />
-            : <span className="pill">running{wallElapsed != null ? ` · elapsed ${fmtSecs(wallElapsed)}` : "…"}</span>
+            : (() => {
+                const displaySecs = timing.overallSecs > 0 ? timing.overallSecs : (elapsed > 0 ? elapsed : null);
+                return (
+                  <span className="pill">
+                    running
+                    {displaySecs != null ? ` · elapsed ${fmtSecs(displaySecs)}` : "…"}
+                    {timing.overallEtaSecs != null ? ` · ETA ${fmtMins(timing.overallEtaSecs)}` : ""}
+                  </span>
+                );
+              })()
         )}
         {job.status === "done" && <span className="pill bg-ok-soft text-ok">finished</span>}
         {job.status === "error" && (
