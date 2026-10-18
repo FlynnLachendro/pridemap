@@ -133,7 +133,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2 mt-2">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="text-sm font-semibold">Run on cloud ({engineLabel} via Devin)</span>
+        <span className="text-sm font-semibold">Run on cloud ({engineLabel} via Modal)</span>
         {/* Fix 7: show connection badge only when idle; job status badge replaces it when active */}
         {!active && (
           <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/40 bg-ok-soft px-2.5 py-0.5 text-xs font-medium text-ok">

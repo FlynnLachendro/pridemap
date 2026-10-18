@@ -523,7 +523,7 @@ function SearchKit({ plan, accession, remoteAvailable, localMq }: { plan: Search
 
   const showRemote = remoteAvailable && plan.maxquant_offered;
   type RunMethod = "local" | "remote";
-  const [runMethod, setRunMethod] = useState<RunMethod>("local");
+  const [runMethod, setRunMethod] = useState<RunMethod>(showRemote ? "remote" : "local");
 
   const handleRemoteDone = (jobId: string) => {
     const hints = labelA ? `&hint_a=${encodeURIComponent(labelA)}${labelB ? `&hint_b=${encodeURIComponent(labelB)}` : ""}` : "";
@@ -555,20 +555,20 @@ function SearchKit({ plan, accession, remoteAvailable, localMq }: { plan: Search
         </div>
       )}
 
-      <SamplePicker accession={accession} rawNames={plan.raw_names ?? []} onSelect={handleSelect} />
-
-      {selectedRuns.length > 0 && showRemote && (
+      {plan.maxquant_offered && (
         <div className="flex gap-4 text-sm">
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="radio" name="run-method" value="local" checked={runMethod === "local"} onChange={() => setRunMethod("local")} className="accent-teal" />
             Run on this machine
           </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="run-method" value="remote" checked={runMethod === "remote"} onChange={() => setRunMethod("remote")} className="accent-teal" />
-            Run on cloud (Devin)
+          <label className={`flex items-center gap-2 ${remoteAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}>
+            <input type="radio" name="run-method" value="remote" checked={runMethod === "remote"} onChange={() => setRunMethod("remote")} className="accent-teal" disabled={!remoteAvailable} />
+            Run on cloud (Modal){!remoteAvailable && <span className="text-xs text-faint">(set MQ_SERVER_URL in .env)</span>}
           </label>
         </div>
       )}
+
+      <SamplePicker accession={accession} rawNames={plan.raw_names ?? []} onSelect={handleSelect} />
 
       {selectedRuns.length > 0 && (!showRemote || runMethod === "local") && (
         <RunHere accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} hintA={labelA} hintB={labelB} />
