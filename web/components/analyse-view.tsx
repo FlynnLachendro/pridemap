@@ -366,7 +366,7 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm font-semibold">Run on this machine</span>
         {status?.running
-          ? <span className="pill">running · {done}/{totalStages} stages · elapsed {fmtMins(overallSecs)}{overallEtaSecs != null ? ` · ETA ${fmtMins(overallEtaSecs)}` : ""}</span>
+          ? <span className="pill">running · {done}/{totalStages} stages · elapsed {fmtSecs(overallSecs)}{overallEtaSecs != null ? ` · ETA ${fmtMins(overallEtaSecs)}` : ""}</span>
           : status?.finished ? <span className="pill bg-ok-soft text-ok">finished · {fmtSecs(overallSecs)}</span>
           : status?.failed ? <span className="pill text-warn">stopped</span> : null}
         {status?.running && (
@@ -403,7 +403,7 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
               <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
                 <span aria-hidden className="inline-block w-4">{STATE_MARK[s.state]}</span>
                 {s.label}
-                {elapsed != null && <span className="text-faint"> · elapsed: {fmtMins(elapsed)}</span>}
+                {elapsed != null && <span className="text-faint"> · elapsed: {fmtSecs(elapsed)}</span>}
                 {(() => {
                   if (s.state !== "running" || !elapsed || s.steps.length === 0) return null;
                   const perRun = mqLatestPerRun(s.steps);
@@ -446,11 +446,12 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
                                   <span className="truncate max-w-[140px] shrink-0" title={label}>{label}</span>
                                   <span className="text-[10px] shrink-0">·</span>
                                   <span className="shrink-0">{stageName}</span>
+                                  <span className="spinner shrink-0" aria-hidden />
                                   {idx >= 0 && <span className="text-[10px] shrink-0">({idx + 1}/{total})</span>}
                                   <div className="h-1.5 w-20 rounded-full bg-muted shrink-0 overflow-hidden" title={`${pct}%`}>
-                                    <div className="h-full rounded-full bg-teal transition-all duration-500" style={{ width: `${pct}%` }} />
+                                    <div className="h-full rounded-full bg-teal transition-all duration-500 animate-pulse" style={{ width: `${pct}%` }} />
                                   </div>
-                                  {elapsed != null && <span className="text-[10px] shrink-0">· elapsed: {fmtMins(elapsed)}</span>}
+                                  {elapsed != null && <span className="text-[10px] shrink-0">· elapsed: {fmtSecs(elapsed)}</span>}
                                   {etaSecs != null && etaSecs > 0 && <span className="text-[10px] shrink-0">· ETA: {fmtMins(etaSecs)}</span>}
                                 </div>
                               );
