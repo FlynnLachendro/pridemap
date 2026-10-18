@@ -197,7 +197,12 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   // produces, so they render through the same component with the same elapsed time and ETA.
   const liveStages: RunStage[] = job.stage_progress ? (job.stages ?? []) : [];
   const timing = useStageTiming(liveStages, st === "running");
-  const showLiveStages = liveStages.length > 0 && (st === "running" || st === "done") && !contactLost;
+  // "error" belongs here. Excluding it meant the real stage list vanished at the exact moment it
+  // mattered most — the server knows which stage failed and why, and the card replaced that with a
+  // hard-coded ladder that cannot say either. Contact loss still falls back, because then we have no
+  // current stages, only stale ones.
+  const showLiveStages =
+    liveStages.length > 0 && (st === "running" || st === "done" || st === "error") && !contactLost;
   // Wall-clock time since this page submitted the job. Only known for a job submitted in this
   // session, which is why it is null rather than 0 for a resumed one.
   const wallElapsed = submitStart.current != null && elapsed > 0 ? elapsed : null;

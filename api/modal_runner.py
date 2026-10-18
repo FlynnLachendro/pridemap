@@ -356,24 +356,29 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
 
         _vol_sync("commit", raw_vol)
 
-        if proc.returncode != 0:
-            _write_progress(progress_path, "error", f"run_all.sh exited {proc.returncode}")
-            _log(f"FAILED exit={proc.returncode}")
-        else:
-            protein_src = _find_protein_groups(work_dir)
-            if protein_src:
-                out_dir = job_dir / "combined" / "txt"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                (out_dir / "proteinGroups.txt").write_bytes(protein_src.read_bytes())
-                _log("proteinGroups.txt copied to volume")
-                _write_progress(progress_path, "done", "complete")
-            else:
-                _write_progress(progress_path, "error", "proteinGroups.txt not found")
-                _log("FAILED: proteinGroups.txt not found")
+        # Every failure below RAISES. Writing "error" into progress.jsonl and returning normally is
+        # what made a dead run report as finished: the FunctionCall completed without an exception,
+        # so _call_status saw .get() succeed and answered "done". The progress file it wrote instead
+        # is not read by any endpoint. Modal's own call state is the only channel the UI's status
+        # comes through, so a failure has to travel on that channel to be seen at all.
+        protein_src = _find_protein_groups(work_dir) if proc.returncode == 0 else None
+        problem = search_failure(proc.returncode, protein_src)
+        if problem:
+            _write_progress(progress_path, "error", problem)
+            _log(f"FAILED: {problem}")
+            raise RuntimeError(problem)
+
+        assert protein_src is not None  # search_failure returns a reason when it is None
+        out_dir = job_dir / "combined" / "txt"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "proteinGroups.txt").write_bytes(protein_src.read_bytes())
+        _log("proteinGroups.txt copied to volume")
+        _write_progress(progress_path, "done", "complete")
 
     except Exception as exc:
         _log(f"EXCEPTION: {exc}")
         _write_progress(progress_path, "error", str(exc))
+        raise  # the caller's status is derived from this propagating, not from the progress file
     finally:
         _stop_shipper.set()
         _ship_stages()
@@ -418,9 +423,16 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         with log_path.open("a") as f:
             f.write(msg + "\n")
 
+    # Phase events go in their own file. The shipper REPLACES stages.jsonl wholesale with the
+    # container's progress.jsonl, so anything written there by the orchestrator would be erased the
+    # moment phase 2 starts; _read_stage_events concatenates the two instead.
+    phases_path = job_dir / "phases.jsonl"
+
     _log(f"job_id={job_id}  accession={accession}")
     _log("phase 1/2: download (cheap container — 2 CPU / 4 GB)")
     _write_progress(progress_path, "running", "download phase starting")
+    _write_stage_event(phases_path, "run_started", "", "pipeline start")
+    _write_stage_event(phases_path, "stage_started", "download", "Download raw files from PRIDE")
     _vol_sync("commit")
 
     try:
@@ -428,12 +440,17 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     except Exception as exc:
         _log(f"DOWNLOAD FAILED: {exc}")
         _write_progress(progress_path, "error", f"download failed: {exc}")
+        _write_stage_event(phases_path, "stage_failed", "download", f"download failed: {exc}")
         _vol_sync("commit")
-        return job_id
+        # Raising, not returning. A return here completed the FunctionCall normally, so _call_status
+        # read the job as "done" and the card reported a finished run that had downloaded nothing.
+        raise
 
+    _write_stage_event(phases_path, "stage_finished", "download", "completed")
     _vol_sync("reload")   # pull log lines written by the download worker
     _log("phase 2/2: MaxQuant search (expensive container — 16 CPU / 64 GB)")
     _write_progress(progress_path, "running", "search phase starting")
+    _write_stage_event(phases_path, "stage_started", "search_dda", "MaxQuant search starting")
     _vol_sync("commit")
 
     try:
@@ -441,7 +458,9 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     except Exception as exc:
         _log(f"MAXQUANT FAILED: {exc}")
         _write_progress(progress_path, "error", f"maxquant failed: {exc}")
+        _write_stage_event(phases_path, "stage_failed", "search_dda", f"maxquant failed: {exc}")
         _vol_sync("commit")
+        raise
 
     return job_id
 
@@ -516,6 +535,50 @@ def _job_id_for_this_run(accession: str) -> str:
 def _write_progress(path: pathlib.Path, status: str, message: str) -> None:
     with path.open("a") as f:
         f.write(json.dumps({"status": status, "message": message, "ts": time.time()}) + "\n")
+
+
+def search_failure(returncode: int, protein_src: "pathlib.Path | None") -> str | None:
+    """Why this search should be treated as failed, or None if it succeeded.
+
+    Pulled out of _run_maxquant_search so the rule can be exercised without a Modal container and a
+    mounted Volume. The rule is the whole point of the fix: both of these used to write "error" into
+    a progress file nobody reads and then return normally, so the FunctionCall completed cleanly and
+    the job reported "done". A run that produced no protein table is not a finished run.
+    """
+    if returncode != 0:
+        return f"run_all.sh exited {returncode} — see the run log for the stage that failed"
+    if protein_src is None:
+        return (
+            "run_all.sh reported success but produced no proteinGroups.txt — the search did not "
+            "write a protein table"
+        )
+    return None
+
+
+def _write_stage_event(path: pathlib.Path, event: str, stage: str, message: str) -> None:
+    """Append one run_all.sh-shaped stage event.
+
+    The orchestrator's own phases were invisible: _write_progress writes {status, message} to
+    progress.jsonl, which no endpoint reads, and the stage list the UI draws comes from stages.jsonl
+    — which only phase 2 ships. So for the whole download phase, up to two hours, the card showed a
+    bare "running" with an empty stage list.
+
+    Emitting in the same shape run_all.sh uses means these events reduce through the same
+    current_run_events/progress_by_stage/stage_view path as every other stage, rather than needing a
+    second reduction that could disagree with the first.
+    """
+    with path.open("a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "event": event,
+                    "stage": stage,
+                    "message": message,
+                }
+            )
+            + "\n"
+        )
 
 
 def _find_protein_groups(work_dir: pathlib.Path) -> pathlib.Path | None:
@@ -650,6 +713,19 @@ _EXPIRED_ERRORS: tuple[type[BaseException], ...] = tuple(
 )
 
 
+# Reaching Modal failed, as opposed to Modal reporting that the job failed. These are transient and
+# say nothing about the run: the 16-core search carries on regardless. Reporting "error" for them
+# marked healthy jobs as dead permanently, because the card never polls again once it reads a
+# terminal status. "running" keeps the next poll coming, which is the only way the truth arrives.
+_UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = tuple(
+    {
+        ConnectionError,
+        OSError,  # includes socket.error / ssl errors raised during transport
+        getattr(modal.exception, "ConnectionError", ConnectionError),
+    }
+)
+
+
 def _call_status(job_id: str) -> str:
     """"running" | "done" | "error" for a spawned call. Shared by /status and /jobs."""
     try:
@@ -659,7 +735,12 @@ def _call_status(job_id: str) -> str:
         return "error"
     except _PENDING_ERRORS:
         return "running"
+    except _UNREACHABLE_ERRORS:
+        # Deliberately NOT terminal. We could not ask; that is not the same as a failed run.
+        return "running"
     except Exception:
+        # The function itself raised — a genuine failure, and since _run_maxquant_search now
+        # propagates instead of swallowing, this is the path a failed search actually takes.
         return "error"
 
 
@@ -707,21 +788,26 @@ def _read_stage_events(job_id: str) -> list[dict]:
     job_dir = _job_dir(job_id)
     if job_dir is None:
         return []
-    try:
-        text = (job_dir / "stages.jsonl").read_text(errors="replace")
-    except FileNotFoundError:
-        return []
-    events = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    events: list[dict] = []
+    # phases.jsonl first: the orchestrator's own download phase, which run_all.sh cannot report
+    # because it has not started yet. run_all.sh then emits its own run_started, and
+    # current_run_events keeps only events from that point on — so these are superseded exactly when
+    # the real stage records arrive, which is the behaviour we want rather than a conflict.
+    for name in ("phases.jsonl", "stages.jsonl"):
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
+            text = (job_dir / name).read_text(errors="replace")
+        except FileNotFoundError:
             continue
-        if isinstance(event, dict):
-            events.append(event)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
     return events
 
 
