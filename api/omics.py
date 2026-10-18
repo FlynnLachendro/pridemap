@@ -1226,7 +1226,11 @@ def _download_sh(ctx: dict) -> str:
         '    echo "  ✓ $name already downloaded"',
         "  else",
         '    echo "  ↓ $name"',
-        '    curl -C - -o "$CACHE/$name" "$url"',
+        # -f: without it an FTP/HTTP error page is written into $name as if it were the raw file and
+        #     curl still exits 0, so the failure only surfaces much later as an unreadable spectrum.
+        # -sS: the downloads run N-way in parallel into one log; progress meters from concurrent
+        #     curls interleave character-by-character and shred the log. Errors still print.
+        '    curl -fsS -C - -o "$CACHE/$name" "$url"',
         "  fi",
         '  ln -sf "$CACHE/$name" "raw/$name"',
         "}",
