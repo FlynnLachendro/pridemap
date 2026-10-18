@@ -2,11 +2,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API } from "@/lib/api";
 import {
+  CpuPill,
   PipelineStages,
   StagePill,
   fmtSecs,
   fmtMins,
   useStageTiming,
+  type CpuReport,
   type RunStage,
   type StageState,
 } from "@/components/pipeline-stages";
@@ -28,10 +30,15 @@ type RemoteJob = {
   // sends none, and "we cannot see the stages" must not be drawn as "no stage has started".
   stages?: RunStage[];
   stage_progress?: boolean;
+  // The search container's own CPU/memory measurement. Null until the search phase starts writing
+  // it, and from a server deployed before the readout existed — both mean "nothing to draw".
+  cpu?: CpuReport | null;
 };
 
 /** What a poll of the remote job returns, once the API has reduced the relayed stage events. */
-type RemoteStatus = { status: string; log: string; stages?: RunStage[]; stage_progress?: boolean };
+type RemoteStatus = {
+  status: string; log: string; stages?: RunStage[]; stage_progress?: boolean; cpu?: CpuReport | null;
+};
 
 /** A polling failure that remembers WHICH layer failed, so the UI never guesses. */
 class PollError extends Error {
@@ -75,7 +82,8 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         if (!live || !d?.job_id) return;
         const s = (d.status === "done" || d.status === "error") ? d.status : "running";
         setJob({ status: s as RemoteJob["status"], job_id: d.job_id, log: d.log ?? "", err: null,
-                 stages: d.stages ?? [], stage_progress: d.stage_progress ?? false });
+                 stages: d.stages ?? [], stage_progress: d.stage_progress ?? false,
+                 cpu: d.cpu ?? null });
       })
       .catch(() => {});
     return () => { live = false; };
@@ -101,7 +109,9 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
       try {
         const s = await poll(job.job_id!);
         if (!live) return;
-        const progress = { stages: s.stages ?? [], stage_progress: s.stage_progress ?? false };
+        const progress = {
+          stages: s.stages ?? [], stage_progress: s.stage_progress ?? false, cpu: s.cpu ?? null,
+        };
         if (s.status === "done" || s.status === "error") {
           setJob((j) => {
             const next = { ...j, status: s.status as "done" | "error", log: s.log, ...progress };
@@ -302,6 +312,9 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         page; the job keeps running and results are loaded into Analyse automatically when the search finishes.
       </p>
       {job.err && <p className="text-xs text-warn">{job.err}</p>}
+      {/* Shown while running and after it finishes: the final sample carries the peak, which is what
+          the next cpu/memory choice should be made from. */}
+      <CpuPill cpu={job.cpu} />
       {showLiveStages
         ? <PipelineStages stages={liveStages} timing={timing} runLabels={runs ?? []} />
         : (
