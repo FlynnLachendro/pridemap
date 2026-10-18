@@ -7,7 +7,9 @@ type RemoteJob = { status: "idle" | "submitting" | "running" | "done" | "error";
 export function RunRemote({ accession, runs, engineLabel = "search engine", outputTable = "results.txt", onDone }: { accession: string; runs?: string[]; engineLabel?: string; outputTable?: string; onDone?: (jobId: string) => void }) {
   const [job, setJob] = useState<RemoteJob>({ status: "idle", job_id: null, log: "", err: null });
   const [stopping, setStopping] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const seen = useRef<string | null>(null);
+  const submitStart = useRef<number | null>(null);
 
   // Resume an in-progress job after UI close/reopen
   useEffect(() => {
@@ -62,7 +64,18 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     };
   }, [accession, job.job_id, job.status]);
 
+  // Tick elapsed seconds while submitting so user sees cold-start progress
+  useEffect(() => {
+    if (job.status !== "submitting") { setElapsed(0); return; }
+    submitStart.current = Date.now();
+    const id = window.setInterval(() => {
+      setElapsed(Math.floor((Date.now() - (submitStart.current ?? Date.now())) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [job.status]);
+
   const start = async () => {
+    setElapsed(0);
     setJob({ status: "submitting", job_id: null, log: "", err: null });
     try {
       const runsParam = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
@@ -171,21 +184,34 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
             </li>
           ))}
         </ol>
-      {busy && (
+      {(busy || job.status === "error") && (
         <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">
           {job.status === "submitting"
             ? [
                 `Dataset : ${accession}`,
                 runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
                 "",
-                "Submitting job…",
-              ].join("\n")
+                `Waking Modal server… ${elapsed}s`,
+                elapsed < 10 ? "" : elapsed < 60
+                  ? "Cold-start in progress (20–60 s is normal)"
+                  : `Still waiting — cold-start can take up to 120 s (${elapsed}s elapsed)`,
+              ].filter(l => l !== "").join("\n")
+            : job.status === "error" && !job.job_id
+            ? [
+                `Dataset : ${accession}`,
+                runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
+                "",
+                "Submission failed — could not reach the API.",
+                "Check that the local API server is running (uv run api/main.py).",
+                job.err ? `Error   : ${job.err}` : "",
+              ].filter(Boolean).join("\n")
             : [
                 `Dataset : ${accession}`,
                 runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
                 job.job_id ? `Job ID  : ${job.job_id}` : "",
                 "",
                 job.log ? job.log.split("\n").slice(-10).join("\n") : "Waiting for output…",
+                job.status === "error" && job.err ? `\nError   : ${job.err}` : "",
               ].filter(Boolean).join("\n")}
         </pre>
       )}

@@ -12,6 +12,16 @@ find_free_port() {
   echo $port
 }
 
+# Load .env if present so MQ_SERVER_URL, MQ_TOKEN, etc. are available without
+# requiring the user to export them manually. Never commit .env itself.
+if [ -f .env ]; then
+  set -a
+  # shellcheck source=/dev/null
+  source .env
+  set +a
+  echo "ℹ️  Loaded .env"
+fi
+
 echo "▶ PRIDE Map dev startup"
 echo ""
 
