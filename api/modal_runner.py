@@ -37,27 +37,29 @@ from modal import Secret, Volume
 
 # ----------------------------------------------------------------------------- module-level objects (all four required)
 
-app    = modal.App("pridemap-maxquant")
-vol    = Volume.from_name("pridemap-runs", create_if_missing=True)
-jobs   = modal.Dict.from_name("pridemap-jobs", create_if_missing=True)
-secret = Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
+app     = modal.App("pridemap-maxquant")
+vol     = Volume.from_name("pridemap-runs", create_if_missing=True)
+raw_vol = Volume.from_name("pridemap-raw",  create_if_missing=True)
+jobs    = modal.Dict.from_name("pridemap-jobs", create_if_missing=True)
+secret  = Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
 
 # Where job directories live. In a Modal container this is the Volume mount point; off Modal
 # (a local run, a test, a plain host serving the same gateway) nothing is mounted at /data and it
 # may not even be writable, so the root is overridable. One owner, so the worker that writes a job
 # directory and the gateway that reads it can never diverge.
-VOLUME_MOUNT = "/data"   # where both @app.function decorators below mount `vol`
+VOLUME_MOUNT   = "/data"       # where both @app.function decorators mount `vol` (job results)
+RAW_CACHE_MOUNT = "/raw-cache" # where run_maxquant mounts `raw_vol` (cached raw files, cross-job)
 DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
 
 
-def _vol_sync(action: str) -> None:
-    """Best-effort Volume commit/reload.
+def _vol_sync(action: str, v: "Volume | None" = None) -> None:
+    """Best-effort Volume commit/reload for vol (default) or any other Volume.
 
     Off Modal there is no Volume to talk to and these calls raise; the local filesystem is already
     coherent there, so a failure is not an error. Never let it mask a real one by propagating.
     """
     try:
-        getattr(vol, action)()
+        getattr(v or vol, action)()
     except Exception:
         pass
 
@@ -127,7 +129,7 @@ image = (
 
 @app.function(
     image=image,
-    volumes={VOLUME_MOUNT: vol},
+    volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
     secrets=[secret],
     cpu=16,
     memory=65536,   # 64 GB
@@ -169,7 +171,8 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     def _shipper() -> None:
         while not _stop_shipper.wait(15):
             _ship_stages()
-            _vol_sync("commit")
+            _vol_sync("commit")          # job results / log
+            _vol_sync("commit", raw_vol) # raw-file cache (so interrupted downloads survive)
 
     shipper = threading.Thread(target=_shipper, daemon=True)
     shipper.start()
@@ -177,7 +180,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     try:
         _log(f"job_id={job_id}  accession={accession}")
 
-        # Unpack kit into container-local temp (raw files must NOT go on the Volume)
+        # Unpack kit into container-local temp (results stay here until copied to vol at the end).
         work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"mq-{job_id}-"))
         _log(f"work_dir={work_dir}")
         kit_progress.append(work_dir / "progress.jsonl")
@@ -192,9 +195,15 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
             raise FileNotFoundError("run_all.sh not found in kit")
 
         run_script.chmod(0o755)
+
+        # Pull the latest state of the raw-file cache so already-downloaded files are visible.
+        # download_raw.sh's have() check then skips them; curl -C - resumes any partial files.
+        _vol_sync("reload", raw_vol)
+        _log(f"raw cache: {RAW_CACHE_MOUNT} (reloaded)")
+
         env = {
             **os.environ,
-            "PRIDEMAP_RAW_DIR": str(work_dir / "cache"),
+            "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT,   # persistent across jobs; raw_vol is mounted here
             "MAXQUANT_CMD": "maxquant",
         }
 
@@ -211,6 +220,10 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         for line in proc.stdout:  # type: ignore[union-attr]
             _log(line.rstrip())
         proc.wait()
+
+        # Flush newly downloaded raw files to raw_vol so the next job for this accession
+        # can reload them and skip the download entirely.
+        _vol_sync("commit", raw_vol)
 
         if proc.returncode != 0:
             _write_progress(progress_path, "error", f"run_all.sh exited {proc.returncode}")
@@ -235,6 +248,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         _stop_shipper.set()
         _ship_stages()  # final sweep: the stages that finished since the last 15 s tick
         _vol_sync("commit")
+        _vol_sync("commit", raw_vol)  # persist any partially-downloaded files for resume
 
     return job_id
 
