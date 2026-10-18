@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["fastapi>=0.115", "python-multipart>=0.0.12", "httpx<0.28"]
+# dependencies = ["fastapi>=0.115", "python-multipart>=0.0.12", "httpx<0.28", "pytest>=8"]
 # ///
 """Contract tests for the Modal MaxQuant gateway.
 
