@@ -18,6 +18,7 @@ Nothing about this is visible by reading the code; it needs the mapping exercise
 run:  uv run tests/test_modal_runner.py
       (or: uv run pytest tests/test_modal_runner.py)
 """
+import json
 import pathlib
 import sys
 from unittest import mock
@@ -463,6 +464,70 @@ def test_a_search_that_exited_cleanly_with_a_table_is_a_success():
 
     ### Then
     assert problem is None
+
+
+def test_progress_can_be_written_before_its_directory_has_propagated(tmp_path):
+    """Scenario: recording progress does not depend on another container's directory arriving.
+
+    Slice: remote stage reporting.
+    Given a job directory that does not exist in this container,
+    When progress is written to it,
+    Then the directory is created and the record lands — the orchestrator commits job_dir before
+      spawning the search, but it was observed missing there anyway, and the run then died on
+      progress.jsonl with a FileNotFoundError that read as a MaxQuant fault. It failed twice over:
+      the `except` that tried to record the error raised the same error again.
+    """
+    ### Given
+    missing = tmp_path / "fc-never-created" / "progress.jsonl"
+    assert not missing.parent.exists()
+
+    ### When
+    modal_runner._write_progress(missing, "running", "starting run_all.sh")
+
+    ### Then
+    assert json.loads(missing.read_text().splitlines()[0])["message"] == "starting run_all.sh"
+
+
+def test_stage_events_can_be_written_before_their_directory_has_propagated(tmp_path):
+    """Scenario: the same guarantee for the stage events the card renders.
+
+    Slice: remote stage reporting.
+    Given a job directory that does not exist in this container,
+    When a stage event is written to it,
+    Then the directory is created and the event lands, because a failure recorded nowhere is the
+      state this whole slice exists to remove.
+    """
+    ### Given
+    missing = tmp_path / "fc-never-created" / "phases.jsonl"
+
+    ### When
+    modal_runner._write_stage_event(missing, "stage_failed", "search_dda", "it broke")
+
+    ### Then
+    assert json.loads(missing.read_text().splitlines()[0])["stage"] == "search_dda"
+
+
+def test_a_failed_commit_is_reported_rather_than_swallowed(capsys):
+    """Scenario: a commit that fails says so, on every host.
+
+    Slice: durable stage markers.
+    Given a Volume whose commit raises,
+    When it is committed,
+    Then False is returned and a warning is printed — resume depends on that commit landing, and an
+      earlier version gated this warning on an unverified MODAL_TASK_ID env var, which would have
+      re-hidden every commit failure behind a guess.
+    """
+    ### Given
+    class _Boom:
+        def commit(self):
+            raise RuntimeError("volume unavailable")
+
+    ### When
+    ok = modal_runner._vol_commit(_Boom(), what="raw cache")
+
+    ### Then
+    assert ok is False
+    assert "raw cache commit failed" in capsys.readouterr().out
 
 
 def test_the_download_phase_is_visible_before_the_search_starts(tmp_path):

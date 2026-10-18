@@ -53,15 +53,6 @@ RAW_CACHE_MOUNT = "/raw-cache" # where run_maxquant mounts `raw_vol` (cached raw
 DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
 
 
-def _on_modal() -> bool:
-    """True inside a Modal container, where a Volume exists to be committed.
-
-    Off Modal the local filesystem is already coherent and these calls raise by design, so the
-    distinction is what lets a commit failure be reported there without being reported here.
-    """
-    return bool(os.environ.get("MODAL_TASK_ID"))
-
-
 def _vol_sync(action: str, v: "Volume | None" = None) -> None:
     """Best-effort Volume commit/reload for vol (default) or any other Volume.
 
@@ -87,8 +78,11 @@ def _vol_commit(v: "Volume | None" = None, *, what: str = "volume") -> bool:
         (v or vol).commit()
         return True
     except Exception as exc:
-        if _on_modal():
-            print(f"WARNING: {what} commit failed — resume may re-run stages: {exc}", flush=True)
+        # Reported unconditionally. An earlier version gated this on a MODAL_TASK_ID env var to stay
+        # quiet off Modal — an env var that was never verified, which would have re-hidden every
+        # commit failure behind a guess. _vol_commit only runs inside @app.function bodies, so
+        # there is no off-Modal caller to stay quiet for.
+        print(f"WARNING: {what} commit failed — resume may re-run stages: {exc}", flush=True)
         return False
 
 # ----------------------------------------------------------------------------- container images
@@ -343,6 +337,13 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     # we append to, and so the raw files committed by _download_raw are on-disk.
     _vol_sync("reload")
     _vol_sync("reload", raw_vol)
+
+    # Then ensure the directory, because the reload does not always bring it. The orchestrator
+    # creates and commits job_dir before spawning this function, but it was observed missing here
+    # anyway — _log swallows OSError, so the only symptom was the run dying on progress.jsonl with
+    # a FileNotFoundError that read as a MaxQuant fault. Creating it is idempotent and removes the
+    # dependency on cross-container directory propagation entirely.
+    job_dir.mkdir(parents=True, exist_ok=True)
 
     def _log(msg: str) -> None:
         print(msg, flush=True)
@@ -609,6 +610,13 @@ def _job_id_for_this_run(accession: str) -> str:
 
 
 def _write_progress(path: pathlib.Path, status: str, message: str) -> None:
+    # Create the directory rather than assuming it. A job directory made and committed by the
+    # ORCHESTRATOR container is not reliably visible in the search container after a reload, and
+    # when it was missing this line raised FileNotFoundError before run_all.sh had even started —
+    # then raised a second time inside the `except` that was trying to record the first. Both
+    # tracebacks named progress.jsonl, so the run looked like a MaxQuant failure. A directory is
+    # cheap; depending on another container having published one is not.
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         f.write(json.dumps({"status": status, "message": message, "ts": time.time()}) + "\n")
 
@@ -643,6 +651,7 @@ def _write_stage_event(path: pathlib.Path, event: str, stage: str, message: str)
     current_run_events/progress_by_stage/stage_view path as every other stage, rather than needing a
     second reduction that could disagree with the first.
     """
+    path.parent.mkdir(parents=True, exist_ok=True)   # same reason as _write_progress
     with path.open("a") as f:
         f.write(
             json.dumps(
