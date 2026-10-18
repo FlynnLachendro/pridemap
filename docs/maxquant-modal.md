@@ -20,8 +20,7 @@ included.
 > Phase 3 (right-sizing the box) is deliberately still open; it needs usage
 > numbers from a real run.
 >
-> Alternatives that are already proven: [maxquant-local.md](maxquant-local.md) ·
-> [maxquant-cloud-devin.md](maxquant-cloud-devin.md)
+> Alternatives that are already proven: [maxquant-local.md](maxquant-local.md)
 
 
 

@@ -2488,9 +2488,10 @@ def corrections_stats():
             "applied": con.execute("SELECT count(*) FROM tags WHERE model LIKE '%(corrected)'").fetchone()[0]}
 
 
-# ----------------------------------------------------------------------------- remote MaxQuant server (Devin/cloud)
-# Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to a remote Linux machine running the Devin-provisioned
-# mq_server. Temporary: tear down by unsetting MQ_SERVER_URL.
+# ----------------------------------------------------------------------------- remote MaxQuant server (Modal)
+# Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to the Modal gateway (api/modal_web.py),
+# which spawns the download and search workers in api/modal_runner.py. Unset MQ_SERVER_URL to go
+# back to local-only runs; the UI reports the remote as unconfigured rather than failing.
 
 # In-process store: accession -> job_id.  Survives UI close/reopen; cleared on DELETE or server restart.
 _active_remote_jobs: dict[str, str] = {}
