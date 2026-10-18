@@ -10,12 +10,15 @@ import {
   type RunStage,
   type StageState,
 } from "@/components/pipeline-stages";
+import { consoleBlocks, stageRows, type JobStatus } from "@/lib/run-remote-view";
 
 // `failure` separates "the API never answered" from "the API answered with an error". Conflating
 // them told the user to restart a local server that was running fine, while the real fault was a
 // 422 relayed from the remote Modal server.
 type RemoteJob = {
-  status: "idle" | "submitting" | "running" | "done" | "error";
+  // JobStatus is owned by run-remote-view, where the decision tables that read it live — two copies
+  // of this union would let the card and its tables disagree about what states exist.
+  status: JobStatus;
   job_id: string | null;
   log: string;
   err: string | null;
@@ -169,13 +172,16 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     setStopping(true);
     try {
       await fetch(`${API}/dataset/${accession}/pipeline/remote/${job.job_id}`, { method: "DELETE" });
-      setJob((j) => ({ ...j, status: "error", err: "Stopped by user" }));
+      // "stopped", not "error". Reusing the error state made a deliberate stop render as a failure
+      // — same red stage marks, same wording — so the card could not tell the user apart from a
+      // broken run.
+      setJob((j) => ({ ...j, status: "stopped", err: "Stopped by user" }));
     } catch (e) { setJob((j) => ({ ...j, err: String(e) })); }
     finally { setStopping(false); }
   };
 
   const busy = job.status === "submitting" || job.status === "running";
-  const active = busy || job.status === "done" || job.status === "error";
+  const active = busy || job.status === "done" || job.status === "error" || job.status === "stopped";
 
   const STAGE_MARK: Record<StageState, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
   const runsLabel = runs?.length ? `${engineLabel} — ${runs.length} run${runs.length !== 1 ? "s" : ""}` : `${engineLabel} search`;
@@ -187,42 +193,60 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   // merely lost — a lie that cost two debugging sessions, both times with a healthy job downloading
   // raw files. Unknown is shown as pending, and the banner below names what actually broke.
   const contactLost = st === "error" && job.failure === "network";
-  // One state for every stage that runs remotely, so they cannot disagree about the same job.
-  const remoteState: StageState = st === "submitting" ? "pending"
-    : st === "running" ? "running"
-    : st === "done" ? "done"
-    : contactLost ? "pending"
-    : st === "error" && job.job_id ? "failed" : "pending";
   // What the remote run itself reported, when it could be read: the same stage records a local run
   // produces, so they render through the same component with the same elapsed time and ETA.
   const liveStages: RunStage[] = job.stage_progress ? (job.stages ?? []) : [];
   const timing = useStageTiming(liveStages, st === "running");
-  const showLiveStages = liveStages.length > 0 && (st === "running" || st === "done") && !contactLost;
-  // Wall-clock time since this page submitted the job. Only known for a job submitted in this
-  // session, which is why it is null rather than 0 for a resumed one.
-  const wallElapsed = submitStart.current != null && elapsed > 0 ? elapsed : null;
-  // The coarse view: six fixed labels driven by the job's overall status alone. It is what the card
-  // can honestly show before the first stage event arrives, after contact is lost, or against a
-  // remote server too old to report stages.
-  const coarseStages: { label: string; state: StageState }[] = [
-    {
-      label: "Check tools and disk space",
-      state: st === "submitting" ? "running"
-        : st === "error" && !job.job_id ? "failed"
-        : active ? "done" : "pending",
-    },
-    { label: "Download raw files from PRIDE", state: remoteState },
-    { label: "Fetch the protein database", state: remoteState },
-    { label: runsLabel, state: remoteState },
-    {
-      label: "Hand the tables back to PRIDE Map",
-      state: st === "done" ? "done" : "pending",
-    },
-    {
-      label: "Analyse the protein table",
-      state: st === "done" ? "done" : "pending",
-    },
+  // "error" belongs here. Excluding it meant the real stage list vanished at the exact moment it
+  // mattered most — the server knows which stage failed and why, and the card replaced that with a
+  // hard-coded ladder that cannot say either. Contact loss still falls back, because then we have no
+  // current stages, only stale ones.
+  const showLiveStages =
+    liveStages.length > 0 && (st === "running" || st === "done" || st === "error") && !contactLost;
+  // The coarse view: fixed labels driven by the job's overall status alone. It is what the card can
+  // honestly show before the first stage event arrives, after contact is lost, or against a remote
+  // server too old to report stages — and nothing else. It used to be shown on failure too, where
+  // it overwrote the server's per-stage truth with one state repeated across three rows.
+  //
+  // INVARIANT: these labels mirror the stages pipeline_stages() emits for a DDA + MaxQuant plan
+  // (api/omics.py). A stage added there must be added here, or the ladder miscounts in the window
+  // before live stages arrive.
+  const coarseLabels = [
+    "Check tools and disk space",
+    "Download raw files from PRIDE",
+    "Fetch the protein database",
+    runsLabel,
+    "Hand the tables back to PRIDE Map",
+    "Analyse the protein table",
   ];
+  const coarseStages = stageRows({
+    status: st,
+    stages: [],
+    stageProgress: false,
+    contactLost,
+    coarseLabels,
+    hasJobId: Boolean(job.job_id),
+  });
+
+  // Whether the stage currently running is narrating its own steps. When it is, the raw log repeats
+  // what the rows above already say — the local card has always suppressed it here.
+  const hasLiveSteps = showLiveStages && liveStages.some((s) => s.state === "running" && s.steps.length > 0);
+  const submittingText = [
+    `Waking Modal server… ${elapsed}s`,
+    elapsed < 10 ? "" : elapsed < 60
+      ? "Cold-start in progress (20–60 s is normal)"
+      : `Still waiting — cold-start can take up to 120 s (${elapsed}s elapsed)`,
+  ].filter(Boolean).join("\n");
+  const blocks = consoleBlocks({
+    status: st,
+    log: job.status === "error" && !job.job_id
+      ? (job.failure === "server"
+          ? "Submission failed — the API answered with an error.\nThis is not a connectivity problem; the detail below names the layer that failed."
+          : `Submission failed — could not reach the API at ${API}.\nCheck that the local API server is running (uv run api/main.py).`)
+      : job.log,
+    hasLiveSteps,
+    submittingText,
+  });
 
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2 mt-2">
@@ -253,9 +277,12 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
               })()
         )}
         {job.status === "done" && <span className="pill bg-ok-soft text-ok">finished</span>}
+        {/* "failed" and "stopped" are different events and now read differently. They shared the
+            error state before, so a run the user stopped on purpose was reported as a failure. */}
         {job.status === "error" && (
-          <span className="pill text-warn">{contactLost ? "lost contact" : "stopped"}</span>
+          <span className="pill text-warn">{contactLost ? "lost contact" : "failed"}</span>
         )}
+        {job.status === "stopped" && <span className="pill text-faint">stopped</span>}
         {job.status === "running" && (
           <button type="button" className="btn btn-sm btn-warn ml-auto" disabled={stopping} onClick={stop}>
             {stopping ? "Stopping…" : "Stop"}
@@ -265,7 +292,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
           <button type="button" className="btn btn-sm btn-primary ml-auto" disabled={busy} onClick={start}>
             {job.status === "submitting"
               ? <><span className="spinner mr-2" />Submitting…</>
-              : job.status === "error" || job.status === "done" ? "Run again" : "Run on cloud"}
+              : active ? "Run again" : "Run on cloud"}
           </button>
         )}
       </div>
@@ -280,69 +307,47 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         : (
           <ol className="grid gap-0.5 text-xs">
             {coarseStages.map((s) => (
-              <li key={s.label} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
+              <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
                 <span aria-hidden className="inline-block w-4">{STAGE_MARK[s.state]}</span>
                 {s.label}
               </li>
             ))}
           </ol>
         )}
-      {(busy || job.status === "error") && (
-        <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">
-          {job.status === "submitting"
-            ? [
-                `Dataset : ${accession}`,
-                runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
-                "",
-                `Waking Modal server… ${elapsed}s`,
-                elapsed < 10 ? "" : elapsed < 60
-                  ? "Cold-start in progress (20–60 s is normal)"
-                  : `Still waiting — cold-start can take up to 120 s (${elapsed}s elapsed)`,
-              ].filter(l => l !== "").join("\n")
-            : job.status === "error" && !job.job_id
-            ? [
-                `Dataset : ${accession}`,
-                runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
-                "",
-                ...(job.failure === "server"
-                  ? [
-                      "Submission failed — the API answered with an error.",
-                      "This is not a connectivity problem; the detail below names the layer that failed.",
-                    ]
-                  : [
-                      `Submission failed — could not reach the API at ${API}.`,
-                      "Check that the local API server is running (uv run api/main.py).",
-                    ]),
-                job.err ? `Error   : ${job.err}` : "",
-              ].filter(Boolean).join("\n")
-            : [
-                `Dataset : ${accession}`,
-                runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
-                job.job_id ? `Job ID  : ${job.job_id}` : "",
-                "",
-                ...(contactLost
-                  ? [
-                      "This page can no longer reach the API — the job itself is unaffected and is",
-                      "most likely still running on Modal. The stages above are unknown, not failed.",
-                      `Check the API is up and that the UI points at it (currently ${API});`,
-                      "restarting the API on a new port leaves this page calling the old one.",
-                      "",
-                    ]
-                  : []),
-                job.log ? job.log.split("\n").slice(-10).join("\n") : "Waiting for output…",
-                job.status === "error" && job.err ? `\nError   : ${job.err}` : "",
-              ].filter(Boolean).join("\n")}
-        </pre>
-      )}
-      {job.status !== "running" && job.log && (() => {
-        const lines = job.log.split("\n");
-        return (
-          <details className="text-xs">
-            <summary className="cursor-pointer text-faint hover:text-foreground">output ({lines.length} lines)</summary>
-            <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{job.log}</pre>
+      {/* Exactly one console, decided in one place. Two blocks with independent conditions both
+          matched on "error with a log" — after Stop, a poll timeout, or lost contact — and stacked
+          a ten-line tail on top of a collapsible copy of the same log. consoleBlocks owns the
+          choice now, and its test sweeps every state to keep it that way. */}
+      {blocks.map((b) =>
+        b.kind === "live" ? (
+          <pre key="live" className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">
+            {[
+              `Dataset : ${accession}`,
+              runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
+              job.job_id ? `Job ID  : ${job.job_id}` : "",
+              "",
+              ...(contactLost
+                ? [
+                    "This page can no longer reach the API — the job itself is unaffected and is",
+                    "most likely still running on Modal. The stages above are unknown, not failed.",
+                    `Check the API is up and that the UI points at it (currently ${API});`,
+                    "restarting the API on a new port leaves this page calling the old one.",
+                    "",
+                  ]
+                : []),
+              b.text,
+              job.err ? `\nError   : ${job.err}` : "",
+            ].filter(Boolean).join("\n")}
+          </pre>
+        ) : (
+          <details key="full" className="text-xs">
+            <summary className="cursor-pointer text-faint hover:text-foreground">
+              output ({b.text.split("\n").length} lines)
+            </summary>
+            <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{b.text}</pre>
           </details>
-        );
-      })()}
+        ),
+      )}
       {job.status === "done" && job.job_id && (
         <a className="btn btn-sm self-start" href={`${API}/dataset/${accession}/pipeline/remote/${job.job_id}/results`} download={`${accession}_${outputTable}`}>
           Download {outputTable}

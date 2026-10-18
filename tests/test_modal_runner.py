@@ -18,6 +18,7 @@ Nothing about this is visible by reading the code; it needs the mapping exercise
 run:  uv run tests/test_modal_runner.py
       (or: uv run pytest tests/test_modal_runner.py)
 """
+import json
 import pathlib
 import sys
 from unittest import mock
@@ -381,6 +382,208 @@ def test_raw_cache_mount_is_a_persistent_path_not_a_tempdir():
     assert raw.startswith("/"), "must be an absolute path mountable by Modal"
     assert not raw.startswith("/tmp"), "must not be an ephemeral tempdir — that was the regression"
     assert raw != data, "raw-file cache and job-results volume must be separate mounts"
+
+
+def test_being_unable_to_reach_modal_is_not_a_failed_run():
+    """Scenario: a transport error while polling does not kill a healthy job.
+
+    Slice: job status reporting.
+    Given a poll that fails because Modal could not be reached at all,
+    When the gateway maps that outcome to a status,
+    Then it reports "running", because the 16-core search carries on regardless and the card stops
+      polling the moment it reads a terminal status — so reporting "error" here marked a healthy job
+      dead permanently, with no way back short of a page reload.
+    """
+    ### Given / When
+    status = _status_for(ConnectionError("connection reset by peer"))
+
+    ### Then
+    assert status == "running"
+
+
+def test_a_worker_that_raised_is_still_a_failed_run():
+    """Scenario: softening the transport case did not soften real failures.
+
+    Slice: job status reporting.
+    Given a poll whose call raises an ordinary exception from the worker itself,
+    When the gateway maps that outcome to a status,
+    Then it still reports "error" — the counterexample to the test above, without which "treat
+      errors as running" would quietly swallow every genuine failure as well.
+    """
+    ### Given / When
+    status = _status_for(RuntimeError("MaxQuant aborted"))
+
+    ### Then
+    assert status == "error"
+
+
+def test_a_search_that_exited_non_zero_is_a_failure():
+    """Scenario: a non-zero run_all.sh is reported as failed rather than finished.
+
+    Slice: search outcome.
+    Given a run_all.sh that exited 1,
+    When the search outcome is judged,
+    Then a reason is returned, because the worker used to write "error" into a progress file no
+      endpoint reads and then return normally — so the FunctionCall completed cleanly and the job
+      reported "done" for a run that had failed.
+    """
+    ### Given / When
+    problem = modal_runner.search_failure(1, None)
+
+    ### Then
+    assert problem and "exited 1" in problem
+
+
+def test_a_search_that_produced_no_protein_table_is_a_failure():
+    """Scenario: exit code 0 is not on its own evidence that the search produced anything.
+
+    Slice: search outcome.
+    Given a run_all.sh that exited cleanly but wrote no proteinGroups.txt,
+    When the search outcome is judged,
+    Then a reason is returned, because the results endpoint would otherwise 404 on a job the card
+      had already reported as done.
+    """
+    ### Given / When
+    problem = modal_runner.search_failure(0, None)
+
+    ### Then
+    assert problem and "proteinGroups.txt" in problem
+
+
+def test_a_search_that_exited_cleanly_with_a_table_is_a_success():
+    """Scenario: the success path is still reachable.
+
+    Slice: search outcome.
+    Given a run_all.sh that exited cleanly and wrote a protein table,
+    When the search outcome is judged,
+    Then no reason is returned — the counterexample that stops the two tests above from being
+      satisfied by a rule that calls every run a failure.
+    """
+    ### Given / When
+    problem = modal_runner.search_failure(0, pathlib.Path("/tmp/proteinGroups.txt"))
+
+    ### Then
+    assert problem is None
+
+
+def test_progress_can_be_written_before_its_directory_has_propagated(tmp_path):
+    """Scenario: recording progress does not depend on another container's directory arriving.
+
+    Slice: remote stage reporting.
+    Given a job directory that does not exist in this container,
+    When progress is written to it,
+    Then the directory is created and the record lands — the orchestrator commits job_dir before
+      spawning the search, but it was observed missing there anyway, and the run then died on
+      progress.jsonl with a FileNotFoundError that read as a MaxQuant fault. It failed twice over:
+      the `except` that tried to record the error raised the same error again.
+    """
+    ### Given
+    missing = tmp_path / "fc-never-created" / "progress.jsonl"
+    assert not missing.parent.exists()
+
+    ### When
+    modal_runner._write_progress(missing, "running", "starting run_all.sh")
+
+    ### Then
+    assert json.loads(missing.read_text().splitlines()[0])["message"] == "starting run_all.sh"
+
+
+def test_stage_events_can_be_written_before_their_directory_has_propagated(tmp_path):
+    """Scenario: the same guarantee for the stage events the card renders.
+
+    Slice: remote stage reporting.
+    Given a job directory that does not exist in this container,
+    When a stage event is written to it,
+    Then the directory is created and the event lands, because a failure recorded nowhere is the
+      state this whole slice exists to remove.
+    """
+    ### Given
+    missing = tmp_path / "fc-never-created" / "phases.jsonl"
+
+    ### When
+    modal_runner._write_stage_event(missing, "stage_failed", "search_dda", "it broke")
+
+    ### Then
+    assert json.loads(missing.read_text().splitlines()[0])["stage"] == "search_dda"
+
+
+def test_a_failed_commit_is_reported_rather_than_swallowed(capsys):
+    """Scenario: a commit that fails says so, on every host.
+
+    Slice: durable stage markers.
+    Given a Volume whose commit raises,
+    When it is committed,
+    Then False is returned and a warning is printed — resume depends on that commit landing, and an
+      earlier version gated this warning on an unverified MODAL_TASK_ID env var, which would have
+      re-hidden every commit failure behind a guess.
+    """
+    ### Given
+    class _Boom:
+        def commit(self):
+            raise RuntimeError("volume unavailable")
+
+    ### When
+    ok = modal_runner._vol_commit(_Boom(), what="raw cache")
+
+    ### Then
+    assert ok is False
+    assert "raw cache commit failed" in capsys.readouterr().out
+
+
+def test_the_download_phase_is_visible_before_the_search_starts(tmp_path):
+    """Scenario: the orchestrator's own phases reach the stage list.
+
+    Slice: remote stage reporting.
+    Given a job directory holding only the orchestrator's phases file, as during phase 1,
+    When the stage events are read,
+    Then the download stage's events come back, because stages.jsonl is shipped only by phase 2 and
+      until then the card showed a bare "running" with an empty stage list — for up to two hours.
+    """
+    ### Given
+    job_dir = tmp_path / JOB_ID
+    job_dir.mkdir()
+    (job_dir / "phases.jsonl").write_text(
+        '{"ts":"2026-10-18T09:00:00Z","event":"run_started","stage":"","message":"pipeline start"}\n'
+        '{"ts":"2026-10-18T09:00:01Z","event":"stage_started","stage":"download","message":"Download"}\n'
+    )
+
+    ### When
+    with mock.patch.object(modal_runner, "_job_dir", return_value=job_dir):
+        events = _read_stage_events(JOB_ID)
+
+    ### Then
+    assert [e["event"] for e in events] == ["run_started", "stage_started"]
+    assert events[1]["stage"] == "download"
+
+
+def test_the_scripts_own_stages_follow_the_orchestrators_phases(tmp_path):
+    """Scenario: both sources are read, in the order that lets the later one win.
+
+    Slice: remote stage reporting.
+    Given a job directory holding both the orchestrator's phases and run_all.sh's own stages,
+    When the stage events are read,
+    Then the phases come first and the script's events after, so that run_all.sh's own run_started
+      supersedes the orchestrator's — current_run_events keeps only events from the last one, which
+      is how the real stage records replace the coarse phase ones without the two contradicting.
+    """
+    ### Given
+    job_dir = tmp_path / JOB_ID
+    job_dir.mkdir()
+    (job_dir / "phases.jsonl").write_text(
+        '{"ts":"2026-10-18T09:00:00Z","event":"run_started","stage":"","message":"pipeline start"}\n'
+    )
+    (job_dir / "stages.jsonl").write_text(
+        '{"ts":"2026-10-18T09:05:00Z","event":"run_started","stage":"","message":"pipeline start"}\n'
+        '{"ts":"2026-10-18T09:05:01Z","event":"stage_started","stage":"preflight","message":"Check"}\n'
+    )
+
+    ### When
+    with mock.patch.object(modal_runner, "_job_dir", return_value=job_dir):
+        events = _read_stage_events(JOB_ID)
+
+    ### Then
+    assert len(events) == 3, "both files must be read"
+    assert events[-1]["stage"] == "preflight", "the script's own stages must come last"
 
 
 if __name__ == "__main__":

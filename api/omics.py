@@ -1430,10 +1430,27 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
         "# ---- disk. The estimate is raw size plus room for conversion and results; override it if you are",
         "# writing to another volume, or only running one of the tracks.",
         f"NEED_GB=${{PRIDEMAP_MIN_DISK_GB:-{need_gb}}}",
-        'FREE_GB=$(df -Pk . | awk "NR==2 {print int(\\$4/1048576)}")',
-        '[ "$FREE_GB" -ge "$NEED_GB" ] \\',
-        '  && ok "disk: ${FREE_GB}GB free, need ~${NEED_GB}GB" \\',
-        '  || bad "disk: only ${FREE_GB}GB free, need ~${NEED_GB}GB for raw + converted + results"',
+        # printf "%d", not print. A Modal Volume reports 2^53 KB free — a sentinel for "no meaningful
+        # limit" — and int() of that is 8589934592, which mawk (Debian's awk, and so the container's)
+        # renders through OFMT as "8.58993e+09". `[ -ge ]` then errors with "integer expression
+        # expected", the || branch fires, and preflight failed EVERY cloud run on a volume with
+        # effectively infinite space. macOS's awk prints the integer plainly, which is why this never
+        # reproduced locally. %d forces the integer form on every awk.
+        # The regex guard is inside awk on purpose: printf "%d" COERCES a non-numeric field to 0, so
+        # validating after the fact would read an unparseable df as "0GB free" — i.e. full — which is
+        # the same outage in a new disguise. awk refuses to convert, and the shell sees "unknown".
+        "FREE_GB=$(df -Pk . | awk 'NR==2 { if ($4 ~ /^[0-9]+$/) printf \"%d\\n\", int($4/1048576);"
+        " else print \"unknown\" }')",
+        # A filesystem that reports something unparseable must not be read as "full". Warning keeps
+        # the run going on an exotic volume; failing here stopped work that would have succeeded.
+        'case "$FREE_GB" in',
+        '  ""|*[!0-9]*)',
+        '    warn "disk: could not read free space from df (got \'${FREE_GB}\') — skipping this check" ;;',
+        "  *)",
+        '    [ "$FREE_GB" -ge "$NEED_GB" ] \\',
+        '      && ok "disk: ${FREE_GB}GB free, need ~${NEED_GB}GB" \\',
+        '      || bad "disk: only ${FREE_GB}GB free, need ~${NEED_GB}GB for raw + converted + results" ;;',
+        "esac",
         "",
         "# ---- curl",
         'command -v curl >/dev/null 2>&1 && ok "curl" || bad "curl not found"',
@@ -1444,8 +1461,13 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
     if need_convert or "maxquant" in engines:
         out += [
             "# ---- docker: where msconvert and MaxQuant come from when they are not installed natively",
+            # On Modal the tools are baked into the image and there is no Docker daemon by design, so
+            # the warning below is noise in a log the UI now puts in front of the user. The runner
+            # sets PRIDEMAP_TOOLS_PREINSTALLED=1 to say "this host provides the tools directly".
             "HAVE_DOCKER=0",
-            'if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then',
+            'if [ -n "${PRIDEMAP_TOOLS_PREINSTALLED:-}" ]; then',
+            '  ok "tools are built into this image — docker is not needed here"',
+            'elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then',
             '  HAVE_DOCKER=1; ok "docker is running"',
             "else",
             '  warn "docker not available — only matters if a tool below is missing natively"',
@@ -1679,6 +1701,8 @@ emit() {  # emit <event> <stage-id> <message> [extra-json]
 STAGE_START=0
 STAGE_ID=""
 STAGE_N=0
+STAGE_FAILED=0
+MQ_WATCH=""
 
 stage() {  # stage <id> <label>; returns 1 when already done so the caller can skip
   STAGE_ID="$1"; local label="$2"
@@ -1710,8 +1734,50 @@ step() {  # a sub-step inside a stage
 fail() {
   printf '\n      ✗ FAILED: %s\n' "$1" >&2
   emit stage_failed "$STAGE_ID" "$1"
+  STAGE_FAILED=1   # the trap has already been told why; it must not emit a second, vaguer event
   exit 1
 }
+
+# Run a sub-script inside the current stage, echoing its output as steps, and report WHY it failed.
+#
+# The obvious form of this is a landmine:
+#
+#     bash x.sh 2>&1 | while IFS= read -r l; do step "$l"; done
+#     [ "${PIPESTATUS[0]}" = "0" ] || fail "..."
+#
+# Under `set -e` with `pipefail` a failing pipeline exits the script THERE, so the guard on the next
+# line never runs and fail() — the only emitter of stage_failed — is unreachable. Every stage was
+# written that way, which is why a broken cloud run reported no reason at all: the UI received a
+# stage stuck at "running" and an overall status of "done". Running the pipeline as the condition of
+# an `if` suspends `set -e` for it, so the failure is ours to report rather than the shell's to
+# act on.
+run_step() {  # run_step <script> <failure-message>
+  local script="$1" msg="$2"
+  if ! bash "$script" 2>&1 | while IFS= read -r _line; do step "$_line"; done; then
+    fail "$msg"
+  fi
+}
+
+# Last line of defence. Any exit before stage_done that did not go through fail() — a `set -e` abort
+# inside a stage body, a syntax error, an unset variable, a SIGTERM from the runner — would otherwise
+# leave the stage pinned at "running" for ever, which is exactly the state that made a failed run
+# look healthy. One event here is the difference between "it broke at FASTA" and silence.
+_on_exit() {
+  local rc=$?
+  # The MaxQuant watcher, if one is running. It used to install its OWN EXIT trap and then clear it
+  # with `trap - EXIT`, which removed this handler too — so after the search stage nothing cleaned
+  # up run.pid and nothing reported an unexplained death. A stale run.pid makes the local API
+  # answer "a run is already in progress" for a run that finished, blocking the next one. One EXIT
+  # trap, owning every cleanup, is the only arrangement a later stage cannot silently undo.
+  [ -n "${MQ_WATCH:-}" ] && kill "$MQ_WATCH" 2>/dev/null
+  rm -f "$PIPE_DIR/run.pid"
+  if [ "$rc" != "0" ] && [ "${STAGE_FAILED:-0}" = "0" ] && [ -n "$STAGE_ID" ] \
+     && [ ! -f "$PIPE_DIR/$STAGE_ID.done" ]; then
+    emit stage_failed "$STAGE_ID" "stopped unexpectedly (exit $rc) — see the log above for the last step"
+  fi
+  exit $rc
+}
+trap _on_exit EXIT
 
 warn_up() {  # non-fatal: the search already succeeded, only the hand-off didn't
   printf '        ! %s\n' "$1"
@@ -1742,6 +1808,35 @@ watch_maxquant() {
   : > "$MQ_SEEN"
   while :; do mq_scan; sleep 5; done
 }
+
+# Rewrite every raw/<file> path in a search config to the symlink's REAL target, and echo each
+# target's parent directory (one per line, deduplicated by the caller if it needs mounts).
+#
+# ThermoFisher's RawFileReaderAdapter.FileFactory() sets IsError=True when handed a SYMLINK path;
+# SelectInstrument then throws, and MaxQuant reports it as
+#
+#     NoSelectedDeviceException: RunHeaderEx
+#
+# with no mention of symlinks anywhere in the message. The identical file at its real path reads
+# fine. download_raw.sh builds raw/ with `ln -sf` from a shared cache, so EVERY runner hands
+# MaxQuant symlinks — not just the containerised one. This lived inline in the docker branch only,
+# which is why it kept happening on Modal: that takes the native branch, and the fix was never
+# there. One helper, called by all three, so a future runner cannot be added without it.
+#
+# <prefix> is whatever raw/ resolves to inside the config: $PWD natively, the mount point in docker.
+# readlink, not realpath: on macOS realpath canonicalises /var -> /private/var while the symlink
+# target keeps /var/..., which leaves a docker bind mount dangling.
+resolve_raw_paths() {  # resolve_raw_paths <config> <prefix>
+  local config="$1" prefix="$2" f link base tmp
+  for f in raw/*.raw raw/*.RAW; do
+    [ -L "$f" ] || continue
+    link=$(readlink "$f" 2>/dev/null) || continue
+    base=$(basename "$f")
+    tmp=$(mktemp) || continue
+    sed "s#$prefix/raw/$base#$link#g" "$config" > "$tmp" && mv "$tmp" "$config"
+    dirname "$link"
+  done
+}
 '''
 
 
@@ -1760,9 +1855,9 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         "# Needs: curl, and whichever of msconvert / MaxQuant / DIA-NN the stages below use.",
         "set -euo pipefail",
         'cd "$(dirname "$0")"',
-        # Clean up the PID file on any exit so a later resume attempt is never blocked by a stale PID
-        # that the OS has recycled for an unrelated process.
-        "trap 'rm -f .pipeline/run.pid' EXIT",
+        # The PID file is cleaned up by _on_exit in the stage library below, which also reports an
+        # unexplained death as stage_failed. Two EXIT traps cannot coexist — the second replaces the
+        # first — so this one stage of cleanup is deliberately owned there and not duplicated here.
         "",
         # Every stage except the final 'analyse', which is yours to make in the browser.
         f"TOTAL_STAGES={max(1, total - 1)}",
@@ -1787,24 +1882,28 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         "# ---------------------------------------------------------------- 0. preflight",
         '# Fails here, in seconds, rather than after the download. Nothing is fetched until this passes.',
         'if stage preflight "Check tools and disk space"; then',
-        '  bash preflight.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "preflight failed — nothing was downloaded"',
+        '  run_step preflight.sh "preflight failed — nothing was downloaded"',
         "  stage_done",
         "fi",
         "",
         "# ---------------------------------------------------------------- 1. raw files",
         'if stage download "Download raw files from PRIDE"; then',
         '  step "fetching into raw/ — this is the slow one, expect tens of GB"',
-        '  bash download_raw.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "raw download failed (re-run to resume; curl -C - continues part files)"',
-        '  step "$(find raw -type f | wc -l | tr -d " ") files in raw/"',
+        '  run_step download_raw.sh "raw download failed (re-run to resume; curl -C - continues part files)"',
+        # -type f alone counted ZERO, every time: download_raw.sh fills raw/ with `ln -sf` symlinks,
+        # which are type l. So the stage printed "0 files in raw/" and then declared itself done —
+        # a false all-clear sitting directly above the real failure, which was MaxQuant being handed
+        # those same symlinks. Counting both, and refusing to continue on an empty raw/, turns the
+        # most misleading line in the log into the one that stops the run.
+        '  _n_raw=$(find raw -mindepth 1 \\( -type f -o -type l \\) | wc -l | tr -d " ")',
+        '  step "$_n_raw files in raw/"',
+        '  [ "$_n_raw" -gt 0 ] || fail "raw/ is empty after the download stage — there is nothing to search"',
         "  stage_done",
         "fi",
         "",
         "# ---------------------------------------------------------------- 2. protein database",
         'if stage fasta "Fetch the protein database"; then',
-        '  bash download_fasta.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-        '  [ "${PIPESTATUS[0]}" = "0" ] || fail "FASTA download failed"',
+        '  run_step download_fasta.sh "FASTA download failed"',
         f'  [ -s "{fasta_path}" ] || fail "{fasta_path} is missing or empty"',
         f'  step "$(grep -c \'^>\' "{fasta_path}" || echo 0) sequences in {fasta_path}"',
         "  stage_done",
@@ -1816,8 +1915,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
             "# ---------------------------------------------------------------- 3. vendor format -> mzML",
             f'if stage convert "Convert {plan["vendor_label"]} to mzML"; then',
             '  command -v msconvert >/dev/null 2>&1 || fail "msconvert not on PATH — see convert_to_mzml.sh for the Docker alternative"',
-            '  bash convert_to_mzml.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-            '  [ "${PIPESTATUS[0]}" = "0" ] || fail "msconvert failed"',
+            '  run_step convert_to_mzml.sh "msconvert failed"',
             '  step "$(find mzml -name \'*.mzML\' | wc -l | tr -d \' \') mzML files written"',
             "  stage_done",
             "fi",
@@ -1832,40 +1930,40 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 # MaxQuant's workers resolve paths from their own cwd, so the config needs absolute ones. The kit
                 # cannot know where it will be unpacked, so the directory is substituted here, once, per run.
                 '  step "MaxQuant writes one combined/proc/<step>.finished.txt per internal step; echoing them as they land"',
+                # No second EXIT trap here. The watcher is cleaned up by _on_exit, which owns the
+                # single trap; installing one here and clearing it with `trap - EXIT` is what used
+                # to leave run.pid behind and disarm failure reporting for the rest of the run.
                 "  watch_maxquant & MQ_WATCH=$!",
-                '  trap \'kill "$MQ_WATCH" 2>/dev/null || true\' EXIT',
                 # The config carries a placeholder rather than a path, because MaxQuant's workers resolve relative
                 # paths from their own cwd. What it resolves to differs per runner: the kit directory natively,
                 # the mount point inside the container.
                 '  if [ -n "$MQ" ]; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
+                # The native runner reads raw/ through the same `ln -sf` symlinks the container does,
+                # and the Thermo reader refuses them identically. This is the branch Modal takes.
+                f'    resolve_raw_paths {_local_config(tr["config"])} "$PWD" >/dev/null',
                 f'    step "paths resolved against $PWD -> {_local_config(tr["config"])}"',
                 f'    "$MQ" {_local_config(tr["config"])} || fail "MaxQuant failed — see combined/proc/ for the step it stopped on"',
                 '  elif command -v mono >/dev/null 2>&1 && [ -f "${MAXQUANT_DIR:-}/bin/MaxQuantCmd.exe" ]; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#$PWD#g" {tr["config"]} > {_local_config(tr["config"])}',
+                f'    resolve_raw_paths {_local_config(tr["config"])} "$PWD" >/dev/null',
                 f'    mono "$MAXQUANT_DIR/bin/MaxQuantCmd.exe" {_local_config(tr["config"])} \\',
                 '      || fail "MaxQuant (mono) failed — see combined/proc/ for the step it stopped on"',
                 '  elif command -v docker >/dev/null 2>&1; then',
                 f'    sed "s#{KIT_DIR_TOKEN}#{DOCKER_MOUNT}#g" {tr["config"]} > {_docker_config(tr["config"])}',
                 f'    step "running MaxQuant in $MQ_IMAGE; paths resolved against {DOCKER_MOUNT}"',
-                # raw/*.raw entries may be symlinks to a shared cache outside $PWD (e.g. /var/folders/…).
-                # ThermoRawFileReader.RawFileAccessBase fails with IsError=True when given a symlink path
-                # even when the link target is mounted. Replace each symlink path in the docker mqpar with
-                # the real path BEFORE running MaxQuant so the reader receives a non-symlink path.
-                # Also add each symlink target's parent directory as a bind-mount at the same path.
-                # Use readlink (not realpath): on macOS realpath canonicalises /var→/private/var but the
-                # symlink target keeps /var/…, leaving it dangling inside the container.
+                # Same rewrite as the two branches above, through the same helper — plus a bind mount
+                # for each resolved target directory, since a real path outside $PWD is not visible
+                # in the container unless it is mounted at that same path.
                 '    MQ_SYMLINK_MOUNTS=""',
-                '    for _f in raw/*.raw raw/*.RAW; do',
-                '      [ -L "$_f" ] || continue',
-                '      _link=$(readlink "$_f" 2>/dev/null) || continue',
-                '      _dir=$(dirname "$_link")',
-                '      _base=$(basename "$_f")',
-                # Replace /data/raw/<base> → real path in docker mqpar so Thermo reader gets a real path.
-                f'      _tmp=$(mktemp) && sed "s#{DOCKER_MOUNT}/raw/$_base#$_link#g" {_docker_config(tr["config"])} > "$_tmp" && mv "$_tmp" {_docker_config(tr["config"])}',
+                f'    _mq_dirs=$(resolve_raw_paths {_docker_config(tr["config"])} {DOCKER_MOUNT})',
+                '    while IFS= read -r _dir; do',
+                '      [ -n "$_dir" ] || continue',
                 '      case "$MQ_SYMLINK_MOUNTS" in *"-v $_dir:$_dir"*) ;; *)',
                 '        MQ_SYMLINK_MOUNTS="$MQ_SYMLINK_MOUNTS -v $_dir:$_dir" ;; esac',
-                '    done',
+                '    done <<EOF',
+                '$_mq_dirs',
+                'EOF',
                 # The biocontainers maxquant wrapper ignores the passed config path and always reads
                 # mqpar.xml from the working directory. Override it with a second bind mount so that
                 # both the explicit argument and the default cwd lookup hit the substituted config.
@@ -1875,7 +1973,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 "  else",
                 '    fail "MaxQuant not found — preflight.sh explains the options (MAXQUANT_CMD / MAXQUANT_DIR / docker)"',
                 "  fi",
-                '  kill "$MQ_WATCH" 2>/dev/null || true; trap - EXIT',
+                '  kill "$MQ_WATCH" 2>/dev/null || true; MQ_WATCH=""',
                 '  mq_scan  # final sweep: catch steps that finished between the last poll and now',
                 f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
                 f'  step "$(($(wc -l < "{tr["output_table"]}") - 1)) protein groups in {tr["output_table"]}"',
@@ -1889,8 +1987,7 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
                 f'if stage search_{kind} "{tr["engine_label"]} — {tr["run_count"]} {tr["kind"]} runs"; then',
                 '  [ -n "$DIANN" ] || fail "DIA-NN not found — set DIANN_CMD, see preflight.sh"',
                 '  step "library-free: DIA-NN predicts a spectral library from the FASTA first"',
-                f'  bash run_diann_{kind}.sh 2>&1 | while IFS= read -r _line; do step "$_line"; done',
-                f'  [ "${{PIPESTATUS[0]}}" = "0" ] || fail "DIA-NN failed"',
+                f'  run_step run_diann_{kind}.sh "DIA-NN failed"',
                 f'  [ -s "{tr["output_table"]}" ] || fail "{tr["output_table"]} was not produced"',
                 f'  step "$(($(wc -l < "{tr["output_table"]}") - 1)) protein groups in {tr["output_table"]}"',
                 "  stage_done",
@@ -1957,7 +2054,15 @@ def search_kit(accession: str, api_base: str = "", web_base: str = "", runs: lis
     p = ctx["p"]
     fasta_path, _ = _fasta(ctx)
     files: dict[str, str] = {"download_raw.sh": _download_sh(ctx), "download_fasta.sh": _fasta_sh(ctx),
-                             "preflight.sh": preflight_sh(ctx, plan), ".gitignore": KIT_GITIGNORE}
+                             "preflight.sh": preflight_sh(ctx, plan), ".gitignore": KIT_GITIGNORE,
+                             # The run selection, carried so the far side can key its job registry
+                             # the same way this side does. `runs` never crosses the wire — the
+                             # remote /run handler receives only the kit — so without this the
+                             # registry is keyed by accession alone and two different sample
+                             # selections of one dataset overwrite each other's job id. The key is
+                             # COMPUTED here, by _selection_key, which stays its only owner; the kit
+                             # is just the carrier.
+                             SELECTION_KEY_FILE: _selection_key(runs)}
     steps = [f"1. `bash download_raw.sh` pulls the {len(ctx['raw'])} raw files from PRIDE's FTP into raw/ "
              "(runs plus their index sidecars — the readers need both).",
              f"2. `bash download_fasta.sh` fetches the protein database to `{fasta_path}`, where the configs expect it."]
@@ -2113,6 +2218,24 @@ def _require_local(request: Request):
     if not _is_local(request):
         raise HTTPException(403, "the pipeline can only be run by a local PRIDE Map; "
                                  f"set {_ALLOW_RUN_ENV}=1 on a server that really should run searches")
+
+
+#: Name of the file inside a kit that carries the run-selection key. Read by the Modal side, which
+#: only ever receives the kit, so that both ends key the job registry identically.
+SELECTION_KEY_FILE = "selection_key.txt"
+
+
+def job_key(accession: str, selection: str) -> str:
+    """The registry key for one dataset + run selection.
+
+    Keying on accession alone meant a second selection of the same dataset replaced the first's job
+    id, so the earlier job became unreachable through /jobs — the documented way to find and kill a
+    runaway 16 CPU / 64 GB container.
+
+    One function, used by both ends, because a key that two sides derive separately is a key they
+    will eventually disagree about.
+    """
+    return f"{accession}:{selection}" if selection else accession
 
 
 def _selection_key(runs: list[str] | None) -> str:
@@ -2365,9 +2488,10 @@ def corrections_stats():
             "applied": con.execute("SELECT count(*) FROM tags WHERE model LIKE '%(corrected)'").fetchone()[0]}
 
 
-# ----------------------------------------------------------------------------- remote MaxQuant server (Devin/cloud)
-# Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to a remote Linux machine running the Devin-provisioned
-# mq_server. Temporary: tear down by unsetting MQ_SERVER_URL.
+# ----------------------------------------------------------------------------- remote MaxQuant server (Modal)
+# Set MQ_SERVER_URL and MQ_TOKEN in .env to route searches to the Modal gateway (api/modal_web.py),
+# which spawns the download and search workers in api/modal_runner.py. Unset MQ_SERVER_URL to go
+# back to local-only runs; the UI reports the remote as unconfigured rather than failing.
 
 # In-process store: accession -> job_id.  Survives UI close/reopen; cleared on DELETE or server restart.
 _active_remote_jobs: dict[str, str] = {}
@@ -2550,21 +2674,17 @@ def pipeline_remote_active(accession: str, runs: str = ""):
     Phase 2: if the in-process cache misses (e.g. after an API restart), fall back to the Modal
     Dict via GET /jobs/{accession} on the remote server so the job is still discoverable.
     """
-    job_id = _active_remote_jobs.get(accession)
+    key = _remote_job_key(accession, runs)
+    job_id = _active_remote_jobs.get(key)
+    if job_id == _SUBMIT_PENDING:
+        # A submission for this selection is mid-flight in another request. Reporting it as active
+        # without a job id lets the card show "submitting" instead of offering a second Run button.
+        return {"job_id": None, "status": "submitting"}
 
     if not job_id:
-        # Phase 2 fallback: ask the remote server's durable Dict.
-        modal_url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
-        if modal_url:
-            try:
-                req = urllib.request.Request(f"{modal_url}/jobs/{accession}", headers=_mq_auth_headers())
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read())
-                job_id = data.get("job_id")
-                if job_id:
-                    _active_remote_jobs[accession] = job_id  # repopulate in-process cache
-            except Exception:
-                pass
+        job_id = _remote_job_from_registry(key)
+        if job_id:
+            _active_remote_jobs[key] = job_id  # repopulate in-process cache
 
     if not job_id:
         return {"job_id": None, "status": None}
@@ -2575,20 +2695,164 @@ def pipeline_remote_active(accession: str, runs: str = ""):
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         if data.get("status") in ("done", "error"):
-            _active_remote_jobs.pop(accession, None)
+            _active_remote_jobs.pop(key, None)
         return {"job_id": job_id, **_remote_stage_payload(accession, runs, data)}
     except Exception:
         return {"job_id": job_id, "status": "running", "log": "", "stage_progress": False, "stages": []}
+
+
+#: Written into _active_remote_jobs between the decision to submit and the job id coming back.
+#: Submitting takes up to 60 s (and may wake a container first), and the dict was previously only
+#: written AFTER that call returned — so two clicks could both read "nothing running" and both
+#: spawn. The local route does not have this gap because it writes run.pid synchronously.
+_SUBMIT_PENDING = "pending"
+
+
+def _remote_job_key(accession: str, runs: str) -> str:
+    """The registry key for this dataset and run selection. One owner, used by every remote route."""
+    return job_key(accession, _selection_key(parse_runs(runs)))
+
+
+def _remote_job_from_registry(key: str) -> str | None:
+    """The job id the remote server's durable Dict holds for this key, if it can be reached.
+
+    The fallback that makes a job survive an API restart: the in-process cache is gone then, but the
+    Modal Dict is not.
+    """
+    modal_url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
+    if not modal_url:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"{modal_url}/jobs/{urllib.parse.quote(key, safe='')}", headers=_mq_auth_headers()
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read()).get("job_id")
+    except Exception:
+        return None
+
+
+def _remote_job_running(job_id: str) -> bool:
+    """True when the remote server still reports this job as running."""
+    try:
+        base_url = _mq_remote_url()
+        req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read()).get("status") == "running"
+    except Exception:
+        # Cannot tell. Treated as NOT running so an unreachable server cannot permanently block
+        # resubmission — the far side's record_job is the backstop against actually orphaning one.
+        return False
+
+
+#: Files a kit must contain for run_all.sh to get as far as the search. Their absence was previously
+#: discovered inside the container, minutes and dollars after the upload.
+_REQUIRED_KIT_FILES = (
+    "run_all.sh",
+    "preflight.sh",
+    "download_raw.sh",
+    "mqpar.xml",
+    # Without this the far side keys the job registry by accession alone, and a second run selection
+    # of the same dataset silently displaces the first job's entry.
+    SELECTION_KEY_FILE,
+)
+
+
+def remote_submission_problems(accession: str, runs: str, kit_bytes: bytes) -> list[str]:
+    """Everything that will stop this submission succeeding, checked before a byte is uploaded.
+
+    ALL of them, not the first. A validator that stops at the first problem makes the user pay for
+    one round trip per defect, and each round trip here is a Modal cold start.
+
+    This is not a second preflight. preflight.sh asks "is this container's environment adequate?"
+    from inside the container, once the work has already been scheduled; this asks "is it worth
+    spending anything on this submission at all?" and runs before the upload. Different questions,
+    different moments. It composes the existing owners rather than re-deriving their answers.
+    """
+    problems: list[str] = []
+
+    # Engine suitability. The local route refuses this inside run_all.sh; the remote route had no
+    # such gate, so a DIA or SCIEX dataset could be handed to a MaxQuant runner that cannot search it.
+    try:
+        plan = dataset_search_plan(accession, parse_runs(runs))
+        if not plan.get("maxquant_offered"):
+            problems.append(
+                plan.get("maxquant_reason")
+                or "this dataset has no MaxQuant-runnable track; the cloud runner only runs MaxQuant"
+            )
+    except HTTPException:
+        raise  # a missing accession or a bad run selection is a 404/400, not a list of problems
+    except Exception as exc:  # pragma: no cover - defensive
+        problems.append(f"could not build a search plan for {accession}: {exc}")
+
+    # Credentials. An empty token is sent as no header at all, and the far side reads that as
+    # anonymous — so a misconfiguration surfaced as a 401 from /run rather than as a missing setting.
+    if not os.environ.get("MQ_TOKEN", ""):
+        problems.append("MQ_TOKEN is not set — the remote server will reject this upload as anonymous")
+
+    # Kit completeness.
+    try:
+        with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
+            names = {pathlib.Path(n).name for n in zf.namelist()}
+        missing = [f for f in _REQUIRED_KIT_FILES if f not in names]
+        if missing:
+            problems.append(f"the generated kit is missing {', '.join(missing)}")
+    except zipfile.BadZipFile:
+        problems.append("the generated kit is not a readable zip")
+
+    return problems
 
 
 @router.post("/dataset/{accession}/pipeline/remote")
 def pipeline_remote_start(accession: str, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
-    _mq_await_ready(base_url)  # waits up to 120 s for Modal cold-start before uploading
+    key = _remote_job_key(accession, runs)
+
+    # Idempotent submit. A second click, a second tab, or a reload against a job the card lost track
+    # of used to spawn another 16 CPU / 64 GB container and overwrite the registry entry — orphaning
+    # the first job, which kept billing while being invisible to /jobs, the documented kill path.
+    # Returning the job already in flight makes POSTing twice indistinguishable from POSTing once.
+    existing = _active_remote_jobs.get(key)
+    if existing == _SUBMIT_PENDING:
+        raise HTTPException(409, "a submission for this selection is already in progress")
+    if not existing:
+        existing = _remote_job_from_registry(key)
+    if existing and _remote_job_running(existing):
+        logger.info("pipeline_remote_start  reattaching to running job %s for %s", existing, key)
+        _active_remote_jobs[key] = existing
+        return {"job_id": existing, "reattached": True}
+
+    # Claim the slot BEFORE the slow part. Submitting takes up to 60 s and may wake a container
+    # first; without this marker two concurrent requests both read "nothing running" and both spawn.
+    _active_remote_jobs[key] = _SUBMIT_PENDING
+    try:
+        return _submit_remote_job(accession, runs, key, base_url)
+    except Exception:
+        _active_remote_jobs.pop(key, None)  # a failed submission must not block the next attempt
+        raise
+
+
+def _submit_remote_job(accession: str, runs: str, key: str, base_url: str) -> dict:
+    """Build the kit, check it can succeed, and hand it to the remote server."""
     # api_base is intentionally empty: Modal downloads raw files directly from PRIDE,
     # not from the local API server which it cannot reach.
     kit_bytes, _ = search_kit(accession, "", "", runs=parse_runs(runs))
+
+    # Before the cold start, not after: _mq_await_ready blocks up to 120 s waking a container, and
+    # there is no reason to wake one for a submission that cannot succeed.
+    problems = remote_submission_problems(accession, runs, kit_bytes)
+    if problems:
+        logger.warning("pipeline_remote_start  refused accession=%s: %s", accession, problems)
+        raise HTTPException(
+            400,
+            {
+                "error": "this run cannot be submitted",
+                "problems": problems,
+            },
+        )
+
+    _mq_await_ready(base_url)  # waits up to 120 s for Modal cold-start before uploading
     kit_kb = len(kit_bytes) / 1024
     logger.info("pipeline_remote_start  accession=%s  kit=%.1f KB  url=%s/run", accession, kit_kb, base_url)
     boundary = "PrideMapBoundary"
@@ -2605,8 +2869,8 @@ def pipeline_remote_start(accession: str, runs: str = ""):
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
-        logger.info("pipeline_remote_start  job_id=%s", result.get("job_id"))
-        _active_remote_jobs[accession] = result["job_id"]
+        logger.info("pipeline_remote_start  job_id=%s  key=%s", result.get("job_id"), key)
+        _active_remote_jobs[key] = result["job_id"]  # replaces the pending marker
         return result
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
@@ -2692,7 +2956,12 @@ def pipeline_remote_results(accession: str, job_id: str):
 @router.delete("/dataset/{accession}/pipeline/remote/{job_id}")
 def pipeline_remote_delete(accession: str, job_id: str):
     """Clean up a finished job's temp directory on the remote server."""
-    _active_remote_jobs.pop(accession, None)
+    # Forget THIS job, by id. Popping by accession dropped whichever entry that dataset happened to
+    # hold, so stopping one selection's job also forgot another's — and now that keys carry the run
+    # selection, an accession would not match any entry at all.
+    for k, v in list(_active_remote_jobs.items()):
+        if v == job_id:
+            _active_remote_jobs.pop(k, None)
     base_url = _mq_remote_url()
     req = urllib.request.Request(f"{base_url}/job/{job_id}", headers=_mq_auth_headers(), method="DELETE")
     try:

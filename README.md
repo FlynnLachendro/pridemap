@@ -151,13 +151,12 @@ The `/mcp` page in the running web UI explains the available tools and has a liv
 ## Running MaxQuant
 
 PRIDE Map generates a ready-to-run search kit (scripts + MaxQuant XML configs) for any suitable
-dataset. Three paths:
+dataset. Two paths:
 
 | Path | Guide |
 |------|-------|
 | **Local** — Docker on your macOS or Linux machine | [docs/maxquant-local.md](docs/maxquant-local.md) |
-| **Cloud** — Devin runs MaxQuant on a Linux VM, exposed over a Cloudflare tunnel | [docs/maxquant-cloud-devin.md](docs/maxquant-cloud-devin.md) |
-| **Modal** — serverless, laptop can shut down mid-run *(planned)* | [docs/maxquant-modal.md](docs/maxquant-modal.md) |
+| **Cloud** — MaxQuant on Modal; serverless, laptop can shut down mid-run | [docs/maxquant-modal.md](docs/maxquant-modal.md) |
 
 ---
 

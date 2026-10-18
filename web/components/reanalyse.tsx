@@ -169,7 +169,14 @@ export function Reanalyse({ accession }: { accession: string }) {
               <p className="text-xs text-faint"><span className="font-semibold">Why not MaxQuant:</span> {out.plan.maxquant_reason}</p>
             )}
           </div>
-          {remoteAvailable && out.plan.maxquant_offered && <RunRemote accession={accession} />}
+          {/* engineLabel is passed explicitly: without it this card read "Run on cloud (search
+              engine via Modal)", while the identical card on /analyse named the real engine. */}
+          {remoteAvailable && out.plan.maxquant_offered && (
+            <RunRemote
+              accession={accession}
+              engineLabel={out.plan.tracks.map((t) => t.engine_label).join(" + ") || "search engine"}
+            />
+          )}
         </div>
       )}
 
