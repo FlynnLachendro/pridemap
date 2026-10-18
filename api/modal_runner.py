@@ -127,35 +127,119 @@ image = (
 
 # ----------------------------------------------------------------------------- worker
 
+# ----------------------------------------------------------------------------- download worker (cheap)
+
+@app.function(
+    image=image,
+    volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
+    secrets=[secret],
+    cpu=2,
+    memory=4096,
+    timeout=7200,   # 2 h — enough for any current public PRIDE dataset
+)
+def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
+    """Download raw files for one accession into raw_vol. Cheap container (~10× less than MaxQuant).
+
+    Runs only download_raw.sh. raw_vol.reload() at start means an already-cached accession
+    finishes in seconds — have() returns true for each file and curl is never invoked.
+    raw_vol is committed every 15 s so an interrupted container leaves a partial file that
+    the next run resumes via curl -C - rather than restarting.
+    """
+    job_dir = DATA_ROOT / job_id
+    log_path = job_dir / "run.log"
+
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+        try:
+            with log_path.open("a") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass   # job_dir may not be visible before the first reload
+
+    _vol_sync("reload")        # see the job_dir the orchestrator created and committed
+    _vol_sync("reload", raw_vol)
+    _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
+
+    work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"dl-{job_id}-"))
+    with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
+        zf.extractall(work_dir)
+
+    dl_script = work_dir / "download_raw.sh"
+    if not dl_script.exists():
+        raise FileNotFoundError("download_raw.sh not found in kit")
+    dl_script.chmod(0o755)
+
+    env = {**os.environ, "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT}
+
+    _stop = threading.Event()
+
+    def _ship() -> None:
+        while not _stop.wait(15):
+            _vol_sync("commit")
+            _vol_sync("commit", raw_vol)
+
+    t = threading.Thread(target=_ship, daemon=True)
+    t.start()
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(dl_script)],
+            cwd=str(work_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        for line in proc.stdout:  # type: ignore[union-attr]
+            _log(line.rstrip())
+        proc.wait()
+        _vol_sync("commit", raw_vol)
+        _vol_sync("commit")
+        if proc.returncode != 0:
+            raise RuntimeError(f"download_raw.sh exited {proc.returncode}")
+    finally:
+        _stop.set()
+        _vol_sync("commit", raw_vol)
+        _vol_sync("commit")
+
+
+# ----------------------------------------------------------------------------- MaxQuant worker (expensive)
+
 @app.function(
     image=image,
     volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
     secrets=[secret],
     cpu=16,
     memory=65536,   # 64 GB
-    timeout=86400,  # 24 h — NOT Modal's 300 s default
+    timeout=86400,  # 24 h
 )
-def run_maxquant(kit_bytes: bytes, accession: str) -> str:
-    """Unpack the kit, download raw files, run MaxQuant. Returns the job_id."""
-    job_id = _job_id_for_this_run(accession)
-    job_dir = DATA_ROOT / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-    _vol_sync("commit")
+def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
+    """Run MaxQuant. Raw files are already in raw_vol — download_raw.sh's have() skips them.
 
+    The expensive 64 GB container only starts after _download_raw has committed all raw files,
+    so it spends zero time waiting for downloads.
+    """
+    job_dir = DATA_ROOT / job_id
     log_path = job_dir / "run.log"
     progress_path = job_dir / "progress.jsonl"
 
+    # Reload before first write so the log lines from _download_raw are visible in the file
+    # we append to, and so the raw files committed by _download_raw are on-disk.
+    _vol_sync("reload")
+    _vol_sync("reload", raw_vol)
+
     def _log(msg: str) -> None:
         print(msg, flush=True)
-        with log_path.open("a") as f:
-            f.write(msg + "\n")
+        try:
+            with log_path.open("a") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass
 
-    # run_all.sh writes its own stage events next to itself, in the container-local work dir that
-    # never reaches the Volume. Copying that file in on every sync is what lets /status report
-    # stages, elapsed time and ETA for a remote job exactly as a local run does — without it the
-    # client can only ever see "running". It is kept under a different name from the coarse
-    # status file this module writes, because the two have different schemas and merging them
-    # would corrupt both readers.
+    _log(f"raw cache: {RAW_CACHE_MOUNT} (reloaded — raw files should already be present)")
+
+    # run_all.sh writes its own stage events next to itself in the container-local work dir.
+    # Copying that file to the Volume on every sync is what lets /status report stages,
+    # elapsed time and ETA while the search runs.
     kit_progress: list[pathlib.Path] = []
 
     def _ship_stages() -> None:
@@ -163,51 +247,40 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
             try:
                 (job_dir / "stages.jsonl").write_bytes(src.read_bytes())
             except OSError:
-                pass  # the file appears only once run_all.sh reaches its first stage
+                pass
 
-    # Background thread: ship log + progress to the Volume every 15 s so /status has live output.
     _stop_shipper = threading.Event()
 
     def _shipper() -> None:
         while not _stop_shipper.wait(15):
             _ship_stages()
-            _vol_sync("commit")          # job results / log
-            _vol_sync("commit", raw_vol) # raw-file cache (so interrupted downloads survive)
+            _vol_sync("commit")
+            _vol_sync("commit", raw_vol)
 
     shipper = threading.Thread(target=_shipper, daemon=True)
     shipper.start()
 
     try:
-        _log(f"job_id={job_id}  accession={accession}")
-
-        # Unpack kit into container-local temp (results stay here until copied to vol at the end).
         work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"mq-{job_id}-"))
-        _log(f"work_dir={work_dir}")
         kit_progress.append(work_dir / "progress.jsonl")
 
         with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
             zf.extractall(work_dir)
         _log("kit unpacked")
 
-        # run_all.sh drives the full pipeline (download + MaxQuant)
         run_script = work_dir / "run_all.sh"
         if not run_script.exists():
             raise FileNotFoundError("run_all.sh not found in kit")
-
         run_script.chmod(0o755)
 
-        # Pull the latest state of the raw-file cache so already-downloaded files are visible.
-        # download_raw.sh's have() check then skips them; curl -C - resumes any partial files.
-        _vol_sync("reload", raw_vol)
-        _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
-
+        # raw files are already in raw_vol — download_raw.sh's have() check skips them instantly
         env = {
             **os.environ,
-            "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT,   # persistent across jobs; raw_vol is mounted here
+            "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT,
             "MAXQUANT_CMD": "maxquant",
         }
 
-        _log("starting run_all.sh")
+        _log("starting run_all.sh (download stage will be skipped — files already in raw_vol)")
         _write_progress(progress_path, "running", "starting run_all.sh")
         proc = subprocess.Popen(
             ["bash", str(run_script)],
@@ -221,15 +294,12 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
             _log(line.rstrip())
         proc.wait()
 
-        # Flush newly downloaded raw files to raw_vol so the next job for this accession
-        # can reload them and skip the download entirely.
         _vol_sync("commit", raw_vol)
 
         if proc.returncode != 0:
             _write_progress(progress_path, "error", f"run_all.sh exited {proc.returncode}")
             _log(f"FAILED exit={proc.returncode}")
         else:
-            # Copy proteinGroups.txt to the Volume so /results can serve it.
             protein_src = _find_protein_groups(work_dir)
             if protein_src:
                 out_dir = job_dir / "combined" / "txt"
@@ -246,9 +316,71 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         _write_progress(progress_path, "error", str(exc))
     finally:
         _stop_shipper.set()
-        _ship_stages()  # final sweep: the stages that finished since the last 15 s tick
+        _ship_stages()
         _vol_sync("commit")
-        _vol_sync("commit", raw_vol)  # persist any partially-downloaded files for resume
+        _vol_sync("commit", raw_vol)
+
+
+# ----------------------------------------------------------------------------- orchestrator (lightweight)
+
+@app.function(
+    image=image,
+    volumes={VOLUME_MOUNT: vol},
+    secrets=[secret],
+    cpu=1,
+    memory=1024,
+    timeout=100800,  # 28 h: 2 h download + 24 h MaxQuant + margin
+)
+def run_maxquant(kit_bytes: bytes, accession: str) -> str:
+    """Lightweight orchestrator: sequences download (cheap) then search (expensive).
+
+    Returning this function's own call_id keeps the polling contract unchanged:
+    /status maps call_id → "running" while this orchestrator is alive (i.e. while either
+    phase is in progress), and → "done" when it returns. The job directory is named after
+    this call_id so /results and /logs resolve correctly without any gateway changes.
+
+    Cost model vs the old single-function approach:
+      download phase: 2 CPU / 4 GB  (~10× cheaper than 16 CPU / 64 GB)
+      search phase:   16 CPU / 64 GB (unchanged)
+      orchestrator:   1 CPU / 1 GB  (negligible; it just blocks waiting for children)
+    """
+    job_id = _job_id_for_this_run(accession)
+    job_dir = DATA_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    _vol_sync("commit")   # make job_dir visible to children before they start
+
+    log_path = job_dir / "run.log"
+    progress_path = job_dir / "progress.jsonl"
+
+    def _log(msg: str) -> None:
+        print(msg, flush=True)
+        with log_path.open("a") as f:
+            f.write(msg + "\n")
+
+    _log(f"job_id={job_id}  accession={accession}")
+    _log("phase 1/2: download (cheap container — 2 CPU / 4 GB)")
+    _write_progress(progress_path, "running", "download phase starting")
+    _vol_sync("commit")
+
+    try:
+        _download_raw.remote(kit_bytes, accession, job_id)
+    except Exception as exc:
+        _log(f"DOWNLOAD FAILED: {exc}")
+        _write_progress(progress_path, "error", f"download failed: {exc}")
+        _vol_sync("commit")
+        return job_id
+
+    _vol_sync("reload")   # pull log lines written by the download worker
+    _log("phase 2/2: MaxQuant search (expensive container — 16 CPU / 64 GB)")
+    _write_progress(progress_path, "running", "search phase starting")
+    _vol_sync("commit")
+
+    try:
+        _run_maxquant_search.remote(kit_bytes, accession, job_id)
+    except Exception as exc:
+        _log(f"MAXQUANT FAILED: {exc}")
+        _write_progress(progress_path, "error", f"maxquant failed: {exc}")
+        _vol_sync("commit")
 
     return job_id
 
