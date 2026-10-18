@@ -1,0 +1,254 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["modal>=1.5", "pytest>=8"]
+# ///
+"""Contract tests for the Modal MaxQuant runner's job-status mapping.
+
+Author:  PRIDE Map
+Created: 2026-10-18
+Scope:   api/modal_runner.py _call_status() — the poll-outcome → status mapping /status reports.
+
+Why this file exists: a running job reported "error" within seconds of submission, so the UI marked
+download, FASTA and the search as failed while the container was in fact downloading raw files
+normally. The cause was the exception type: modal's poll raises the BUILTIN TimeoutError for
+"inputs not finished yet", while _call_status caught only modal.exception.TimeoutError — which no
+poll ever raises — so every healthy job fell through to `except Exception` and reported failure.
+Nothing about this is visible by reading the code; it needs the mapping exercised per exception.
+
+run:  uv run tests/test_modal_runner.py
+      (or: uv run pytest tests/test_modal_runner.py)
+"""
+import pathlib
+import sys
+from unittest import mock
+
+import modal
+import modal.exception
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from api import modal_runner  # noqa: E402
+from api.modal_runner import _call_status, _job_dir, _job_id_for_this_run  # noqa: E402
+
+JOB_ID = "fc-01M57AXN6YWY8BYNX32YPYP4TH"
+
+
+class _ModalWithout:
+    """A stand-in for the modal module with one attribute removed, to model client version skew."""
+
+    def __init__(self, missing: str):
+        self._missing = missing
+
+    def __getattr__(self, name: str):
+        if name == self._missing:
+            raise AttributeError(name)
+        return getattr(modal, name)
+
+
+class _Call:
+    """A FunctionCall whose get() reproduces one poll outcome."""
+
+    def __init__(self, outcome):
+        self._outcome = outcome
+
+    def get(self, timeout=None):
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+def _status_for(outcome: object) -> str:
+    with mock.patch("modal.FunctionCall.from_id", return_value=_Call(outcome)):
+        return _call_status(JOB_ID)
+
+
+def test_builtin_timeout_means_running():
+    """Scenario: the gateway polls a job whose inputs have not finished.
+
+    Slice: job status reporting.
+    Given a spawned call that modal reports as unfinished by raising the builtin TimeoutError,
+    When the gateway maps that poll outcome to a status,
+    Then it reports "running" — the exact case that regressed to "error".
+    """
+    ### Given / When
+    status = _status_for(TimeoutError())
+
+    ### Then
+    assert status == "running"
+
+
+def test_modal_timeout_also_means_running():
+    """Scenario: a modal client version raises its own TimeoutError for an unfinished poll.
+
+    Slice: job status reporting.
+    Given a spawned call that raises modal.exception.TimeoutError,
+    When the gateway maps that poll outcome to a status,
+    Then it still reports "running", so the mapping does not depend on which class modal picks.
+    """
+    ### Given / When
+    status = _status_for(modal.exception.TimeoutError())
+
+    ### Then
+    assert status == "running"
+
+
+def test_returned_value_means_done():
+    """Scenario: the worker has finished and its result is available.
+
+    Slice: job status reporting.
+    Given a spawned call whose get() returns the worker's job_id,
+    When the gateway maps that poll outcome to a status,
+    Then it reports "done".
+    """
+    ### Given / When
+    status = _status_for(JOB_ID)
+
+    ### Then
+    assert status == "done"
+
+
+def test_expired_output_means_error():
+    """Scenario: the result has been garbage-collected and can never be fetched.
+
+    Slice: job status reporting.
+    Given a spawned call that raises OutputExpiredError — a modal TimeoutError SUBCLASS,
+    When the gateway maps that poll outcome to a status,
+    Then it reports "error" rather than being swept up by the "running" branch, because a result
+    that is gone is a failure to surface, not work still in progress.
+    """
+    ### Given / When
+    status = _status_for(modal.exception.OutputExpiredError())
+
+    ### Then
+    assert status == "error"
+
+
+def test_remote_exception_means_error():
+    """Scenario: the worker itself raised and modal re-raises on get().
+
+    Slice: job status reporting.
+    Given a spawned call that raises an ordinary exception,
+    When the gateway maps that poll outcome to a status,
+    Then it reports "error".
+    """
+    ### Given / When
+    status = _status_for(RuntimeError("worker blew up"))
+
+    ### Then
+    assert status == "error"
+
+
+def test_job_directory_is_named_after_the_polled_call_id():
+    """Scenario: the worker starts inside a Modal container and names its job directory.
+
+    Slice: job output addressing.
+    Given a container whose current FunctionCall id is the id the client was handed,
+    When the worker decides what to call its job directory,
+    Then it uses that same id, because /status and /results look there — the original mismatch left
+    run.log unreachable for the whole run and /results returning 404 after a successful search.
+    """
+    ### Given / When
+    with mock.patch.object(modal_runner.modal, "current_function_call_id", lambda: JOB_ID):
+        job_id = _job_id_for_this_run("PXD046787")
+
+    ### Then
+    assert job_id == JOB_ID
+
+
+def test_job_id_falls_back_off_modal():
+    """Scenario: the worker runs on a local machine, where there is no FunctionCall id.
+
+    Slice: job output addressing.
+    Given a context in which modal reports no current call id,
+    When the worker decides what to call its job directory,
+    Then it falls back to an accession-scoped name so local runs still work.
+    """
+    ### Given / When
+    with mock.patch.object(modal_runner.modal, "current_function_call_id", lambda: None):
+        job_id = _job_id_for_this_run("PXD046787")
+
+    ### Then
+    assert job_id.startswith("PXD046787-")
+
+
+def test_job_id_survives_a_client_without_the_accessor():
+    """Scenario: the installed modal client does not expose current_function_call_id at all.
+
+    Slice: job output addressing.
+    Given a modal module missing that accessor,
+    When the worker decides what to call its job directory,
+    Then it still returns a usable id rather than raising, because an AttributeError here would
+    fail the run before a single raw file was fetched.
+    """
+    ### Given / When
+    without_accessor = _ModalWithout("current_function_call_id")
+    with mock.patch.object(modal_runner, "modal", without_accessor):
+        job_id = _job_id_for_this_run("PXD046787")
+
+    ### Then
+    assert job_id.startswith("PXD046787-")
+
+
+def test_job_dir_resolves_the_current_layout(tmp_path):
+    """Scenario: the gateway looks up the output directory of a job spawned after the fix.
+
+    Slice: job output addressing.
+    Given a data root containing a directory named after the FunctionCall id,
+    When the gateway resolves that job's directory,
+    Then it returns that path, without needing a Volume or any Modal connectivity.
+    """
+    ### Given
+    expected = tmp_path / JOB_ID
+    expected.mkdir()
+
+    ### When
+    with mock.patch.object(modal_runner, "DATA_ROOT", tmp_path):
+        resolved = _job_dir(JOB_ID)
+
+    ### Then
+    assert resolved == expected
+
+
+def test_job_dir_resolves_a_pre_fix_job(tmp_path):
+    """Scenario: a job spawned before the id unification is still on the Volume.
+
+    Slice: job output addressing.
+    Given a data root holding only the legacy "{accession}-{timestamp}" directory, and a jobs
+      mapping that ties the accession to the FunctionCall id the client polls,
+    When the gateway resolves that job's directory,
+    Then it finds the legacy path, so hours of completed search work remain downloadable.
+    """
+    ### Given
+    legacy = tmp_path / "PXD046787-1792321464"
+    legacy.mkdir()
+
+    ### When
+    with mock.patch.object(modal_runner, "DATA_ROOT", tmp_path), \
+         mock.patch.object(modal_runner, "jobs", {"PXD046787": JOB_ID}):
+        resolved = _job_dir(JOB_ID)
+
+    ### Then
+    assert resolved == legacy
+
+
+def test_job_dir_returns_none_for_an_unknown_job(tmp_path):
+    """Scenario: nothing on disk belongs to the requested job.
+
+    Slice: job output addressing.
+    Given an empty data root and a jobs mapping without this job,
+    When the gateway resolves that job's directory,
+    Then it returns None so /results answers 404 rather than serving another job's table.
+    """
+    ### Given / When
+    with mock.patch.object(modal_runner, "DATA_ROOT", tmp_path), \
+         mock.patch.object(modal_runner, "jobs", {}):
+        resolved = _job_dir(JOB_ID)
+
+    ### Then
+    assert resolved is None
+
+
+if __name__ == "__main__":
+    import pytest
+
+    sys.exit(pytest.main([__file__, "-q"]))

@@ -40,6 +40,25 @@ vol    = Volume.from_name("pridemap-runs", create_if_missing=True)
 jobs   = modal.Dict.from_name("pridemap-jobs", create_if_missing=True)
 secret = Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
 
+# Where job directories live. In a Modal container this is the Volume mount point; off Modal
+# (a local run, a test, a plain host serving the same gateway) nothing is mounted at /data and it
+# may not even be writable, so the root is overridable. One owner, so the worker that writes a job
+# directory and the gateway that reads it can never diverge.
+VOLUME_MOUNT = "/data"   # where both @app.function decorators below mount `vol`
+DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
+
+
+def _vol_sync(action: str) -> None:
+    """Best-effort Volume commit/reload.
+
+    Off Modal there is no Volume to talk to and these calls raise; the local filesystem is already
+    coherent there, so a failure is not an error. Never let it mask a real one by propagating.
+    """
+    try:
+        getattr(vol, action)()
+    except Exception:
+        pass
+
 # ----------------------------------------------------------------------------- container images
 
 # Lightweight image for the ASGI web gateway.
@@ -85,7 +104,7 @@ image = (
 
 @app.function(
     image=image,
-    volumes={"/data": vol},
+    volumes={VOLUME_MOUNT: vol},
     secrets=[secret],
     cpu=16,
     memory=65536,   # 64 GB
@@ -93,10 +112,10 @@ image = (
 )
 def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     """Unpack the kit, download raw files, run MaxQuant. Returns the job_id."""
-    job_id = f"{accession}-{int(time.time())}"
-    job_dir = pathlib.Path(f"/data/{job_id}")
+    job_id = _job_id_for_this_run(accession)
+    job_dir = DATA_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    vol.commit()
+    _vol_sync("commit")
 
     log_path = job_dir / "run.log"
     progress_path = job_dir / "progress.jsonl"
@@ -111,10 +130,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
 
     def _shipper() -> None:
         while not _stop_shipper.wait(15):
-            try:
-                vol.commit()
-            except Exception:
-                pass
+            _vol_sync("commit")
 
     shipper = threading.Thread(target=_shipper, daemon=True)
     shipper.start()
@@ -177,12 +193,28 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         _write_progress(progress_path, "error", str(exc))
     finally:
         _stop_shipper.set()
-        try:
-            vol.commit()
-        except Exception:
-            pass
+        _vol_sync("commit")
 
     return job_id
+
+
+def _job_id_for_this_run(accession: str) -> str:
+    """The id this run's directory is named after.
+
+    It must be the id the CLIENT polls, which is the FunctionCall id that spawn_job() returns:
+    /status and /results look under DATA_ROOT/{that id}. Naming the directory anything else makes
+    the whole run invisible — run.log never appears (the UI shows "Waiting for output…" for hours)
+    and /results 404s even after a successful search.
+
+    Off Modal there is no call id (and older clients may not expose the accessor at all), so the
+    fallback keeps local runs working with a directory name that is still unique per run.
+    """
+    current_id = getattr(modal, "current_function_call_id", lambda: None)
+    try:
+        call_id = current_id()
+    except Exception:
+        call_id = None
+    return call_id or f"{accession}-{int(time.time())}"
 
 
 def _write_progress(path: pathlib.Path, status: str, message: str) -> None:
@@ -228,8 +260,10 @@ class _ModalBackend:
         return _read_log(job_id)
 
     def results_path(self, job_id: str) -> pathlib.Path | None:
-        vol.reload()
-        path = pathlib.Path(f"/data/{job_id}/combined/txt/proteinGroups.txt")
+        job_dir = _job_dir(job_id)
+        if job_dir is None:
+            return None
+        path = job_dir / "combined" / "txt" / "proteinGroups.txt"
         return path if path.exists() else None
 
     def delete_job(self, job_id: str) -> dict:
@@ -244,8 +278,8 @@ class _ModalBackend:
             cancelled = False
             problems.append(f"cancel failed: {exc}")
 
-        job_dir = pathlib.Path(f"/data/{job_id}")
-        if job_dir.exists():
+        job_dir = _job_dir(job_id)
+        if job_dir is not None and job_dir.exists():
             import shutil
             shutil.rmtree(job_dir, ignore_errors=True)
             if job_dir.exists():
@@ -276,7 +310,7 @@ class _ModalBackend:
 
 @app.function(
     image=web_image,
-    volumes={"/data": vol},   # required: /status and /results read run.log and proteinGroups.txt
+    volumes={VOLUME_MOUNT: vol},   # required: /status and /results read run.log and proteinGroups.txt
     secrets=[secret],
     scaledown_window=1800,  # stay warm 30 min after last request (Modal default is 300 s)
     # keep_warm=1,          # uncomment to always keep one container hot (eliminates cold starts, costs ~$0.06/h)
@@ -298,24 +332,69 @@ def web() -> object:
     )
 
 
+# Which exception means "this call has not finished yet" is an implementation detail of the modal
+# client version, and getting it wrong is silent: the status simply reads "error" for healthy jobs.
+# modal/_functions.py imports no TimeoutError from modal.exception, so its `raise TimeoutError()`
+# resolves to the BUILTIN — matching only modal.exception.TimeoutError never fired, and every
+# running job fell through to `except Exception` and reported failure seconds after submission.
+# Both are listed so either client behaviour maps correctly, and each lookup tolerates its absence
+# in older or newer clients (an unresolvable name in an `except` clause raises AttributeError at
+# handling time, turning a version skew into a 500).
+_PENDING_ERRORS: tuple[type[BaseException], ...] = tuple(
+    {TimeoutError, getattr(modal.exception, "TimeoutError", TimeoutError)}
+)
+# OutputExpiredError subclasses modal's TimeoutError, so it must be caught FIRST: a result that has
+# been garbage-collected is a failure to surface, not work still in progress. An empty tuple never
+# matches, which is the right behaviour when a client has no such class.
+_EXPIRED_ERRORS: tuple[type[BaseException], ...] = tuple(
+    c for c in (getattr(modal.exception, "OutputExpiredError", None),) if c is not None
+)
+
+
 def _call_status(job_id: str) -> str:
     """"running" | "done" | "error" for a spawned call. Shared by /status and /jobs."""
     try:
         modal.FunctionCall.from_id(job_id).get(timeout=0)
         return "done"
-    except modal.exception.TimeoutError:
-        # Still running — must be caught BEFORE the generic Exception, or every
-        # healthy job reports as failed.
+    except _EXPIRED_ERRORS:
+        return "error"
+    except _PENDING_ERRORS:
         return "running"
     except Exception:
         return "error"
 
 
-def _read_log(job_id: str) -> str:
-    vol.reload()
-    log_path = pathlib.Path(f"/data/{job_id}/run.log")
+def _job_dir(job_id: str) -> pathlib.Path | None:
+    """The directory holding this job's run.log and results, or None.
+
+    Single owner of job-id → path resolution, so the worker that writes a job directory and the
+    /status and /results handlers that read it cannot disagree about where output lives.
+    """
+    _vol_sync("reload")
+    direct = DATA_ROOT / job_id
+    if direct.exists():
+        return direct
+
+    # Transitional: jobs spawned before the id unification named their directory
+    # "{accession}-{timestamp}" while the client was handed the FunctionCall id, so their output is
+    # only reachable by reversing the jobs Dict. Delete this branch once no such job is in flight.
     try:
-        return log_path.read_text(errors="replace")[-8000:]  # last 8 KB
+        accession = next((acc for acc, jid in jobs.items() if jid == job_id), None)
+    except Exception:
+        accession = None
+    if accession:
+        legacy = sorted(DATA_ROOT.glob(f"{accession}-*"))
+        if legacy:
+            return legacy[-1]
+    return None
+
+
+def _read_log(job_id: str) -> str:
+    job_dir = _job_dir(job_id)
+    if job_dir is None:
+        return ""
+    try:
+        return (job_dir / "run.log").read_text(errors="replace")[-8000:]  # last 8 KB
     except FileNotFoundError:
         return ""
 
