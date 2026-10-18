@@ -19,8 +19,6 @@ Contract (consumed by api/omics.py lines 2276-2487):
 # dependencies = ["modal>=0.73"]
 # ///
 
-from __future__ import annotations
-
 import io
 import json
 import os
@@ -42,8 +40,19 @@ vol    = Volume.from_name("pridemap-runs", create_if_missing=True)
 jobs   = modal.Dict.from_name("pridemap-jobs", create_if_missing=True)
 secret = Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
 
-# ----------------------------------------------------------------------------- container image
+# ----------------------------------------------------------------------------- container images
 
+# Lightweight image for the ASGI web gateway.
+# python-multipart: required by Starlette's request.form(); omitting it raises
+#   AssertionError on every kit upload (not obvious from FastAPI docs).
+# Build-time smoke test: catches a missing package before the container starts.
+web_image = (
+    modal.Image.debian_slim()
+    .pip_install("fastapi", "uvicorn", "python-multipart")
+    .run_commands("python -c 'import fastapi, uvicorn, multipart'")  # fail at BUILD time
+)
+
+# Heavy MaxQuant image for the compute worker.
 image = (
     modal.Image.from_registry(
         "quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1"
@@ -177,8 +186,10 @@ def _find_protein_groups(work_dir: pathlib.Path) -> pathlib.Path | None:
 # ----------------------------------------------------------------------------- ASGI web endpoints
 
 @app.function(
+    image=web_image,
+    volumes={"/data": vol},   # required: /status and /results read run.log and proteinGroups.txt
     secrets=[secret],
-    scaledown_window=900,   # stay warm 15 min after last request (Modal default is 300 s)
+    scaledown_window=1800,  # stay warm 30 min after last request (Modal default is 300 s)
     # keep_warm=1,          # uncomment to always keep one container hot (eliminates cold starts, costs ~$0.06/h)
 )
 @modal.asgi_app(label="pridemap-mq")
