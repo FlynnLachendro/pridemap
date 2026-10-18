@@ -255,6 +255,7 @@ const MQ_STAGE_ORDER = [
 ];
 
 const fmtSecs = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+const fmtMins = (s: number) => { const m = Math.round(s / 60); return m <= 0 ? "<1 min" : `${m} min${m !== 1 ? "s" : ""}`; };
 
 /** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
 function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: string[]; hintA?: string; hintB?: string }) {
@@ -355,13 +356,17 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
 
   // Overall elapsed = sum of all stage durations we know about.
   const overallSecs = stages.reduce((acc, s) => acc + (stageElapsed(s) ?? 0), 0);
+  const totalStages = stages.length - 1; // last stage is upload/finalise
+  const overallEtaSecs = done > 0 && totalStages > done
+    ? Math.round(overallSecs * (totalStages - done) / done)
+    : null;
 
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2" data-tour="run-here">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm font-semibold">Run on this machine</span>
         {status?.running
-          ? <span className="pill">running · {done}/{stages.length - 1} stages · {fmtSecs(overallSecs)}</span>
+          ? <span className="pill">running · {done}/{totalStages} stages · elapsed {fmtMins(overallSecs)}{overallEtaSecs != null ? ` · ETA ${fmtMins(overallEtaSecs)}` : ""}</span>
           : status?.finished ? <span className="pill bg-ok-soft text-ok">finished · {fmtSecs(overallSecs)}</span>
           : status?.failed ? <span className="pill text-warn">stopped</span> : null}
         {status?.running && (
@@ -398,7 +403,20 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
               <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
                 <span aria-hidden className="inline-block w-4">{STATE_MARK[s.state]}</span>
                 {s.label}
-                {elapsed != null && <span className="text-faint"> · {fmtSecs(elapsed)}</span>}
+                {elapsed != null && <span className="text-faint"> · elapsed: {fmtMins(elapsed)}</span>}
+                {(() => {
+                  if (s.state !== "running" || !elapsed || s.steps.length === 0) return null;
+                  const perRun = mqLatestPerRun(s.steps);
+                  if (perRun.size === 0) return overallEtaSecs != null && overallEtaSecs > 0
+                    ? <span className="text-faint"> · ETA: {fmtMins(overallEtaSecs)}</span> : null;
+                  const total = MQ_STAGE_ORDER.length;
+                  const avgIdx = Array.from(perRun.values())
+                    .reduce((sum, name) => sum + Math.max(0, MQ_STAGE_ORDER.indexOf(name)), 0) / perRun.size;
+                  const eta = avgIdx > 0
+                    ? Math.round(elapsed * (total - avgIdx) / avgIdx)
+                    : overallEtaSecs;
+                  return eta != null && eta > 0 ? <span className="text-faint"> · ETA: {fmtMins(eta)}</span> : null;
+                })()}
                 {s.message && <span className="text-faint"> · {s.message}</span>}
                 {(s.state === "running" || s.state === "failed") && s.steps.length > 0 && (
                   <div className="pl-6 grid gap-0.5">
@@ -406,34 +424,40 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
                       ? s.steps.map((t, i) => <div key={i} className="text-faint">{t}</div>)
                       : (() => {
                           const perRun = mqLatestPerRun(s.steps);
-                          if (perRun.size > 1 && runLabels.length > 1) {
-                            return Array.from(perRun.entries())
-                              .sort(([a], [b]) => a - b)
-                              .map(([runIdx, stageName]) => {
-                                const label = runLabels[runIdx - 1] ?? `Run ${runIdx}`;
-                                const letter = runIdx === 1 ? "A" : "B";
-                                const idx = MQ_STAGE_ORDER.indexOf(stageName);
-                                const total = MQ_STAGE_ORDER.length;
-                                // ETA: if we know which step we're at and how long the stage has been running
-                                const etaSecs = elapsed && idx > 0
-                                  ? Math.round(elapsed * (total - idx) / idx)
-                                  : null;
-                                return (
-                                  <div key={runIdx} className="flex items-baseline gap-1.5 text-faint flex-wrap">
-                                    <span className="text-[10px] font-bold shrink-0 w-3">{letter}</span>
-                                    <span className="truncate max-w-[140px] shrink-0" title={label}>{label}</span>
-                                    <span className="text-[10px] shrink-0">·</span>
-                                    <span className="shrink-0">{stageName}</span>
-                                    {idx >= 0 && <span className="text-[10px] shrink-0">({idx + 1}/{total})</span>}
-                                    {etaSecs != null && etaSecs > 0 && <span className="text-[10px] shrink-0">~{fmtSecs(etaSecs)} left</span>}
+                          // Last global step (fallback when per-run steps not yet available)
+                          const lastGlobal = s.steps[s.steps.length - 1]
+                            ?.replace(/^MaxQuant:\s*/, "").replace(/_/g, " ").replace(/\s+\d+$/, "");
+                          if (runLabels.length > 1) {
+                            // Always show A/B rows when 2 runs are selected.
+                            // Use per-run step when available, fall back to the current global step.
+                            return runLabels.map((label, i) => {
+                              const runIdx = i + 1;
+                              const stageName = perRun.get(runIdx) ?? lastGlobal ?? "";
+                              const letter = i === 0 ? "A" : "B";
+                              const idx = MQ_STAGE_ORDER.indexOf(stageName);
+                              const total = MQ_STAGE_ORDER.length;
+                              const etaSecs = elapsed && idx > 0
+                                ? Math.round(elapsed * (total - idx) / idx)
+                                : overallEtaSecs;
+                              const pct = idx >= 0 ? Math.round(((idx + 1) / total) * 100) : 0;
+                              return (
+                                <div key={runIdx} className="flex items-center gap-1.5 text-faint flex-wrap">
+                                  <span className="text-[10px] font-bold shrink-0 w-3">{letter}</span>
+                                  <span className="truncate max-w-[140px] shrink-0" title={label}>{label}</span>
+                                  <span className="text-[10px] shrink-0">·</span>
+                                  <span className="shrink-0">{stageName}</span>
+                                  {idx >= 0 && <span className="text-[10px] shrink-0">({idx + 1}/{total})</span>}
+                                  <div className="h-1.5 w-20 rounded-full bg-muted shrink-0 overflow-hidden" title={`${pct}%`}>
+                                    <div className="h-full rounded-full bg-teal transition-all duration-500" style={{ width: `${pct}%` }} />
                                   </div>
-                                );
-                              });
+                                  {elapsed != null && <span className="text-[10px] shrink-0">· elapsed: {fmtMins(elapsed)}</span>}
+                                  {etaSecs != null && etaSecs > 0 && <span className="text-[10px] shrink-0">· ETA: {fmtMins(etaSecs)}</span>}
+                                </div>
+                              );
+                            });
                           }
-                          // Single run or global step: show last step, strip underscores
-                          const last = s.steps[s.steps.length - 1];
-                          const clean = last?.replace(/^MaxQuant:\s*/, "").replace(/_/g, " ").replace(/\s+\d+$/, "");
-                          return <div className="text-faint">{clean}</div>;
+                          // Single run or global step: show last step
+                          return <div className="text-faint">{lastGlobal}</div>;
                         })()
                     }
                   </div>
@@ -445,7 +469,10 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
       )}
       {status?.log && status.log.length > 0 && !status?.failed && (
         status?.running
-          ? <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">{status.log.slice(-10).join("\n")}</pre>
+          // Hide the raw log while stage steps are visible — they already show what's happening.
+          ? !stages.some((s) => s.state === "running" && s.steps.length > 0) && (
+              <pre className="text-xs bg-muted/40 rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap">{status.log.slice(-10).join("\n")}</pre>
+            )
           : (
             <details className="text-xs">
               <summary className="cursor-pointer text-faint hover:text-foreground">output ({status.log.length} lines)</summary>
