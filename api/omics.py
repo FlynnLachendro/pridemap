@@ -2635,14 +2635,78 @@ def pipeline_remote_active(accession: str, runs: str = ""):
         return {"job_id": job_id, "status": "running", "log": "", "stage_progress": False, "stages": []}
 
 
+#: Files a kit must contain for run_all.sh to get as far as the search. Their absence was previously
+#: discovered inside the container, minutes and dollars after the upload.
+_REQUIRED_KIT_FILES = ("run_all.sh", "preflight.sh", "download_raw.sh", "mqpar.xml")
+
+
+def remote_submission_problems(accession: str, runs: str, kit_bytes: bytes) -> list[str]:
+    """Everything that will stop this submission succeeding, checked before a byte is uploaded.
+
+    ALL of them, not the first. A validator that stops at the first problem makes the user pay for
+    one round trip per defect, and each round trip here is a Modal cold start.
+
+    This is not a second preflight. preflight.sh asks "is this container's environment adequate?"
+    from inside the container, once the work has already been scheduled; this asks "is it worth
+    spending anything on this submission at all?" and runs before the upload. Different questions,
+    different moments. It composes the existing owners rather than re-deriving their answers.
+    """
+    problems: list[str] = []
+
+    # Engine suitability. The local route refuses this inside run_all.sh; the remote route had no
+    # such gate, so a DIA or SCIEX dataset could be handed to a MaxQuant runner that cannot search it.
+    try:
+        plan = dataset_search_plan(accession, parse_runs(runs))
+        if not plan.get("maxquant_offered"):
+            problems.append(
+                plan.get("maxquant_reason")
+                or "this dataset has no MaxQuant-runnable track; the cloud runner only runs MaxQuant"
+            )
+    except HTTPException:
+        raise  # a missing accession or a bad run selection is a 404/400, not a list of problems
+    except Exception as exc:  # pragma: no cover - defensive
+        problems.append(f"could not build a search plan for {accession}: {exc}")
+
+    # Credentials. An empty token is sent as no header at all, and the far side reads that as
+    # anonymous — so a misconfiguration surfaced as a 401 from /run rather than as a missing setting.
+    if not os.environ.get("MQ_TOKEN", ""):
+        problems.append("MQ_TOKEN is not set — the remote server will reject this upload as anonymous")
+
+    # Kit completeness.
+    try:
+        with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
+            names = {pathlib.Path(n).name for n in zf.namelist()}
+        missing = [f for f in _REQUIRED_KIT_FILES if f not in names]
+        if missing:
+            problems.append(f"the generated kit is missing {', '.join(missing)}")
+    except zipfile.BadZipFile:
+        problems.append("the generated kit is not a readable zip")
+
+    return problems
+
+
 @router.post("/dataset/{accession}/pipeline/remote")
 def pipeline_remote_start(accession: str, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
-    _mq_await_ready(base_url)  # waits up to 120 s for Modal cold-start before uploading
     # api_base is intentionally empty: Modal downloads raw files directly from PRIDE,
     # not from the local API server which it cannot reach.
     kit_bytes, _ = search_kit(accession, "", "", runs=parse_runs(runs))
+
+    # Before the cold start, not after: _mq_await_ready blocks up to 120 s waking a container, and
+    # there is no reason to wake one for a submission that cannot succeed.
+    problems = remote_submission_problems(accession, runs, kit_bytes)
+    if problems:
+        logger.warning("pipeline_remote_start  refused accession=%s: %s", accession, problems)
+        raise HTTPException(
+            400,
+            {
+                "error": "this run cannot be submitted",
+                "problems": problems,
+            },
+        )
+
+    _mq_await_ready(base_url)  # waits up to 120 s for Modal cold-start before uploading
     kit_kb = len(kit_bytes) / 1024
     logger.info("pipeline_remote_start  accession=%s  kit=%.1f KB  url=%s/run", accession, kit_kb, base_url)
     boundary = "PrideMapBoundary"
