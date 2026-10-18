@@ -74,6 +74,21 @@ type RunStatus = {
 };
 const STATE_MARK: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
 
+/** Parse MaxQuant proc-file step names and group by sample.
+ *  Proc files: "Feature_detection 12.finished.txt" → suffix first digit = 1-based run index.
+ *  Returns map of runIndex → latest stage label (underscores → spaces, suffix stripped). */
+function mqLatestPerRun(steps: string[]): Map<number, string> {
+  const latest = new Map<number, string>();
+  for (const step of steps) {
+    const m = step.match(/^(.*?)\s+(\d+)$/);
+    if (!m) continue;
+    const label = m[1].replace(/_/g, " ");
+    const runIdx = parseInt(m[2][0], 10);
+    latest.set(runIdx, label);
+  }
+  return latest;
+}
+
 /** Lets the user pick up to 2 runs for A vs B comparison. Raw file names show immediately;
  *  clicking "Load sample annotations" fetches SDRF / Samplelist.xlsx and maps metadata columns. */
 function SamplePicker({ accession, rawNames, onSelect }: { accession: string; rawNames: string[]; onSelect: (runs: string[], labelA: string, labelB: string) => void }) {
@@ -226,6 +241,21 @@ function SamplePicker({ accession, rawNames, onSelect }: { accession: string; ra
   );
 }
 
+// MaxQuant internal stage order (proc file names, spaces not underscores).
+// Used to estimate progress and ETA per sample.
+const MQ_STAGE_ORDER = [
+  "Configuring", "Assemble run info", "Finish run info",
+  "Testing fasta files", "Testing raw files",
+  "Feature detection", "Deisotoping", "Calculating peak properties",
+  "MS/MS preparation", "Combining apl files for first search",
+  "Preparing searches", "MS/MS first search", "Mass recalibration",
+  "MS/MS search", "Applying FDR", "Matching between runs",
+  "Assembling proteins", "Protein FDR", "Label-free quantification",
+  "Writing tables",
+];
+
+const fmtSecs = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+
 /** Runs the pipeline here, through the local API, and shows it happening. No terminal. */
 function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: string[]; hintA?: string; hintB?: string }) {
   const router = useRouter();
@@ -234,6 +264,9 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const seen = useRef<string | null>(null);
+  const runStartRef = useRef<number | null>(null);
+  const stageStartRef = useRef<Map<string, number>>(new Map());
+  const [now, setNow] = useState(() => Date.now());
 
   const runsQS = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
 
@@ -253,6 +286,29 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
     const id = window.setInterval(tick, running ? 2000 : 15000);
     return () => { live = false; window.clearTimeout(first); window.clearInterval(id); };
   }, [poll, running]);
+
+  // Live clock while running — drives elapsed time display.
+  useEffect(() => {
+    if (!running) return;
+    if (!runStartRef.current) runStartRef.current = Date.now();
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+
+  // Track when each stage transitions to "running".
+  const stages = status?.stages ?? [];
+  useEffect(() => {
+    for (const s of stages) {
+      if (s.state === "running" && !stageStartRef.current.has(s.id))
+        stageStartRef.current.set(s.id, Date.now());
+    }
+  }, [stages]);
+
+  // Reset timing refs when a fresh run starts.
+  useEffect(() => {
+    if (!status?.exists) { runStartRef.current = null; stageStartRef.current.clear(); }
+  }, [status?.exists]);
+
   // When the run hands a table back, open it: the point of the whole exercise is the table, not the run.
   useEffect(() => {
     const last = status?.uploads?.[status.uploads.length - 1];
@@ -284,16 +340,29 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
     } catch (e) { setErr(String(e)); } finally { setStopping(false); }
   };
 
-  const stages = status?.stages ?? [];
-  const active = stages.find((s) => s.state === "running");
   const done = stages.filter((s) => s.state === "done").length;
+
+  // Elapsed seconds for a stage: use the server's recorded value for done stages,
+  // and a live wall-clock delta for the currently running one.
+  const stageElapsed = (s: RunStage): number | null => {
+    if (s.seconds != null) return s.seconds;
+    if (s.state === "running") {
+      const start = stageStartRef.current.get(s.id);
+      if (start) return Math.floor((now - start) / 1000);
+    }
+    return null;
+  };
+
+  // Overall elapsed = sum of all stage durations we know about.
+  const overallSecs = stages.reduce((acc, s) => acc + (stageElapsed(s) ?? 0), 0);
+
   return (
     <div className="rounded-md border bg-card p-3 grid gap-2" data-tour="run-here">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm font-semibold">Run on this machine</span>
         {status?.running
-          ? <span className="pill">running · {done}/{stages.length - 1} stages</span>
-          : status?.finished ? <span className="pill bg-ok-soft text-ok">finished</span>
+          ? <span className="pill">running · {done}/{stages.length - 1} stages · {fmtSecs(overallSecs)}</span>
+          : status?.finished ? <span className="pill bg-ok-soft text-ok">finished · {fmtSecs(overallSecs)}</span>
           : status?.failed ? <span className="pill text-warn">stopped</span> : null}
         {status?.running && (
           <button type="button" className="btn btn-sm btn-warn ml-auto" disabled={stopping} onClick={stop}>
@@ -322,21 +391,56 @@ function RunHere({ accession, runs, hintA, hintB }: { accession: string; runs?: 
       })()}
       {stages.length > 0 && (status?.running || status?.finished) && (
         <ol className="grid gap-0.5 text-xs">
-          {stages.map((s) => (
-            <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
-              <span aria-hidden className="inline-block w-4">{STATE_MARK[s.state]}</span>
-              {s.label}
-              {s.seconds != null && <span className="text-faint"> · {Math.floor(s.seconds / 60)}m {s.seconds % 60}s</span>}
-              {s.message && <span className="text-faint"> · {s.message}</span>}
-              {(s.state === "running" || s.state === "failed") && s.steps.length > 0 && (
-                <div className="pl-6 text-faint">
-                  {s.state === "failed"
-                    ? s.steps.map((t, i) => <div key={i}>{t}</div>)
-                    : s.steps[s.steps.length - 1]}
-                </div>
-              )}
-            </li>
-          ))}
+          {stages.map((s) => {
+            const runLabels = [hintA || runs?.[0], hintB || runs?.[1]].filter(Boolean) as string[];
+            const elapsed = stageElapsed(s);
+            return (
+              <li key={s.id} className={s.state === "failed" ? "text-warn" : s.state === "pending" ? "text-faint" : ""}>
+                <span aria-hidden className="inline-block w-4">{STATE_MARK[s.state]}</span>
+                {s.label}
+                {elapsed != null && <span className="text-faint"> · {fmtSecs(elapsed)}</span>}
+                {s.message && <span className="text-faint"> · {s.message}</span>}
+                {(s.state === "running" || s.state === "failed") && s.steps.length > 0 && (
+                  <div className="pl-6 grid gap-0.5">
+                    {s.state === "failed"
+                      ? s.steps.map((t, i) => <div key={i} className="text-faint">{t}</div>)
+                      : (() => {
+                          const perRun = mqLatestPerRun(s.steps);
+                          if (perRun.size > 1 && runLabels.length > 1) {
+                            return Array.from(perRun.entries())
+                              .sort(([a], [b]) => a - b)
+                              .map(([runIdx, stageName]) => {
+                                const label = runLabels[runIdx - 1] ?? `Run ${runIdx}`;
+                                const letter = runIdx === 1 ? "A" : "B";
+                                const idx = MQ_STAGE_ORDER.indexOf(stageName);
+                                const total = MQ_STAGE_ORDER.length;
+                                // ETA: if we know which step we're at and how long the stage has been running
+                                const etaSecs = elapsed && idx > 0
+                                  ? Math.round(elapsed * (total - idx) / idx)
+                                  : null;
+                                return (
+                                  <div key={runIdx} className="flex items-baseline gap-1.5 text-faint flex-wrap">
+                                    <span className="text-[10px] font-bold shrink-0 w-3">{letter}</span>
+                                    <span className="truncate max-w-[140px] shrink-0" title={label}>{label}</span>
+                                    <span className="text-[10px] shrink-0">·</span>
+                                    <span className="shrink-0">{stageName}</span>
+                                    {idx >= 0 && <span className="text-[10px] shrink-0">({idx + 1}/{total})</span>}
+                                    {etaSecs != null && etaSecs > 0 && <span className="text-[10px] shrink-0">~{fmtSecs(etaSecs)} left</span>}
+                                  </div>
+                                );
+                              });
+                          }
+                          // Single run or global step: show last step, strip underscores
+                          const last = s.steps[s.steps.length - 1];
+                          const clean = last?.replace(/^MaxQuant:\s*/, "").replace(/_/g, " ").replace(/\s+\d+$/, "");
+                          return <div className="text-faint">{clean}</div>;
+                        })()
+                    }
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ol>
       )}
       {status?.log && status.log.length > 0 && !status?.failed && (

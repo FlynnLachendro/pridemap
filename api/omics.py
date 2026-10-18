@@ -1407,6 +1407,32 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
     if "maxquant" in engines:
         out += _mq_docker_lib(plan)
         out += [
+            # On non-amd64 hosts (arm64 macOS Apple Silicon, Linux Graviton/RPi, etc.) Docker must be able to
+            # run linux/amd64 containers for the MaxQuant build step. Docker Desktop on macOS provides this via
+            # Rosetta automatically; other runtimes (Colima, Rancher, OrbStack, bare Linux Docker) need QEMU
+            # binfmt registered. We probe first and auto-install on Linux; on macOS we point to the setting.
+            '# ---- QEMU amd64 emulation (needed on non-x86 hosts to build/run the MaxQuant container)',
+            'if [ "${HAVE_DOCKER:-0}" = "1" ] && [ "$MQ_NEED_NATIVE" = "1" ]; then',
+            '  if docker run --rm --platform linux/amd64 --entrypoint uname busybox -m >/dev/null 2>&1; then',
+            '    ok "QEMU amd64 emulation available (Docker can run --platform linux/amd64)"',
+            "  else",
+            '    _os="$(uname -s)"',
+            '    if [ "$_os" = "Linux" ]; then',
+            '      warn "QEMU amd64 emulation missing — installing via tonistiigi/binfmt (needs --privileged)…"',
+            '      if docker run --privileged --rm tonistiigi/binfmt --install amd64 >/dev/null 2>&1 \\',
+            '           && docker run --rm --platform linux/amd64 --entrypoint uname busybox -m >/dev/null 2>&1; then',
+            '        ok "QEMU amd64 emulation installed"',
+            "      else",
+            '        bad "QEMU amd64 emulation still unavailable. Run manually: docker run --privileged --rm tonistiigi/binfmt --install all"',
+            "      fi",
+            '    elif [ "$_os" = "Darwin" ]; then',
+            '      bad "Docker cannot run linux/amd64 on this $MQ_ARCH Mac. Enable Rosetta emulation: Docker Desktop → Settings → General → \'Use Rosetta for x86/amd64 emulation\' → Apply & Restart"',
+            "    else",
+            '      bad "Docker cannot run linux/amd64 containers on this $MQ_ARCH host. Install QEMU binfmt support."',
+            "    fi",
+            "  fi",
+            "fi",
+            "",
             "# ---- MaxQuant. Docker container is preferred (consistent, pre-configured); native install is the",
             "# fallback. Checked in that order so Docker users never need to install MaxQuant locally.",
             "MQ_RUNNER=none",
