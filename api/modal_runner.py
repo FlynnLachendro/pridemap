@@ -7,7 +7,9 @@ Verify:  curl $MQ_SERVER_URL/health
 Contract (consumed by api/omics.py lines 2276-2487):
   GET  /health                → {"ok": true}
   POST /run                   → {"job_id": "..."}   multipart field: kit (zip)
-  GET  /status/{job_id}       → {"status": "running"|"done"|"error", "log": "..."}
+  GET  /status/{job_id}       → {"status": "running"|"done"|"error", "log": "...", "progress": [...]}
+                                 progress carries run_all.sh's own stage events, which is what lets
+                                 the caller show stages, elapsed time and ETA for a remote job.
   GET  /results/{job_id}      → proteinGroups.txt (TSV)
   DELETE /job/{job_id}        → {"deleted": bool, "cancelled": bool, "problems": [...]}
   GET  /jobs/{accession}      → {"job_id": "..."|null}   (Phase 2: durable lookup)

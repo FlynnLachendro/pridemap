@@ -46,8 +46,9 @@ PRIDE Map UI                          pridemap-maxquant app
 3. Modal spawns a container, which downloads the raw files **directly from PRIDE
   FTP at datacentre speed** and runs `run_all.sh`. The files never cross your
    uplink.
-4. The container writes progress to a Volume; PRIDE Map polls `/status/{job_id}`
-  every 3 seconds and shows live output.
+4. The container writes its log and `run_all.sh`'s stage events to a Volume; PRIDE Map polls
+  `/status/{job_id}` every 3 seconds and shows the same stage list, elapsed time and ETA a local
+  run shows — the two cards render through one component, from one reduction of the same events.
 5. On completion the protein table is fetched and loaded into the Analyse tab.
 
 Because step 3 happens entirely inside Modal, **your machine can be closed or
@@ -426,7 +427,7 @@ ASGI app decorated `@modal.asgi_app(label="pridemap-mq")`, with
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /health`           | `{"ok": true}` — satisfies the client's health gate                                                                                                                                           |
 | `POST /run`             | multipart field `kit`; **reject bad bearer token before any work**; `run_maxquant.spawn(...)`; write `jobs[accession] = call.object_id` **before** responding; return `{"job_id": ...}`       |
-| `GET /status/{job_id}`  | see below. Returns `{status, log}`                                                                                                                                                            |
+| `GET /status/{job_id}`  | see below. Returns `{status, log, progress}` — `progress` is `run_all.sh`'s own stage events, copied off the container's work dir onto the Volume, and is what the UI's stages, elapsed time and ETA are computed from |
 | `GET /results/{job_id}` | `vol.reload()`, stream `combined/txt/proteinGroups.txt`                                                                                                                                       |
 | `DELETE /job/{job_id}`  | cancel if live, drop the `jobs` entry, remove the Volume dir. Reports `{deleted, cancelled, problems}` — a swallowed cancel error here tells the caller a 16-core job stopped when it did not |
 | `GET /jobs`             | all known accession→job_id with live status, so a runaway job can be found and killed over HTTP without Modal credentials                                                                     |
