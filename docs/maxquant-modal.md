@@ -75,14 +75,28 @@ Verify both figures against [modal.com/pricing](https://modal.com/pricing); they
 change. The point to internalise: **one runaway job eats about half the monthly
 free credit, and two exhaust it.**
 
-**Spotting and killing a runaway job:**
+**Spotting and killing a runaway job.** All of this works from any machine
+holding `MQ_SERVER_URL` and `MQ_TOKEN` — no Modal credentials, no dashboard:
 
-- Dashboard → Apps → `pridemap-maxquant` → Functions → cancel the invocation.
-- Headless, if you have the job id:
+```bash
+# What is running?
+curl -H "Authorization: Bearer $MQ_TOKEN" "$MQ_SERVER_URL/jobs"
+# → {"jobs": [{"accession": "PXD055942", "job_id": "fc-…", "status": "running"}]}
 
-  ```bash
-  python3 -c "import modal; modal.FunctionCall.from_id('<job_id>').cancel()"
-  ```
+# Kill one.
+curl -X DELETE -H "Authorization: Bearer $MQ_TOKEN" "$MQ_SERVER_URL/job/fc-…"
+# → {"deleted": true, "cancelled": true, "problems": []}
+```
+
+**Read the response.** `cancelled: false`, or a non-empty `problems`, means the
+compute may still be billing — fall back to the dashboard and confirm. A
+`deleted: true` with an empty `problems` is the only answer that means stopped.
+
+The credential-bearing routes remain available on a machine that has them:
+Dashboard → Apps → `pridemap-maxquant` → Functions → cancel the invocation, or
+`python3 -c "import modal; modal.FunctionCall.from_id('<job_id>').cancel()"`.
+Prefer the HTTP route — needing `~/.modal.toml` to stop a job undoes the
+property that lets any machine drive a run.
 
 ## Step-by-step setup
 
@@ -365,7 +379,8 @@ ASGI app decorated `@modal.asgi_app(label="pridemap-mq")`, with
 | `POST /run` | multipart field `kit`; **reject bad bearer token before any work**; `run_maxquant.spawn(...)`; write `jobs[accession] = call.object_id` **before** responding; return `{"job_id": ...}` |
 | `GET /status/{job_id}` | see below. Returns `{status, log}` |
 | `GET /results/{job_id}` | `vol.reload()`, stream `combined/txt/proteinGroups.txt` |
-| `DELETE /job/{job_id}` | cancel if live, drop the `jobs` entry, remove the Volume dir |
+| `DELETE /job/{job_id}` | cancel if live, drop the `jobs` entry, remove the Volume dir. Reports `{deleted, cancelled, problems}` — a swallowed cancel error here tells the caller a 16-core job stopped when it did not |
+| `GET /jobs` | all known accession→job_id with live status, so a runaway job can be found and killed over HTTP without Modal credentials |
 | `GET /jobs/{accession}` | *(Phase 2)* read `jobs`, return the job_id |
 
 **Status polling must order its excepts correctly.**

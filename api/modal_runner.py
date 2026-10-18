@@ -9,8 +9,9 @@ Contract (consumed by api/omics.py lines 2276-2487):
   POST /run                   → {"job_id": "..."}   multipart field: kit (zip)
   GET  /status/{job_id}       → {"status": "running"|"done"|"error", "log": "..."}
   GET  /results/{job_id}      → proteinGroups.txt (TSV)
-  DELETE /job/{job_id}        → {"deleted": true}
+  DELETE /job/{job_id}        → {"deleted": bool, "cancelled": bool, "problems": [...]}
   GET  /jobs/{accession}      → {"job_id": "..."|null}   (Phase 2: durable lookup)
+  GET  /jobs                  → {"jobs": [{"accession", "job_id", "status"}, ...]}
 """
 
 # /// script
@@ -31,6 +32,7 @@ import time
 import zipfile
 
 import modal
+import modal.exception
 from modal import Secret, Volume
 
 # ----------------------------------------------------------------------------- module-level objects (all four required)
@@ -212,21 +214,7 @@ def web() -> object:
     @api.get("/status/{job_id}")
     def status(job_id: str, authorization: str = Header(default="")) -> dict:
         _check_token(authorization)
-        import modal.exception
-
-        call = modal.FunctionCall.from_id(job_id)
-        try:
-            call.get(timeout=0)
-            # If we reach here the function returned — it's done.
-            final_status = "done"
-        except modal.exception.TimeoutError:
-            # Still running — must catch this BEFORE the generic Exception.
-            final_status = "running"
-        except Exception:
-            final_status = "error"
-
-        log_text = _read_log(job_id)
-        return {"status": final_status, "log": log_text}
+        return {"status": _call_status(job_id), "log": _read_log(job_id)}
 
     @api.get("/results/{job_id}")
     def results(job_id: str, authorization: str = Header(default="")) -> StreamingResponse:
@@ -244,28 +232,52 @@ def web() -> object:
     @api.delete("/job/{job_id}")
     def delete_job(job_id: str, authorization: str = Header(default="")) -> dict:
         _check_token(authorization)
-        import modal.exception
+        # This is the budget stop-button, so every step reports what it actually
+        # did. Swallowing a failed cancel here means a 16-core job keeps billing
+        # while the caller is told it stopped.
+        problems: list[str] = []
+
         try:
             modal.FunctionCall.from_id(job_id).cancel()
-        except Exception:
-            pass
-        # Remove the Volume directory.
+            cancelled = True
+        except Exception as exc:
+            cancelled = False
+            problems.append(f"cancel failed: {exc}")
+
         job_dir = pathlib.Path(f"/data/{job_id}")
         if job_dir.exists():
             import shutil
             shutil.rmtree(job_dir, ignore_errors=True)
+            if job_dir.exists():
+                problems.append("volume directory could not be removed")
             try:
                 vol.commit()
-            except Exception:
-                pass
-        # Clean up the jobs dict entry for this job_id.
+            except Exception as exc:
+                problems.append(f"volume commit failed: {exc}")
+
         try:
             for acc, jid in list(jobs.items()):
                 if jid == job_id:
                     del jobs[acc]
-        except Exception:
-            pass
-        return {"deleted": True}
+        except Exception as exc:
+            problems.append(f"jobs dict cleanup failed: {exc}")
+
+        return {"deleted": not problems, "cancelled": cancelled, "problems": problems}
+
+    @api.get("/jobs")
+    def list_jobs(authorization: str = Header(default="")) -> dict:
+        """Every job the Dict knows about, with live status — find orphans without the dashboard."""
+        _check_token(authorization)
+        try:
+            entries = list(jobs.items())
+        except Exception as exc:
+            raise HTTPException(503, f"jobs dict unreadable: {exc}")
+        return {
+            "jobs": [
+                {"accession": acc, "job_id": jid, "status": _call_status(jid)}
+                for acc, jid in entries
+            ]
+        }
 
     @api.get("/jobs/{accession}")
     def jobs_for_accession(accession: str, authorization: str = Header(default="")) -> dict:
@@ -277,6 +289,19 @@ def web() -> object:
         return {"job_id": job_id}
 
     return api
+
+
+def _call_status(job_id: str) -> str:
+    """"running" | "done" | "error" for a spawned call. Shared by /status and /jobs."""
+    try:
+        modal.FunctionCall.from_id(job_id).get(timeout=0)
+        return "done"
+    except modal.exception.TimeoutError:
+        # Still running — must be caught BEFORE the generic Exception, or every
+        # healthy job reports as failed.
+        return "running"
+    except Exception:
+        return "error"
 
 
 def _read_log(job_id: str) -> str:
