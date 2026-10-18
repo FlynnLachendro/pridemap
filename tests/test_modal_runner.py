@@ -28,7 +28,12 @@ import modal.exception
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from api import modal_runner  # noqa: E402
-from api.modal_runner import _call_status, _job_dir, _job_id_for_this_run  # noqa: E402
+from api.modal_runner import (  # noqa: E402
+    _call_status,
+    _job_dir,
+    _job_id_for_this_run,
+    _read_stage_events,
+)
 
 JOB_ID = "fc-01M57AXN6YWY8BYNX32YPYP4TH"
 
@@ -246,6 +251,54 @@ def test_job_dir_returns_none_for_an_unknown_job(tmp_path):
 
     ### Then
     assert resolved is None
+
+
+def test_stage_events_survive_a_half_written_final_line(tmp_path):
+    """Scenario: the stage file is read while run_all.sh is still appending to it.
+
+    Slice: remote stage progress.
+    Given a shipped stages.jsonl whose last line was copied mid-write,
+    When the gateway reads this job's stage events,
+    Then every complete event is returned and the torn line is dropped, because one truncated line
+      must not cost the caller its elapsed time and ETA for the rest of the run.
+    """
+    ### Given
+    job_dir = tmp_path / JOB_ID
+    job_dir.mkdir()
+    (job_dir / "stages.jsonl").write_text(
+        '{"event":"stage_started","stage":"download","message":"Download raw files"}\n'
+        '{"event":"stage_finished","stage":"download","message":"completed","seconds":412}\n'
+        '{"event":"stage_started","stage":"fas'
+    )
+
+    ### When
+    with mock.patch.object(modal_runner, "DATA_ROOT", tmp_path), \
+         mock.patch.object(modal_runner, "jobs", {}):
+        events = _read_stage_events(JOB_ID)
+
+    ### Then
+    assert [e["event"] for e in events] == ["stage_started", "stage_finished"]
+    assert events[1]["seconds"] == 412, "the duration a finished stage reports is what elapsed shows"
+
+
+def test_stage_events_are_empty_before_the_first_stage_ships(tmp_path):
+    """Scenario: the job directory exists but run_all.sh has not emitted a stage yet.
+
+    Slice: remote stage progress.
+    Given a job directory with no stages.jsonl in it,
+    When the gateway reads this job's stage events,
+    Then it returns an empty list rather than raising, so a just-submitted job still polls cleanly.
+    """
+    ### Given
+    (tmp_path / JOB_ID).mkdir()
+
+    ### When
+    with mock.patch.object(modal_runner, "DATA_ROOT", tmp_path), \
+         mock.patch.object(modal_runner, "jobs", {}):
+        events = _read_stage_events(JOB_ID)
+
+    ### Then
+    assert events == []
 
 
 if __name__ == "__main__":

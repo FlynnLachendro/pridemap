@@ -75,6 +75,9 @@ class FakeBackend:
     def job_log(self, job_id: str) -> str:
         return "log line"
 
+    def job_progress(self, job_id: str) -> list[dict]:
+        return [{"event": "stage_started", "stage": "download", "message": "Download raw files"}]
+
     def results_path(self, job_id: str) -> pathlib.Path | None:
         return None
 
@@ -122,6 +125,31 @@ def test_run_accepts_a_multipart_kit():
     assert r.json()["job_id"] == "fc-123"
     assert backend.spawned == [(len(kit), "PXD046787")], "the handler must forward the kit bytes once"
     assert backend.recorded == [("PXD046787", "fc-123")], "the job id must be recorded before responding"
+
+
+def test_status_relays_the_runs_own_stage_events():
+    """Scenario: /status carries run_all.sh's stage events, not just a coarse status word.
+
+    Slice: modal gateway — GET /status.
+
+    Given a gateway whose backend can read the shipped stage file, when a job's status is polled,
+    then the reply carries `progress` alongside status and log. Without that key the client can only
+    ever draw "running": elapsed time and ETA for a remote job are computed from these events.
+    """
+    ### Given
+    client, _ = _client()
+
+    ### When
+    r = client.get("/status/fc-123", headers={"Authorization": f"Bearer {TOKEN}"})
+
+    ### Then
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "running"
+    assert body["log"] == "log line"
+    assert body["progress"] == [
+        {"event": "stage_started", "stage": "download", "message": "Download raw files"}
+    ], "the gateway must relay stage events verbatim — the caller reduces them, not the gateway"
 
 
 def test_missing_kit_field_is_a_client_error_not_a_server_error():

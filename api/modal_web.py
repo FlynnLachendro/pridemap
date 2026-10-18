@@ -53,6 +53,7 @@ class Backend(Protocol):
     def record_job(self, accession: str, job_id: str) -> None: ...
     def job_status(self, job_id: str) -> str: ...
     def job_log(self, job_id: str) -> str: ...
+    def job_progress(self, job_id: str) -> list[dict]: ...
     def results_path(self, job_id: str) -> pathlib.Path | None: ...
     def delete_job(self, job_id: str) -> dict: ...
     def list_jobs(self) -> list[tuple[str, str]]: ...
@@ -96,7 +97,14 @@ def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = 
     @api.get("/status/{job_id}")
     def status(job_id: str, authorization: str = Header(default="")) -> dict:
         _check_token(authorization)
-        return {"status": backend.job_status(job_id), "log": backend.job_log(job_id)}
+        # `progress` carries run_all.sh's own stage events, which is what lets the caller show
+        # stages, elapsed time and ETA for a remote job. A backend that cannot read them yields [],
+        # and the caller distinguishes that from "no stage has started" — see pipeline_remote_status.
+        return {
+            "status": backend.job_status(job_id),
+            "log": backend.job_log(job_id),
+            "progress": backend.job_progress(job_id),
+        }
 
     @api.get("/results/{job_id}")
     def results(job_id: str, authorization: str = Header(default="")) -> StreamingResponse:

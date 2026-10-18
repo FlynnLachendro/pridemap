@@ -2204,20 +2204,18 @@ def pipeline_start(accession: str, request: Request, web: str = "", runs: str = 
     return {"accession": accession, "started": True, "pid": proc.pid, "dir": str(d), "runs": sel}
 
 
-@router.get("/dataset/{accession}/pipeline/status")
-def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str = ""):
-    """Where the run has got to: one entry per stage, plus the last lines of output.
-
-    `runs` must match the selection the run was started with, since each selection has its own directory."""
-    local = _is_local(request)
-    sel = parse_runs(runs)
-    d = run_dir(accession, sel)
-    plan = dataset_search_plan(accession, sel)
-    all_events = _read_progress(d)
-    # Only consider events from the last run_started so stale failures from a prior run
-    # don't bleed into the current run's status.
+def current_run_events(all_events: list[dict]) -> list[dict]:
+    """Only the events from the latest run_started, so a prior run's failure cannot bleed through."""
     last_run_idx = max((i for i, e in enumerate(all_events) if e.get("event") == "run_started"), default=-1)
-    events = all_events[last_run_idx:] if last_run_idx >= 0 else all_events
+    return all_events[last_run_idx:] if last_run_idx >= 0 else all_events
+
+
+def progress_by_stage(events: list[dict]) -> dict[str, dict]:
+    """Reduce progress.jsonl events to one state/duration/step-list per stage id.
+
+    Single owner of that reduction: run_all.sh emits the same events wherever it runs, so a local run
+    and a Modal run are read by this one function rather than by two that can drift apart.
+    """
     by_stage: dict[str, dict] = {}
     for e in events:
         sid = e.get("stage") or ""
@@ -2238,6 +2236,30 @@ def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str 
             s["message"] = e.get("message")
         elif ev in ("substage", "maxquant_step", "uploaded", "warning"):
             s["steps"].append(e.get("message"))
+    return by_stage
+
+
+def stage_view(plan: dict, by_stage: dict[str, dict]) -> list[dict]:
+    """The plan's stages annotated with how far the run has got — what the UI draws."""
+    return [
+        {**s, "state": st.get("state", "pending"), "seconds": st.get("seconds"),
+         "steps": (st.get("steps") or [])[-6:], "message": st.get("message")}
+        for s in (plan.get("stages") or [])
+        for st in (by_stage.get(s["id"], {}),)
+    ]
+
+
+@router.get("/dataset/{accession}/pipeline/status")
+def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str = ""):
+    """Where the run has got to: one entry per stage, plus the last lines of output.
+
+    `runs` must match the selection the run was started with, since each selection has its own directory."""
+    local = _is_local(request)
+    sel = parse_runs(runs)
+    d = run_dir(accession, sel)
+    plan = dataset_search_plan(accession, sel)
+    events = current_run_events(_read_progress(d))
+    by_stage = progress_by_stage(events)
     pid_file = d / ".pipeline" / "run.pid"
     running = False
     if pid_file.exists():
@@ -2245,11 +2267,7 @@ def pipeline_status(accession: str, request: Request, tail: int = 40, runs: str 
             running = _pid_alive(int(pid_file.read_text().strip()))
         except ValueError:
             running = False
-    stages = []
-    for s in plan.get("stages") or []:
-        st = by_stage.get(s["id"], {})
-        stages.append({**s, "state": st.get("state", "pending"), "seconds": st.get("seconds"),
-                       "steps": (st.get("steps") or [])[-6:], "message": st.get("message")})
+    stages = stage_view(plan, by_stage)
     log_lines: list[str] = []
     lg = d / "run.log"
     if lg.exists():
@@ -2506,7 +2524,7 @@ def local_mq_info():
 
 
 @router.get("/dataset/{accession}/pipeline/remote/active")
-def pipeline_remote_active(accession: str):
+def pipeline_remote_active(accession: str, runs: str = ""):
     """Return the active job for this accession (if any) so the UI can resume after a page reload.
 
     Phase 2: if the in-process cache misses (e.g. after an API restart), fall back to the Modal
@@ -2538,9 +2556,9 @@ def pipeline_remote_active(accession: str):
             data = json.loads(resp.read())
         if data.get("status") in ("done", "error"):
             _active_remote_jobs.pop(accession, None)
-        return {"job_id": job_id, **data}
+        return {"job_id": job_id, **_remote_stage_payload(accession, runs, data)}
     except Exception:
-        return {"job_id": job_id, "status": "running", "log": ""}
+        return {"job_id": job_id, "status": "running", "log": "", "stage_progress": False, "stages": []}
 
 
 @router.post("/dataset/{accession}/pipeline/remote")
@@ -2582,9 +2600,29 @@ def pipeline_remote_start(accession: str, runs: str = ""):
         raise HTTPException(502, f"remote MQ server unreachable: {e}")
 
 
+def _remote_stage_payload(accession: str, runs: str, data: dict) -> dict:
+    """Add per-stage progress to a remote /status reply, when the remote server reported any.
+
+    Modal runs the same run_all.sh as a local run, so its progress.jsonl carries the same events and
+    is reduced by the same `progress_by_stage`. A server deployed before stage shipping existed sends
+    no `progress` key; that is reported as stage_progress=False rather than as an all-pending run,
+    because "we cannot see the stages" and "no stage has started" are different claims.
+    """
+    events = data.get("progress")
+    if not isinstance(events, list):
+        return {**data, "stage_progress": False, "stages": []}
+    plan = dataset_search_plan(accession, parse_runs(runs))
+    by_stage = progress_by_stage(current_run_events([e for e in events if isinstance(e, dict)]))
+    return {**data, "stage_progress": True, "stages": stage_view(plan, by_stage)}
+
+
 @router.get("/dataset/{accession}/pipeline/remote/{job_id}/status")
-def pipeline_remote_status(accession: str, job_id: str):
-    """Poll job status from the remote server. Returns {status, log}."""
+def pipeline_remote_status(accession: str, job_id: str, runs: str = ""):
+    """Poll job status from the remote server. Returns {status, log, stages, stage_progress}.
+
+    `runs` must match the selection the job was submitted with: it decides which stages the plan
+    contains, and therefore what the relayed events are matched against.
+    """
     base_url = _mq_remote_url()
     url = f"{base_url}/status/{job_id}"
     logger.debug("pipeline_remote_status  job_id=%s → %s", job_id, url)
@@ -2593,7 +2631,7 @@ def pipeline_remote_status(accession: str, job_id: str):
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         logger.debug("pipeline_remote_status  job_id=%s  status=%s", job_id, data.get("status"))
-        return data
+        return _remote_stage_payload(accession, runs, data)
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
         logger.error("pipeline_remote_status  HTTP %s from %s: %r", e.code, url, body_text[:300])

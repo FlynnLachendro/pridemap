@@ -125,11 +125,27 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         with log_path.open("a") as f:
             f.write(msg + "\n")
 
+    # run_all.sh writes its own stage events next to itself, in the container-local work dir that
+    # never reaches the Volume. Copying that file in on every sync is what lets /status report
+    # stages, elapsed time and ETA for a remote job exactly as a local run does — without it the
+    # client can only ever see "running". It is kept under a different name from the coarse
+    # status file this module writes, because the two have different schemas and merging them
+    # would corrupt both readers.
+    kit_progress: list[pathlib.Path] = []
+
+    def _ship_stages() -> None:
+        for src in kit_progress:
+            try:
+                (job_dir / "stages.jsonl").write_bytes(src.read_bytes())
+            except OSError:
+                pass  # the file appears only once run_all.sh reaches its first stage
+
     # Background thread: ship log + progress to the Volume every 15 s so /status has live output.
     _stop_shipper = threading.Event()
 
     def _shipper() -> None:
         while not _stop_shipper.wait(15):
+            _ship_stages()
             _vol_sync("commit")
 
     shipper = threading.Thread(target=_shipper, daemon=True)
@@ -141,6 +157,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         # Unpack kit into container-local temp (raw files must NOT go on the Volume)
         work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"mq-{job_id}-"))
         _log(f"work_dir={work_dir}")
+        kit_progress.append(work_dir / "progress.jsonl")
 
         with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
             zf.extractall(work_dir)
@@ -193,6 +210,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         _write_progress(progress_path, "error", str(exc))
     finally:
         _stop_shipper.set()
+        _ship_stages()  # final sweep: the stages that finished since the last 15 s tick
         _vol_sync("commit")
 
     return job_id
@@ -258,6 +276,9 @@ class _ModalBackend:
 
     def job_log(self, job_id: str) -> str:
         return _read_log(job_id)
+
+    def job_progress(self, job_id: str) -> list[dict]:
+        return _read_stage_events(job_id)
 
     def results_path(self, job_id: str) -> pathlib.Path | None:
         job_dir = _job_dir(job_id)
@@ -397,6 +418,33 @@ def _read_log(job_id: str) -> str:
         return (job_dir / "run.log").read_text(errors="replace")[-8000:]  # last 8 KB
     except FileNotFoundError:
         return ""
+
+
+def _read_stage_events(job_id: str) -> list[dict]:
+    """run_all.sh's stage events for this job, oldest first.
+
+    A half-written final line is expected: the file is copied while the script is appending to it,
+    so an unparseable line is dropped rather than failing the whole poll.
+    """
+    job_dir = _job_dir(job_id)
+    if job_dir is None:
+        return []
+    try:
+        text = (job_dir / "stages.jsonl").read_text(errors="replace")
+    except FileNotFoundError:
+        return []
+    events = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
 
 
 def _accession_from_kit(kit_bytes: bytes) -> str:
