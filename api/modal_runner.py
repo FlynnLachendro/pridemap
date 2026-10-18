@@ -160,6 +160,32 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     _vol_sync("reload", raw_vol)
     _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
 
+    # Concurrent-download guard: two containers downloading the same accession simultaneously
+    # both run `curl -C -` against the same partial file on raw_vol, producing a corrupt result.
+    # A lock file on raw_vol prevents the second container from starting its own curl run.
+    # The lock's mtime is the evidence of liveness — anything older than the download timeout
+    # (7200 s) was left by a crashed container and is ignored.
+    _LOCK_TIMEOUT = 7200  # matches this function's Modal timeout
+    cache_dir = pathlib.Path(RAW_CACHE_MOUNT) / accession
+    cache_dir.mkdir(exist_ok=True)
+    lock_file = cache_dir / ".downloading"
+
+    lock_acquired = False
+    if lock_file.exists():
+        age = time.time() - lock_file.stat().st_mtime
+        if age < _LOCK_TIMEOUT:
+            _log(f"another container is downloading {accession} (lock age {age:.0f} s) — waiting")
+            for _ in range(72):   # up to 6 min (72 × 5 s)
+                time.sleep(5)
+                _vol_sync("reload", raw_vol)
+                if not lock_file.exists():
+                    break
+            _log("concurrent download finished (or timed out) — raw_vol reloaded, skipping to search")
+            return   # search worker will reload and have() will find the files
+    lock_file.touch()
+    _vol_sync("commit", raw_vol)   # make the lock visible before any curl runs
+    lock_acquired = True
+
     work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"dl-{job_id}-"))
     with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
         zf.extractall(work_dir)
@@ -198,6 +224,8 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
             raise RuntimeError(f"download_raw.sh exited {proc.returncode}")
     finally:
         _stop.set()
+        if lock_acquired:
+            lock_file.unlink(missing_ok=True)   # release lock so concurrent jobs can proceed
         _vol_sync("commit", raw_vol)
         _vol_sync("commit")
 
@@ -329,7 +357,8 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     secrets=[secret],
     cpu=1,
     memory=1024,
-    timeout=100800,  # 28 h: 2 h download + 24 h MaxQuant + margin
+    timeout=86400,   # Modal's maximum (24 h). _download_raw is capped at 2 h, leaving up to
+                     # 22 h for MaxQuant — sufficient for all but the largest public datasets.
 )
 def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     """Lightweight orchestrator: sequences download (cheap) then search (expensive).
@@ -383,6 +412,54 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         _vol_sync("commit")
 
     return job_id
+
+
+# ----------------------------------------------------------------------------- cache eviction
+
+@app.function(
+    image=image,
+    volumes={RAW_CACHE_MOUNT: raw_vol},
+    cpu=1,
+    memory=1024,
+    timeout=3600,
+)
+def prune_raw_cache(max_age_days: int = 30) -> dict:
+    """Remove accession directories from raw_vol that have not been accessed recently.
+
+    Only removes a directory when EVERY raw file inside it is older than max_age_days, so
+    an accession that is currently downloading or was recently used is never touched.
+    Lock files (.downloading) are ignored when measuring age — only .raw files count.
+
+    Run manually:  modal run api/modal_runner.py::prune_raw_cache
+    Override age:  modal run api/modal_runner.py::prune_raw_cache --max-age-days 7
+    """
+    import shutil
+
+    _vol_sync("reload", raw_vol)
+    cutoff = time.time() - max_age_days * 86400
+    cache_root = pathlib.Path(RAW_CACHE_MOUNT)
+    removed: list[str] = []
+    kept: list[str] = []
+
+    for entry in sorted(cache_root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        accession = entry.name
+        raw_files = [f for f in entry.rglob("*") if f.is_file() and not f.name.startswith(".")]
+        if not raw_files:
+            continue
+        newest_mtime = max(f.stat().st_mtime for f in raw_files)
+        age_days = (time.time() - newest_mtime) / 86400
+        if newest_mtime < cutoff:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(f"{accession} ({age_days:.0f} days old)")
+        else:
+            kept.append(f"{accession} ({age_days:.1f} days old)")
+
+    if removed:
+        _vol_sync("commit", raw_vol)
+
+    return {"removed": removed, "kept": kept, "max_age_days": max_age_days}
 
 
 def _job_id_for_this_run(accession: str) -> str:
