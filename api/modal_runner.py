@@ -48,7 +48,14 @@ image = (
     modal.Image.from_registry(
         "quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1"
     )
-    .apt_install("curl", "unzip", "bash")
+    .run_commands(
+        # The base image (Debian buster, stripped) has wget but no apt-get, no conda,
+        # and no curl. Fetch a static curl binary so download_raw.sh can use it.
+        "wget -qO /usr/local/bin/curl "
+        "https://github.com/moparisthebest/static-curl/releases/download/v8.6.0/curl-amd64 "
+        "&& chmod +x /usr/local/bin/curl "
+        "&& curl --version"
+    )
     .run_commands("which maxquant")   # fail at BUILD time if binary is missing
 )
 
