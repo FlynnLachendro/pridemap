@@ -176,7 +176,11 @@ def _find_protein_groups(work_dir: pathlib.Path) -> pathlib.Path | None:
 
 # ----------------------------------------------------------------------------- ASGI web endpoints
 
-@app.function(secrets=[secret])
+@app.function(
+    secrets=[secret],
+    scaledown_window=900,   # stay warm 15 min after last request (Modal default is 300 s)
+    # keep_warm=1,          # uncomment to always keep one container hot (eliminates cold starts, costs ~$0.06/h)
+)
 @modal.asgi_app(label="pridemap-mq")
 def web() -> object:
     from fastapi import FastAPI, Header, HTTPException, Request

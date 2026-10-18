@@ -2343,33 +2343,76 @@ def _mq_auth_headers() -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def _mq_health_check(base_url: str) -> dict:
-    """Probe GET {base_url}/health. Returns {ok, status_code, detail}. Always logs."""
+def _mq_health_check(base_url: str, attempt_timeout: int = 10) -> dict:
+    """Probe GET {base_url}/health once. Returns {ok, status_code, detail}."""
     url = f"{base_url}/health"
-    logger.info("remote MQ health check → %s", url)
     try:
         req = urllib.request.Request(url, headers=_mq_auth_headers())
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=attempt_timeout) as resp:
             body = resp.read().decode(errors="replace")
-            logger.info("remote MQ health check ✓  %s  body=%r", url, body[:120])
+            logger.info("remote MQ health ✓  %s  body=%r", url, body[:120])
             return {"ok": True, "status_code": resp.status, "detail": body}
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
-        logger.warning("remote MQ health check ✗  %s  HTTP %s  %r", url, e.code, detail[:120])
+        logger.warning("remote MQ health ✗  %s  HTTP %s  %r", url, e.code, detail[:120])
         return {"ok": False, "status_code": e.code, "detail": detail}
     except Exception as e:
-        logger.warning("remote MQ health check ✗  %s  %s", url, e)
+        logger.warning("remote MQ health ✗  %s  %s", url, e)
         return {"ok": False, "status_code": None, "detail": str(e)}
+
+
+def _mq_await_ready(
+    base_url: str,
+    wall_timeout: int = 120,
+    poll_interval: int = 8,
+    attempt_timeout: int = 8,
+) -> None:
+    """Block until the Modal MQ server responds to /health or wall_timeout seconds pass.
+
+    Modal serverless containers cold-start in 20-60 s. This function retries with
+    short per-attempt timeouts so one slow probe doesn't consume the whole budget.
+    Raises HTTPException(503) if the server never comes up within wall_timeout.
+
+    Use this at the start of every function that calls the Modal API.
+    """
+    import time as _time
+    deadline = _time.monotonic() + wall_timeout
+    attempt = 0
+    last_detail = ""
+    while _time.monotonic() < deadline:
+        attempt += 1
+        remaining = deadline - _time.monotonic()
+        this_timeout = min(attempt_timeout, max(1, int(remaining)))
+        logger.info("mq_await_ready  attempt=%d  timeout=%ds", attempt, this_timeout)
+        result = _mq_health_check(base_url, attempt_timeout=this_timeout)
+        if result["ok"]:
+            logger.info("mq_await_ready  ready after %d attempt(s)", attempt)
+            return
+        last_detail = result["detail"]
+        # Don't sleep if we've already used the budget.
+        sleep_for = min(poll_interval, max(0, deadline - _time.monotonic()))
+        if sleep_for > 0:
+            _time.sleep(sleep_for)
+    raise HTTPException(
+        503,
+        f"Modal MQ server did not become ready within {wall_timeout}s "
+        f"(last error: {last_detail})",
+    )
 
 
 @router.get("/remote-mq")
 def remote_mq_info():
-    """Tells the UI whether a remote MaxQuant server is reachable (MQ_SERVER_URL in .env + /health probe)."""
+    """Tells the UI whether a remote MaxQuant server is configured.
+
+    Availability is determined by config presence only — no live probe — because
+    Modal serverless apps cold-start on first request (20-60 s) and would time out
+    here every time the app has been idle. The real health gate runs at job
+    submission time in pipeline_remote_start().
+    """
     url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
     if not url:
         return {"available": False, "detail": "MQ_SERVER_URL not set"}
-    health = _mq_health_check(url)
-    return {"available": health["ok"], "detail": health["detail"]}
+    return {"available": True, "detail": f"configured: {url}"}
 
 
 @router.get("/local-mq")
@@ -2457,10 +2500,7 @@ def pipeline_remote_active(accession: str):
 def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
-    # Health-gate: fail fast with a clear message before building/uploading the kit.
-    health = _mq_health_check(base_url)
-    if not health["ok"]:
-        raise HTTPException(502, f"remote MQ server health check failed: {health['detail']}")
+    _mq_await_ready(base_url)  # waits up to 120 s for Modal cold-start before uploading
     kit_bytes, _ = search_kit(accession, _api_base(request), "", runs=parse_runs(runs))
     kit_kb = len(kit_bytes) / 1024
     logger.info("pipeline_remote_start  accession=%s  kit=%.1f KB  url=%s/run", accession, kit_kb, base_url)

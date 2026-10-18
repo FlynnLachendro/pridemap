@@ -1913,5 +1913,29 @@ def _warm():
     threading.Thread(target=loop, daemon=True).start()
 
 
+def _log_env_config() -> None:
+    """Print env-var config at startup. Sensitive values are redacted."""
+    SENSITIVE = {"ANTHROPIC_API_KEY", "MQ_TOKEN", "HF_TOKENS", "HF_TOKENS2", "OPENROUTER_API_KEY"}
+    VARS = [
+        "MQ_SERVER_URL", "MQ_TOKEN",
+        "ANTHROPIC_API_KEY", "ASK_MODEL",
+        "OPENROUTER_API_KEY", "HF_TOKENS", "HF_TOKENS2",
+        "PORT", "DB_PATH",
+    ]
+    lines = []
+    for var in VARS:
+        val = os.environ.get(var)
+        if val is None:
+            lines.append(f"  {var}: <not set>")
+        elif var in SENSITIVE:
+            lines.append(f"  {var}: <redacted ({len(val)} chars)>")
+        else:
+            lines.append(f"  {var}: {val}")
+    print("── env config ──────────────────────────────", flush=True)
+    print("\n".join(lines), flush=True)
+    print("────────────────────────────────────────────", flush=True)
+
+
 if __name__ == "__main__":
+    _log_env_config()
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=True, app_dir=str(pathlib.Path(__file__).parent))
