@@ -114,9 +114,11 @@ dependency declaration:
 
 `uv run` reads this and pulls `modal` into an isolated ephemeral environment
 automatically. The project has no `pyproject.toml`, so **`uv add modal` will
-fail** — that command only works against a project lockfile. Use `uv run modal …`
-everywhere below instead; it always resolves the right `modal` version from the
-script's own declaration.
+fail** — that command only works against a project lockfile. Use `uvx modal …`
+everywhere below instead. Note that `uvx modal` is the correct invocation —
+`uv run modal` has no project venv to find `modal` in and falls through to
+pyenv, which says "modal: command not found". `uvx` (= `uv tool run`) downloads
+and runs it in an isolated environment automatically.
 
 **`api/main.py`'s dependency block must not gain `modal`.** The API talks to
 Modal over plain HTTP via `urllib` (`api/omics.py:2276–2487`). Pulling the SDK
@@ -126,7 +128,7 @@ benefit of this path.
 ### 2. Authenticate (once per machine)
 
 ```bash
-uv run modal setup      # opens a browser, writes ~/.modal.toml
+uvx modal setup      # opens a browser, writes ~/.modal.toml
 ```
 
 On a headless machine or in CI there is no browser. Create a token in the
@@ -142,7 +144,7 @@ is the cleaner option. If you belong to more than one Modal workspace, confirm
 the right one is active before deploying:
 
 ```bash
-uv run modal profile list
+uvx modal profile list
 ```
 
 ### 3. Create the shared secret
@@ -152,13 +154,13 @@ This token is what stops strangers from spending your compute — see
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"   # generate one
-uv run modal secret create pridemap-mq-token MQ_TOKEN=<that-token>
+uvx modal secret create pridemap-mq-token MQ_TOKEN=<that-token>
 ```
 
 ### 4. Deploy
 
 ```bash
-uv run modal deploy api/modal_runner.py
+uvx modal deploy api/modal_runner.py
 ```
 
 Use `modal deploy`, not `modal serve`: serve is for local development and dies
@@ -174,8 +176,8 @@ Checklist for the deploy to actually work:
       function. Omitting it deploys cleanly and then throws `KeyError` on
       `os.environ["MQ_TOKEN"]` at the first request — a confusing 500 where you
       expected a 401.
-- [ ] `uv run modal app list` shows `pridemap-maxquant` as `deployed`.
-- [ ] `uv run modal app logs pridemap-maxquant` shows the first image build completing.
+- [ ] `uvx modal app list` shows `pridemap-maxquant` as `deployed`.
+- [ ] `uvx modal app logs pridemap-maxquant` shows the first image build completing.
 
 Redeploying later is idempotent: the URL does not change, `.env` needs no edit,
 and in-flight runs are not interrupted — new invocations pick up the new image
@@ -265,29 +267,29 @@ does anything other than fail fast, stop and fix it before running a real search
 
 | Symptom | Fix |
 |---|---|
-| `modal deploy` succeeds but nothing is listed | `modal app list` — confirm `pridemap-maxquant` is `deployed`, and `modal profile list` to check you deployed into the workspace you think |
-| Deploy fails during image build | `modal app logs pridemap-maxquant` — the build log names the failing layer |
+| `uvx modal deploy` succeeds but nothing is listed | `uvx modal app list` — confirm `pridemap-maxquant` is `deployed`, and `uvx modal profile list` to check you deployed into the workspace you think |
+| Deploy fails during image build | `uvx modal app logs pridemap-maxquant` — the build log names the failing layer |
 | `/run` returns 500 instead of 401 | The ASGI function is missing `secrets=[secret]`, so `os.environ["MQ_TOKEN"]` raises `KeyError` |
 | `/remote-mq` says unavailable | `MQ_SERVER_URL` wrong or API not restarted after editing `.env` |
-| Run appears stuck | `uv run modal volume ls pridemap-runs`, then `uv run modal volume get pridemap-runs <job_id>/run.log /tmp/run.log` to read the live log |
+| Run appears stuck | `uvx modal volume ls pridemap-runs`, then `uvx modal volume get pridemap-runs <job_id>/run.log /tmp/run.log` to read the live log |
 | First search takes minutes before anything happens | Cold start pulling a multi-GB image — expected, 2–5 min |
-| Job finished but no results | `uv run modal volume ls pridemap-runs` — check `<job_id>/combined/txt/` exists; if not, the search failed, see `run.log` |
+| Job finished but no results | `uvx modal volume ls pridemap-runs` — check `<job_id>/combined/txt/` exists; if not, the search failed, see `run.log` |
 
 ## Teardown
 
 ```bash
-uv run modal app stop pridemap-maxquant
-uv run modal volume delete pridemap-runs      # NOT done by app stop — see below
-uv run modal dict delete pridemap-jobs
-uv run modal secret delete pridemap-mq-token
+uvx modal app stop pridemap-maxquant
+uvx modal volume delete pridemap-runs      # NOT done by app stop — see below
+uvx modal dict delete pridemap-jobs
+uvx modal secret delete pridemap-mq-token
 ```
 
 Then unset `MQ_SERVER_URL` and `MQ_TOKEN` in `.env` and restart the API. The
 **Run on cloud** card disappears from the UI.
 
-> **`modal app stop` does not delete the Volume.** It stops the app and kills
+> **`uvx modal app stop` does not delete the Volume.** It stops the app and kills
 > live containers, but `pridemap-runs` keeps billing for stored data until you
-> run `uv run modal volume delete`. Someone who stops the app and closes the laptop
+> run `uvx modal volume delete`. Someone who stops the app and closes the laptop
 > believes they have torn down and is still paying.
 
 Two other things survive a partial teardown:
@@ -306,7 +308,7 @@ Two other things survive a partial teardown:
 | Job id in `modal.Dict` | An in-process dict dies with the API process, losing the handle to a job that is still running and billing |
 | `timeout=86400` | Modal's default is 300 s, which would silently kill every real MaxQuant run a few minutes in |
 | Raw files on container-local `/tmp`, not the Volume | 24 × 1–5 GB is pure scratch; `vol.commit()` on 120 GB costs minutes and real money. Only logs and `combined/txt/` are committed |
-| `log` read from a shipped `run.log` | Modal exposes no SDK call for a spawned function's stdout — `FunctionCall` has no `.logs()`, and `modal app logs` is CLI-only. A background loop ships the log to the Volume instead |
+| `log` read from a shipped `run.log` | Modal exposes no SDK call for a spawned function's stdout — `FunctionCall` has no `.logs()`, and `uvx modal app logs` is CLI-only. A background loop ships the log to the Volume instead |
 | Bearer token, not proxy auth | Modal's proxy auth needs headers the existing client does not send (see [Security](#security--the-endpoint-is-public-by-default)) |
 | `label="pridemap-mq"` on the ASGI app | Makes the URL deterministic and independent of the Python function name. Labels are lowercase alphanumeric plus hyphens (`pridemap_mq` is invalid) and workspace-scoped, so a second app reusing the label conflicts at deploy time. The app name (`modal.App("pridemap-maxquant")`) is separate — the **label** is what appears in `MQ_SERVER_URL` |
 | Stock biocontainers image | Modal is x86-64, so the arm64 assembly-rebuild path at `api/omics.py:1242–1333` is never invoked, and Bruker data needs no emulation |
@@ -459,7 +461,7 @@ orphan-cost window above.
 Only after 1a/1b/2 run on real data.
 
 - `cpu=16, memory=65536` are starting guesses. Read peak usage from
-  `modal app logs` and tune.
+  `uvx modal app logs pridemap-maxquant` and tune.
 - Set `<numThreads>` in `mqpar.xml` to match the Modal `cpu` value — a mismatch
   means paying for cores MaxQuant never uses.
 - `keep_warm=1` removes the 2–5 min cold start if demo reliability outweighs
@@ -501,12 +503,12 @@ No frontend changes in any phase.
 2. `GET /remote-mq` reports available (proves the health gate passes).
 3. Unauthenticated `POST /run` is rejected before any work starts.
 4. Run the 2-sample comparison via the remote toggle.
-5. `modal app logs` shows the container pulling from PRIDE FTP directly; your
+5. `uvx modal app logs pridemap-maxquant` shows the container pulling from PRIDE FTP directly; your
    machine shows no multi-GB egress.
 6. Close the browser tab mid-run, reopen — progress resumes, and `log` shows
    live `run.log` text (proves the shipper loop works).
 7. `proteinGroups.txt` downloads and loads into the Analyse view.
-8. `modal volume ls pridemap-runs` shows only logs plus `combined/txt/` — no raw files.
+8. `uvx modal volume ls pridemap-runs` shows only logs plus `combined/txt/` — no raw files.
 
 **Phase 1b**
 
