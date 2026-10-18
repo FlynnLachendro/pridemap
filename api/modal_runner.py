@@ -51,6 +51,14 @@ VOLUME_MOUNT   = "/data"       # where both @app.function decorators mount `vol`
 RAW_CACHE_MOUNT = "/raw-cache" # where run_maxquant mounts `raw_vol` (cached raw files, cross-job)
 DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
 
+# Single source of truth for container sizing. Change one number here to resize both the Modal
+# decorator and the log lines that describe the phase; the runtime also patches mqpar.xml's
+# numThreads to os.cpu_count() so the kit's static value is never wrong by accident.
+MAXQUANT_SEARCH_CPU    = 16
+MAXQUANT_SEARCH_MEMORY = 65536   # MB (64 GB)
+MAXQUANT_DOWNLOAD_CPU    = 2
+MAXQUANT_DOWNLOAD_MEMORY = 4096  # MB (4 GB)
+
 
 def _vol_sync(action: str, v: "Volume | None" = None) -> None:
     """Best-effort Volume commit/reload for vol (default) or any other Volume.
@@ -186,8 +194,8 @@ image = (
     image=image,
     volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
     secrets=[secret],
-    cpu=2,
-    memory=4096,
+    cpu=MAXQUANT_DOWNLOAD_CPU,
+    memory=MAXQUANT_DOWNLOAD_MEMORY,
     timeout=7200,   # 2 h — enough for any current public PRIDE dataset
 )
 def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
@@ -212,6 +220,7 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     _vol_sync("reload")        # see the job_dir the orchestrator created and committed
     _vol_sync("reload", raw_vol)
     _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
+    _log(f"container CPUs available: {os.cpu_count()} (allocated: {MAXQUANT_DOWNLOAD_CPU})")
 
     # Concurrent-download guard: two containers downloading the same accession simultaneously
     # both run `curl -C -` against the same partial file on raw_vol, producing a corrupt result.
@@ -318,8 +327,8 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     image=image,
     volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
     secrets=[secret],
-    cpu=16,
-    memory=65536,   # 64 GB
+    cpu=MAXQUANT_SEARCH_CPU,
+    memory=MAXQUANT_SEARCH_MEMORY,
     timeout=86400,  # 24 h
 )
 def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
@@ -385,16 +394,23 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
             zf.extractall(work_dir)
         _log("kit unpacked")
 
-        # Log container CPUs vs mqpar numThreads so we can verify they match.
-        _log(f"container CPUs available: {os.cpu_count()}")
+        # Patch mqpar.xml numThreads to match actual container CPUs so the kit's static value
+        # can never cause a mismatch. MAXQUANT_SEARCH_CPU controls the Modal allocation; os.cpu_count()
+        # is what the container actually sees — they are equal under normal operation.
+        import re as _re
+        actual_cpus = os.cpu_count() or MAXQUANT_SEARCH_CPU
+        _log(f"container CPUs available: {actual_cpus} (allocated: {MAXQUANT_SEARCH_CPU})")
         mqpar_files = list(work_dir.rglob("mqpar.xml"))
         if mqpar_files:
-            import re as _re
-            mqpar_text = mqpar_files[0].read_text(errors="replace")
+            mqpar_path = mqpar_files[0]
+            mqpar_text = mqpar_path.read_text(errors="replace")
             m = _re.search(r"<numThreads>(\d+)</numThreads>", mqpar_text)
-            _log(f"mqpar.xml numThreads: {m.group(1) if m else 'not found'} (file: {mqpar_files[0].relative_to(work_dir)})")
+            old_threads = m.group(1) if m else "not found"
+            patched = _re.sub(r"<numThreads>\d+</numThreads>", f"<numThreads>{actual_cpus}</numThreads>", mqpar_text)
+            mqpar_path.write_text(patched)
+            _log(f"mqpar.xml numThreads: {old_threads} → {actual_cpus} (patched, file: {mqpar_path.relative_to(work_dir)})")
         else:
-            _log("mqpar.xml: not found in kit")
+            _log("mqpar.xml: not found in kit — numThreads not patched")
 
         run_script = work_dir / "run_all.sh"
         if not run_script.exists():
@@ -519,7 +535,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     phases_path = job_dir / "phases.jsonl"
 
     _log(f"job_id={job_id}  accession={accession}")
-    _log("phase 1/2: download (cheap container — 2 CPU / 4 GB)")
+    _log(f"phase 1/2: download (cheap container — {MAXQUANT_DOWNLOAD_CPU} CPU / {MAXQUANT_DOWNLOAD_MEMORY // 1024} GB)")
     _write_progress(progress_path, "running", "download phase starting")
     _write_stage_event(phases_path, "run_started", "", "pipeline start")
     _write_stage_event(phases_path, "stage_started", "download", "Download raw files from PRIDE")
@@ -538,7 +554,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
 
     _write_stage_event(phases_path, "stage_finished", "download", "completed")
     _vol_sync("reload")   # pull log lines written by the download worker
-    _log("phase 2/2: MaxQuant search (expensive container — 16 CPU / 64 GB)")
+    _log(f"phase 2/2: MaxQuant search (expensive container — {MAXQUANT_SEARCH_CPU} CPU / {MAXQUANT_SEARCH_MEMORY // 1024} GB)")
     _write_progress(progress_path, "running", "search phase starting")
     _write_stage_event(phases_path, "stage_started", "search_dda", "MaxQuant search starting")
     _vol_commit()
