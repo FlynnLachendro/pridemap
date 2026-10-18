@@ -38,16 +38,32 @@ else
 fi
 echo ""
 
-# 2. Resolve ports (fall back to next free port if preferred is taken)
-API_PORT=$(find_free_port 8000)
+# Port recorded by the last run, if it is still free. Next.js inlines NEXT_PUBLIC_API_URL into the
+# BROWSER bundle at compile time, so the API port is baked into every page the user already has
+# open. Picking the next free port on each restart therefore orphans running tabs silently: the UI
+# polls a dead port, every fetch rejects, and the job looks failed while it runs happily on Modal.
+# Reusing the recorded port keeps restarts transparent. PRIDEMAP_API_PORT pins it outright.
+previous_api_port() {
+  [ -f web/.env.local ] || return 1
+  sed -n 's/^NEXT_PUBLIC_API_URL=.*:\([0-9][0-9]*\)$/\1/p' web/.env.local | tail -1
+}
+
+# 2. Resolve ports (reuse the last API port when free; else fall back to the next free one)
+PREFERRED_API_PORT=${PRIDEMAP_API_PORT:-$(previous_api_port || echo 8000)}
+PREFERRED_API_PORT=${PREFERRED_API_PORT:-8000}
+API_PORT=$(find_free_port "$PREFERRED_API_PORT")
 WEB_PORT=$(find_free_port 3000)
 
-if [ "$API_PORT" != "8000" ]; then
-  echo "⚠️  Port 8000 is in use — API will use :$API_PORT instead"
-  echo "   (:8000 is held by something else, so anything still pointing there is not this API)"
+if [ "$API_PORT" != "$PREFERRED_API_PORT" ]; then
+  echo "⚠️  Port $PREFERRED_API_PORT is in use — API will use :$API_PORT instead"
+  echo "   Any browser tab opened against :$PREFERRED_API_PORT will poll a port this API is NOT on,"
+  echo "   and will report running jobs as failed. Reload the UI after startup."
 fi
+
 if [ "$WEB_PORT" != "3000" ]; then
   echo "⚠️  Port 3000 is in use — Web UI will use :$WEB_PORT instead"
+  echo "   :3000 is a web server from an earlier run, serving a bundle baked with THAT run's API"
+  echo "   port. Use http://localhost:$WEB_PORT — the old tab reports healthy jobs as failed."
 fi
 
 # 2b. Record the resolved API URL for the web app.
