@@ -23,6 +23,8 @@ included.
 > Alternatives that are already proven: [maxquant-local.md](maxquant-local.md) ·
 > [maxquant-cloud-devin.md](maxquant-cloud-devin.md)
 
+
+
 ## How it works
 
 ```
@@ -39,13 +41,13 @@ PRIDE Map UI                          pridemap-maxquant app
 ```
 
 1. PRIDE Map API bundles the search kit (scripts + MaxQuant XML configs) as a
-   `kit.zip` — a few KB. **Raw files are not in it.**
+  `kit.zip` — a few KB. **Raw files are not in it.**
 2. It POSTs the zip to `MQ_SERVER_URL/run` with `Authorization: Bearer $MQ_TOKEN`.
 3. Modal spawns a container, which downloads the raw files **directly from PRIDE
-   FTP at datacentre speed** and runs `run_all.sh`. The files never cross your
+  FTP at datacentre speed** and runs `run_all.sh`. The files never cross your
    uplink.
 4. The container writes progress to a Volume; PRIDE Map polls `/status/{job_id}`
-   every 3 seconds and shows live output.
+  every 3 seconds and shows live output.
 5. On completion the protein table is fetched and loaded into the Analyse tab.
 
 Because step 3 happens entirely inside Modal, **your machine can be closed or
@@ -55,21 +57,25 @@ powered off between steps 2 and 5.**
 
 - A [Modal account](https://modal.com) — the free tier is enough to try this.
 - The [Modal dashboard](https://modal.com/apps) is where apps, logs, secrets and
-  running jobs are managed. Worth opening now if you have not seen it before.
+running jobs are managed. Worth opening now if you have not seen it before.
 - `uv`, and this repo cloned.
 - No Docker, no MaxQuant install, no particular CPU architecture.
+
+
 
 ## Cost and limits
 
 Read this before running the setup — the ceiling matters more than the steps.
 
-| | |
-|---|---|
-| Worker size | `cpu=16`, `memory=65536` (64 GB), `timeout=86400` (24 h) |
-| Worst case, one runaway job | **~$12–15** if it burns the full 24 h timeout |
-| Modal free tier | roughly **$30/month** of compute credit |
-| First deploy | pulls a multi-GB image — **expect 2–5 minutes** |
-| Cold start after idle | the same 2–5 min on the first search |
+
+|                             |                                                          |
+| --------------------------- | -------------------------------------------------------- |
+| Worker size                 | `cpu=16`, `memory=65536` (64 GB), `timeout=86400` (24 h) |
+| Worst case, one runaway job | **~$12–15** if it burns the full 24 h timeout            |
+| Modal free tier             | roughly **$30/month** of compute credit                  |
+| First deploy                | pulls a multi-GB image — **expect 2–5 minutes**          |
+| Cold start after idle       | the same 2–5 min on the first search                     |
+
 
 Verify both figures against [modal.com/pricing](https://modal.com/pricing); they
 change. The point to internalise: **one runaway job eats about half the monthly
@@ -100,6 +106,8 @@ property that lets any machine drive a run.
 
 ## Step-by-step setup
 
+
+
 ### 1. Modal SDK — no install step needed
 
 `api/modal_runner.py` carries a [PEP 723](https://peps.python.org/pep-0723/) inline
@@ -113,14 +121,14 @@ dependency declaration:
 ```
 
 `uv run` reads this and pulls `modal` into an isolated ephemeral environment
-automatically. The project has no `pyproject.toml`, so **`uv add modal` will
+automatically. The project has no `pyproject.toml`, so `uv add modal` **will
 fail** — that command only works against a project lockfile. Use `uvx modal …`
 everywhere below instead. Note that `uvx modal` is the correct invocation —
 `uv run modal` has no project venv to find `modal` in and falls through to
 pyenv, which says "modal: command not found". `uvx` (= `uv tool run`) downloads
 and runs it in an isolated environment automatically.
 
-**`api/main.py`'s dependency block must not gain `modal`.** The API talks to
+`api/main.py`**'s dependency block must not gain** `modal`**.** The API talks to
 Modal over plain HTTP via `urllib` (`api/omics.py:2276–2487`). Pulling the SDK
 into the API would couple your laptop to Modal for no reason and undo the main
 benefit of this path.
@@ -147,6 +155,8 @@ the right one is active before deploying:
 uvx modal profile list
 ```
 
+
+
 ### 3. Create the shared secret
 
 This token is what stops strangers from spending your compute — see
@@ -156,6 +166,8 @@ This token is what stops strangers from spending your compute — see
 python3 -c "import secrets; print(secrets.token_hex(32))"   # generate one
 uvx modal secret create pridemap-mq-token MQ_TOKEN=<that-token>
 ```
+
+
 
 ### 4. Deploy
 
@@ -173,9 +185,11 @@ your workspace slug. It will look like
 Checklist for the deploy to actually work:
 
 - [ ] The ASGI function carries `secrets=[secret]` **as well as** the worker
-      function. Omitting it deploys cleanly and then throws `KeyError` on
-      `os.environ["MQ_TOKEN"]` at the first request — a confusing 500 where you
-      expected a 401.
+  ```
+  function. Omitting it deploys cleanly and then throws `KeyError` on
+  `os.environ["MQ_TOKEN"]` at the first request — a confusing 500 where you
+  expected a 401.
+  ```
 - [ ] `uvx modal app list` shows `pridemap-maxquant` as `deployed`.
 - [ ] `uvx modal app logs pridemap-maxquant` shows the first image build completing.
 
@@ -202,15 +216,17 @@ Pick a dataset, choose your samples, and press **Run on cloud**. From there:
 
 - Progress polls every 3 seconds, the same as the local path.
 - **You can close the tab, close the laptop, or shut the machine down.** The job
-  continues on Modal.
+continues on Modal.
 - To collect results later, reopen the dataset in PRIDE Map. The run is
-  rediscovered and the protein table loads into the Analyse tab.
+rediscovered and the protein table loads into the Analyse tab.
 
 > Recovery after a full shutdown is Phase 2, and it is built: on a cache miss
 > `pipeline_remote_active()` asks Modal for `GET /jobs/{accession}` and picks the
 > run back up. This path has not been exercised against a live deploy yet
 > (verification steps 13–14), so if a restarted API does not rediscover a run,
 > check the dashboard for an orphan still billing.
+
+
 
 ### Per run, there is no Modal login
 
@@ -237,10 +253,12 @@ Reject any request whose `Authorization: Bearer …` does not match `MQ_TOKEN`
 Two stronger alternatives were considered and rejected, recorded here so they do
 not get re-raised:
 
-| Option | Why not |
-|---|---|
+
+| Option                                                                                           | Why not                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Modal [proxy auth](https://modal.com/docs/guide/webhook-proxy-auth) (`requires_proxy_auth=True`) | Requires `Modal-Key` / `Modal-Secret` headers that the existing client does not send — adopting it breaks the zero-client-changes property |
-| A gateway (Cloudflare Worker etc.) injecting those headers | Preserves the client contract, but adds infrastructure well beyond this scope |
+| A gateway (Cloudflare Worker etc.) injecting those headers                                       | Preserves the client contract, but adds infrastructure well beyond this scope                                                              |
+
 
 The hand-rolled check is chosen to keep the existing contract intact — which is
 precisely why it has to actually be implemented.
@@ -265,15 +283,19 @@ does anything other than fail fast, stop and fix it before running a real search
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---|---|
-| `uvx modal deploy` succeeds but nothing is listed | `uvx modal app list` — confirm `pridemap-maxquant` is `deployed`, and `uvx modal profile list` to check you deployed into the workspace you think |
-| Deploy fails during image build | `uvx modal app logs pridemap-maxquant` — the build log names the failing layer |
-| `/run` returns 500 instead of 401 | The ASGI function is missing `secrets=[secret]`, so `os.environ["MQ_TOKEN"]` raises `KeyError` |
-| `/remote-mq` says unavailable | `MQ_SERVER_URL` wrong or API not restarted after editing `.env` |
-| Run appears stuck | `uvx modal volume ls pridemap-runs`, then `uvx modal volume get pridemap-runs <job_id>/run.log /tmp/run.log` to read the live log |
-| First search takes minutes before anything happens | Cold start pulling a multi-GB image — expected, 2–5 min |
-| Job finished but no results | `uvx modal volume ls pridemap-runs` — check `<job_id>/combined/txt/` exists; if not, the search failed, see `run.log` |
+
+| Symptom                                            | Fix                                                                                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `uvx modal deploy` succeeds but nothing is listed  | `uvx modal app list` — confirm `pridemap-maxquant` is `deployed`, and `uvx modal profile list` to check you deployed into the workspace you think |
+| Deploy fails during image build                    | `uvx modal app logs pridemap-maxquant` — the build log names the failing layer                                                                    |
+| `/run` returns 500 instead of 401                  | The ASGI function is missing `secrets=[secret]`, so `os.environ["MQ_TOKEN"]` raises `KeyError`                                                    |
+| `/remote-mq` says unavailable                      | `MQ_SERVER_URL` wrong or API not restarted after editing `.env`                                                                                   |
+| Run appears stuck                                  | `uvx modal volume ls pridemap-runs`, then `uvx modal volume get pridemap-runs <job_id>/run.log /tmp/run.log` to read the live log                 |
+| First search takes minutes before anything happens | Cold start pulling a multi-GB image — expected, 2–5 min                                                                                           |
+| Job finished but no results                        | `uvx modal volume ls pridemap-runs` — check `<job_id>/combined/txt/` exists; if not, the search failed, see `run.log`                             |
+
+
+
 
 ## Teardown
 
@@ -287,7 +309,7 @@ uvx modal secret delete pridemap-mq-token
 Then unset `MQ_SERVER_URL` and `MQ_TOKEN` in `.env` and restart the API. The
 **Run on cloud** card disappears from the UI.
 
-> **`uvx modal app stop` does not delete the Volume.** It stops the app and kills
+> `uvx modal app stop` **does not delete the Volume.** It stops the app and kills
 > live containers, but `pridemap-runs` keeps billing for stored data until you
 > run `uvx modal volume delete`. Someone who stops the app and closes the laptop
 > believes they have torn down and is still paying.
@@ -295,26 +317,32 @@ Then unset `MQ_SERVER_URL` and `MQ_TOKEN` in `.env` and restart the API. The
 Two other things survive a partial teardown:
 
 - An orphaned in-flight worker bills 16 cores until its 86400 s timeout fires.
-  Cancel it from the dashboard or with `FunctionCall.from_id(...).cancel()`.
+Cancel it from the dashboard or with `FunctionCall.from_id(...).cancel()`.
 - A `keep_warm=1` container (Phase 3, if enabled) bills continuously even with
-  no jobs running.
+no jobs running.
+
+
 
 ## Architecture decisions
 
-| Decision | Reason |
-|---|---|
-| Implement the existing `MQ_SERVER_URL` contract | `api/omics.py:2276–2487` already speaks it, and the UI already has the local-vs-remote toggle. No client, UI, or endpoint-shape changes needed |
-| `.spawn()`, not `.remote()` | `.remote()` blocks the caller until the function returns — the laptop could never disconnect |
-| Job id in `modal.Dict` | An in-process dict dies with the API process, losing the handle to a job that is still running and billing |
-| `timeout=86400` | Modal's default is 300 s, which would silently kill every real MaxQuant run a few minutes in |
-| Raw files on container-local `/tmp`, not the Volume | 24 × 1–5 GB is pure scratch; `vol.commit()` on 120 GB costs minutes and real money. Only logs and `combined/txt/` are committed |
-| `log` read from a shipped `run.log` | Modal exposes no SDK call for a spawned function's stdout — `FunctionCall` has no `.logs()`, and `uvx modal app logs` is CLI-only. A background loop ships the log to the Volume instead |
-| Bearer token, not proxy auth | Modal's proxy auth needs headers the existing client does not send (see [Security](#security--the-endpoint-is-public-by-default)) |
-| `label="pridemap-mq"` on the ASGI app | Makes the URL deterministic and independent of the Python function name. Labels are lowercase alphanumeric plus hyphens (`pridemap_mq` is invalid) and workspace-scoped, so a second app reusing the label conflicts at deploy time. The app name (`modal.App("pridemap-maxquant")`) is separate — the **label** is what appears in `MQ_SERVER_URL` |
-| Stock biocontainers image | Modal is x86-64, so the arm64 assembly-rebuild path at `api/omics.py:1242–1333` is never invoked, and Bruker data needs no emulation |
-| `MAXQUANT_CMD=maxquant` | Makes `run_all.sh` take its native branch (`api/omics.py:1706–1708`) and skip Docker entirely — there is no Docker daemon inside the container |
+
+| Decision                                            | Reason                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Implement the existing `MQ_SERVER_URL` contract     | `api/omics.py:2276–2487` already speaks it, and the UI already has the local-vs-remote toggle. No client, UI, or endpoint-shape changes needed                                                                                                                                                                                                      |
+| `.spawn()`, not `.remote()`                         | `.remote()` blocks the caller until the function returns — the laptop could never disconnect                                                                                                                                                                                                                                                        |
+| Job id in `modal.Dict`                              | An in-process dict dies with the API process, losing the handle to a job that is still running and billing                                                                                                                                                                                                                                          |
+| `timeout=86400`                                     | Modal's default is 300 s, which would silently kill every real MaxQuant run a few minutes in                                                                                                                                                                                                                                                        |
+| Raw files on container-local `/tmp`, not the Volume | 24 × 1–5 GB is pure scratch; `vol.commit()` on 120 GB costs minutes and real money. Only logs and `combined/txt/` are committed                                                                                                                                                                                                                     |
+| `log` read from a shipped `run.log`                 | Modal exposes no SDK call for a spawned function's stdout — `FunctionCall` has no `.logs()`, and `uvx modal app logs` is CLI-only. A background loop ships the log to the Volume instead                                                                                                                                                            |
+| Bearer token, not proxy auth                        | Modal's proxy auth needs headers the existing client does not send (see [Security](#security--the-endpoint-is-public-by-default))                                                                                                                                                                                                                   |
+| `label="pridemap-mq"` on the ASGI app               | Makes the URL deterministic and independent of the Python function name. Labels are lowercase alphanumeric plus hyphens (`pridemap_mq` is invalid) and workspace-scoped, so a second app reusing the label conflicts at deploy time. The app name (`modal.App("pridemap-maxquant")`) is separate — the **label** is what appears in `MQ_SERVER_URL` |
+| Stock biocontainers image                           | Modal is x86-64, so the arm64 assembly-rebuild path at `api/omics.py:1242–1333` is never invoked, and Bruker data needs no emulation                                                                                                                                                                                                                |
+| `MAXQUANT_CMD=maxquant`                             | Makes `run_all.sh` take its native branch (`api/omics.py:1706–1708`) and skip Docker entirely — there is no Docker daemon inside the container                                                                                                                                                                                                      |
+
 
 ---
+
+
 
 # Implementation plan
 
@@ -344,6 +372,8 @@ jobs   = modal.Dict.from_name("pridemap-jobs",  create_if_missing=True)
 secret = modal.Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
 ```
 
+
+
 ### Image
 
 ```python
@@ -355,6 +385,8 @@ image = (
     .run_commands("which maxquant")   # fail at BUILD time, not after a 2-min cold start
 )
 ```
+
+
 
 ### Worker
 
@@ -372,30 +404,34 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str: ...
 costing minutes and real money for pure scratch.
 
 - Unpack the kit and run the pipeline under container-local `/tmp/<job_id>/`,
-  with `PRIDEMAP_RAW_DIR=/tmp/<job_id>/cache`. Discarded on container exit, no
-  commit cost. This also removes the `ln -sf` symlink question entirely.
+with `PRIDEMAP_RAW_DIR=/tmp/<job_id>/cache`. Discarded on container exit, no
+commit cost. This also removes the `ln -sf` symlink question entirely.
 - Check Modal's ephemeral-disk allowance covers the dataset; raise the
-  `ephemeral_disk` parameter if a large deposition exceeds it.
+`ephemeral_disk` parameter if a large deposition exceeds it.
 - The Volume holds **only** `/data/<job_id>/`: `progress.jsonl`, `run.log`, and
-  the final `combined/txt/proteinGroups.txt`.
+the final `combined/txt/proteinGroups.txt`.
 - A background shipper loop copies `progress.jsonl` + `run.log` into
-  `/data/<job_id>/` and calls `vol.commit()` every ~15 s, so `/status` has
-  something live to return. Final commit after `combined/txt/` is copied across.
+`/data/<job_id>/` and calls `vol.commit()` every ~15 s, so `/status` has
+something live to return. Final commit after `combined/txt/` is copied across.
+
+
 
 ### Endpoints
 
 ASGI app decorated `@modal.asgi_app(label="pridemap-mq")`, with
 `secrets=[secret]` so `MQ_TOKEN` is injected.
 
-| Endpoint | Behaviour |
-|---|---|
-| `GET /health` | `{"ok": true}` — satisfies the client's health gate |
-| `POST /run` | multipart field `kit`; **reject bad bearer token before any work**; `run_maxquant.spawn(...)`; write `jobs[accession] = call.object_id` **before** responding; return `{"job_id": ...}` |
-| `GET /status/{job_id}` | see below. Returns `{status, log}` |
-| `GET /results/{job_id}` | `vol.reload()`, stream `combined/txt/proteinGroups.txt` |
-| `DELETE /job/{job_id}` | cancel if live, drop the `jobs` entry, remove the Volume dir. Reports `{deleted, cancelled, problems}` — a swallowed cancel error here tells the caller a 16-core job stopped when it did not |
-| `GET /jobs` | all known accession→job_id with live status, so a runaway job can be found and killed over HTTP without Modal credentials |
-| `GET /jobs/{accession}` | *(Phase 2)* read `jobs`, return the job_id |
+
+| Endpoint                | Behaviour                                                                                                                                                                                     |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`           | `{"ok": true}` — satisfies the client's health gate                                                                                                                                           |
+| `POST /run`             | multipart field `kit`; **reject bad bearer token before any work**; `run_maxquant.spawn(...)`; write `jobs[accession] = call.object_id` **before** responding; return `{"job_id": ...}`       |
+| `GET /status/{job_id}`  | see below. Returns `{status, log}`                                                                                                                                                            |
+| `GET /results/{job_id}` | `vol.reload()`, stream `combined/txt/proteinGroups.txt`                                                                                                                                       |
+| `DELETE /job/{job_id}`  | cancel if live, drop the `jobs` entry, remove the Volume dir. Reports `{deleted, cancelled, problems}` — a swallowed cancel error here tells the caller a 16-core job stopped when it did not |
+| `GET /jobs`             | all known accession→job_id with live status, so a runaway job can be found and killed over HTTP without Modal credentials                                                                     |
+| `GET /jobs/{accession}` | *(Phase 2)* read `jobs`, return the job_id                                                                                                                                                    |
+
 
 **Status polling must order its excepts correctly.**
 `modal.FunctionCall.from_id(job_id).get(timeout=0)` is the right non-blocking
@@ -422,24 +458,26 @@ block **per file**, run top to bottom. 24 files = 24 sequential transfers.
 **Change:** emit instead
 
 1. a `fetch_one()` shell function carrying the existing `have`-check,
-   `curl -C -` resume and `ln -sf` steps unchanged,
+  `curl -C -` resume and `ln -sf` steps unchanged,
 2. a tab-separated manifest heredoc of `name<TAB>size<TAB>url`,
 3. a wave loop running `${PRIDEMAP_DOWNLOAD_JOBS:-4}` at a time.
+
+
 
 ### Design obligations
 
 - **macOS ships bash 3.2**, so `wait -n` is unavailable. Use the portable wave
-  pattern: launch N background jobs, `wait`, launch the next N.
+pattern: launch N background jobs, `wait`, launch the next N.
 - **Error reporting is the trap.** `set -euo pipefail` is already on
-  (line 1208). A bare `wait` after a failed background job aborts the script
-  with no indication of *which* file failed. The portable fix: record each PID
-  alongside its filename, run the blocking `wait || true` so `set -e` does not
-  fire, then iterate `wait "$pid"` per recorded PID and report the filename of
-  any non-zero one. This boilerplate is mandatory, not optional.
+(line 1208). A bare `wait` after a failed background job aborts the script
+with no indication of *which* file failed. The portable fix: record each PID
+alongside its filename, run the blocking `wait || true` so `set -e` does not
+fire, then iterate `wait "$pid"` per recorded PID and report the filename of
+any non-zero one. This boilerplate is mandatory, not optional.
 - **Cache semantics must not regress:** complete files still skip, partial files
-  still resume via `curl -C -`.
+still resume via `curl -C -`.
 - `ln -sf` concurrency is safe — each call targets a distinct filename in a
-  pre-existing directory, and `ln -sf` is atomic per filename.
+pre-existing directory, and `ln -sf` is atomic per filename.
 
 **Value standalone:** download wall-clock drops roughly 4× wherever bandwidth
 allows — on the laptop today, and more so on Modal's uplink after Phase 1a.
@@ -452,20 +490,24 @@ orphan-cost window above.
 
 - Add `GET /jobs/{accession}` to `modal_runner.py`, reading `jobs`.
 - `pipeline_remote_active()` (`api/omics.py:2368`) currently returns
-  `{"job_id": None}` the moment the in-process dict misses. Make it fall through
-  to that endpoint before giving up. The in-process dict stays a fast cache; the
-  Modal Dict becomes the source of truth.
+`{"job_id": None}` the moment the in-process dict misses. Make it fall through
+to that endpoint before giving up. The in-process dict stays a fast cache; the
+Modal Dict becomes the source of truth.
+
+
 
 ## Phase 3 — Motorbike: right-size the box
 
 Only after 1a/1b/2 run on real data.
 
 - `cpu=16, memory=65536` are starting guesses. Read peak usage from
-  `uvx modal app logs pridemap-maxquant` and tune.
+`uvx modal app logs pridemap-maxquant` and tune.
 - Set `<numThreads>` in `mqpar.xml` to match the Modal `cpu` value — a mismatch
-  means paying for cores MaxQuant never uses.
+means paying for cores MaxQuant never uses.
 - `keep_warm=1` removes the 2–5 min cold start if demo reliability outweighs
-  cost. Note it bills continuously.
+cost. Note it bills continuously.
+
+
 
 ## Explicitly cut
 
@@ -481,12 +523,14 @@ independent, but MaxQuant 2.0.3.0 exposes no entry point for it.
 
 ## Files to change
 
-| File | Phase | Change |
-|---|---|---|
-| `api/modal_runner.py` | 1a | New. Modal app, worker, `/health` `/run` `/status` `/results` `/job` |
-| `api/omics.py` `_download_sh()` ~1221 | 1b | Sequential curl loop → N-way parallel wave |
-| `api/modal_runner.py` | 2 | Add `GET /jobs/{accession}` |
-| `api/omics.py` `pipeline_remote_active()` ~2368 | 2 | Fall back to Modal Dict on cache miss |
+
+| File                                            | Phase | Change                                                               |
+| ----------------------------------------------- | ----- | -------------------------------------------------------------------- |
+| `api/modal_runner.py`                           | 1a    | New. Modal app, worker, `/health` `/run` `/status` `/results` `/job` |
+| `api/omics.py` `_download_sh()` ~1221           | 1b    | Sequential curl loop → N-way parallel wave                           |
+| `api/modal_runner.py`                           | 2     | Add `GET /jobs/{accession}`                                          |
+| `api/omics.py` `pipeline_remote_active()` ~2368 | 2     | Fall back to Modal Dict on cache miss                                |
+
 
 No frontend changes in any phase.
 
@@ -494,8 +538,8 @@ No frontend changes in any phase.
 
 **Before deploying anything**
 
-0. Ground the `MAXQUANT_CMD=maxquant` assumption:
-   `docker run --rm quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1 which maxquant`
+1. Ground the `MAXQUANT_CMD=maxquant` assumption:
+  `docker run --rm quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1 which maxquant`
 
 **Phase 1a**
 
@@ -504,33 +548,34 @@ No frontend changes in any phase.
 3. Unauthenticated `POST /run` is rejected before any work starts.
 4. Run the 2-sample comparison via the remote toggle.
 5. `uvx modal app logs pridemap-maxquant` shows the container pulling from PRIDE FTP directly; your
-   machine shows no multi-GB egress.
+  machine shows no multi-GB egress.
 6. Close the browser tab mid-run, reopen — progress resumes, and `log` shows
-   live `run.log` text (proves the shipper loop works).
+  live `run.log` text (proves the shipper loop works).
 7. `proteinGroups.txt` downloads and loads into the Analyse view.
 8. `uvx modal volume ls pridemap-runs` shows only logs plus `combined/txt/` — no raw files.
 
 **Phase 1b**
 
-9. Run `download_raw.sh` on a multi-file dataset; confirm 4 concurrent `curl`
-   processes and a ~4× drop in the `download` stage `seconds` in `progress.jsonl`.
-10. Re-run: cached files skip, no re-download.
-11. Interrupt mid-download and re-run: partial files resume, not restart.
-12. Point one manifest URL at a 404; confirm the error **names that file**.
+1. Run `download_raw.sh` on a multi-file dataset; confirm 4 concurrent `curl`
+  processes and a ~4× drop in the `download` stage `seconds` in `progress.jsonl`.
+2. Re-run: cached files skip, no re-download.
+3. Interrupt mid-download and re-run: partial files resume, not restart.
+4. Point one manifest URL at a 404; confirm the error **names that file**.
 
 **Phase 2**
 
-13. Start a run, kill the local API process entirely (simulated shutdown).
-14. Restart it, open the dataset — the run is rediscovered via the Modal Dict
-    and results are fetchable.
+1. Start a run, kill the local API process entirely (simulated shutdown).
+2. Restart it, open the dataset — the run is rediscovered via the Modal Dict
+  and results are fetchable.
 
 **Regression (all phases)**
 
-15. Unset `MQ_SERVER_URL`; the local Docker path via `POST /pipeline/start`
-    still works unchanged.
+1. Unset `MQ_SERVER_URL`; the local Docker path via `POST /pipeline/start`
+  still works unchanged.
 
 **Correctness guard**
 
-16. Run the same comparison locally and on Modal; `proteinGroups.txt` LFQ
-    intensities must match. Divergence means the Modal path altered the search,
+1. Run the same comparison locally and on Modal; `proteinGroups.txt` LFQ
+  intensities must match. Divergence means the Modal path altered the search,
     not just where it ran.
+
