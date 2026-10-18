@@ -294,6 +294,30 @@ def test_experiment_count_matches_run_count():
         assert _children(root, tag) == len(runs), f"<{tag}> is not one entry per run"
 
 
+def test_use_dot_net_core_is_true():
+    """Scenario: MaxQuant uses the dotnet runtime path, not the Windows-compat quoted path.
+
+    Slice: mqpar contract — useDotNetCore.
+
+    Given any deposition, when the config is generated, then useDotNetCore is True.
+    Without it, QueueingSystem.WorkDispatcher.GetCommandFilename() wraps the subprocess path in
+    literal " chars for Windows compatibility: execve receives '"/opt/maxquant/MaxQuantTask.exe"'
+    with embedded quotes, which is not a valid path on Linux — ENOENT. The SDK image also requires
+    this setting so MaxQuant uses 'dotnet MaxQuantTaskCore.dll' rather than the .exe path.
+    """
+    ### Given
+    root = _generated()
+
+    ### When
+    val = _text(root, "useDotNetCore")
+
+    ### Then
+    assert val == "True", (
+        "<useDotNetCore> must be True; False or absent causes ENOENT on Linux because "
+        "GetCommandFilename() wraps the subprocess path in literal quotes"
+    )
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
