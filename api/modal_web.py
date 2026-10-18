@@ -56,6 +56,7 @@ class Backend(Protocol):
     def job_status(self, job_id: str) -> str: ...
     def job_log(self, job_id: str) -> str: ...
     def job_progress(self, job_id: str) -> list[dict]: ...
+    def job_cpu(self, job_id: str) -> dict | None: ...
     def results_path(self, job_id: str) -> pathlib.Path | None: ...
     def delete_job(self, job_id: str) -> dict: ...
     def list_jobs(self) -> list[tuple[str, str]]: ...
@@ -106,10 +107,16 @@ def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = 
         # `progress` carries run_all.sh's own stage events, which is what lets the caller show
         # stages, elapsed time and ETA for a remote job. A backend that cannot read them yields [],
         # and the caller distinguishes that from "no stage has started" — see pipeline_remote_status.
+        # `cpu` is the search container's own CPU/memory measurement, or null when there is nothing
+        # measured yet. It answers "is MaxQuant using the cores we paid for" from the container
+        # rather than from what we asked for, and is what the card's CPU line draws. A backend
+        # without the method is a server deployed before the readout existed — reported as null,
+        # same as "not measured", because both mean the card has nothing to show.
         return {
             "status": backend.job_status(job_id),
             "log": backend.job_log(job_id),
             "progress": backend.job_progress(job_id),
+            "cpu": getattr(backend, "job_cpu", lambda _: None)(job_id),
         }
 
     @api.get("/results/{job_id}")
