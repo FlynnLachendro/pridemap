@@ -2343,6 +2343,21 @@ def _mq_auth_headers() -> dict:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+def _mq_upstream_error(url: str, status: int, body: str) -> HTTPException:
+    """Relay a remote-server error together with its provenance.
+
+    `HTTPException(status, raw_body)` nests the remote JSON inside this API's own `detail` string,
+    producing `{"detail": "{\\"detail\\": [...]}"}`. The caller then has to decode twice, and nothing
+    in the payload says the failure came from the remote server rather than from this API — which is
+    how a remote 422 was read as "the local API is down" for several rounds on 2026-10-18.
+    """
+    try:
+        upstream = json.loads(body)
+    except ValueError:
+        upstream = body[:2000]
+    return HTTPException(status, {"source": url, "status": status, "upstream": upstream})
+
+
 def _mq_health_check(base_url: str, attempt_timeout: int = 10) -> dict:
     """Probe GET {base_url}/health once. Returns {ok, status_code, detail}."""
     url = f"{base_url}/health"
@@ -2554,7 +2569,7 @@ def pipeline_remote_start(accession: str, runs: str = ""):
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
         logger.error("pipeline_remote_start  HTTP %s from %s/run: %r", e.code, base_url, body_text[:300])
-        raise HTTPException(e.code, body_text)
+        raise _mq_upstream_error(f"{base_url}/run", e.code, body_text)
     except TimeoutError as e:
         logger.error("pipeline_remote_start  timeout after 60 s calling %s/run: %s", base_url, e)
         raise HTTPException(504, f"remote MQ server timed out (60 s): {e}")
@@ -2578,7 +2593,7 @@ def pipeline_remote_status(accession: str, job_id: str):
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
         logger.error("pipeline_remote_status  HTTP %s from %s: %r", e.code, url, body_text[:300])
-        raise HTTPException(e.code, body_text)
+        raise _mq_upstream_error(url, e.code, body_text)
     except TimeoutError as e:
         logger.error("pipeline_remote_status  timeout after 15 s calling %s: %s", url, e)
         raise HTTPException(504, f"remote MQ server timed out polling status (15 s): {e}")
@@ -2603,7 +2618,7 @@ def pipeline_remote_results(accession: str, job_id: str):
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
         logger.error("pipeline_remote_results  HTTP %s from %s: %r", e.code, url, body_text[:300])
-        raise HTTPException(e.code, body_text)
+        raise _mq_upstream_error(url, e.code, body_text)
     except TimeoutError as e:
         logger.error("pipeline_remote_results  timeout after 120 s calling %s: %s", url, e)
         raise HTTPException(504, f"remote MQ server timed out fetching results (120 s): {e}")
@@ -2622,6 +2637,6 @@ def pipeline_remote_delete(accession: str, job_id: str):
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, e.read().decode(errors="replace"))
+        raise _mq_upstream_error(f"{base_url}/job/{job_id}", e.code, e.read().decode(errors="replace"))
     except Exception as e:
         raise HTTPException(502, f"remote MQ server unreachable: {e}")

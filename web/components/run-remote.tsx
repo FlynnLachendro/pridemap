@@ -2,7 +2,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API } from "@/lib/api";
 
-type RemoteJob = { status: "idle" | "submitting" | "running" | "done" | "error"; job_id: string | null; log: string; err: string | null };
+// `failure` separates "the API never answered" from "the API answered with an error". Conflating
+// them told the user to restart a local server that was running fine, while the real fault was a
+// 422 relayed from the remote Modal server.
+type RemoteJob = {
+  status: "idle" | "submitting" | "running" | "done" | "error";
+  job_id: string | null;
+  log: string;
+  err: string | null;
+  failure?: "network" | "server";
+};
+
+/** A one-line description of an error response, unwrapping the API's relayed upstream detail. */
+async function describeHttpError(r: Response): Promise<string> {
+  const text = await r.text();
+  try {
+    const detail = JSON.parse(text)?.detail;
+    if (detail && typeof detail === "object" && detail.status) {
+      const upstream = typeof detail.upstream === "string" ? detail.upstream : JSON.stringify(detail.upstream);
+      return `HTTP ${r.status} — upstream ${detail.source ?? "remote server"} returned ${detail.status}: ${upstream}`;
+    }
+    return `HTTP ${r.status} — ${typeof detail === "string" ? detail : text.slice(0, 500)}`;
+  } catch {
+    return `HTTP ${r.status} — ${text.slice(0, 500)}`;
+  }
+}
 
 export function RunRemote({ accession, runs, engineLabel = "search engine", outputTable = "results.txt", onDone }: { accession: string; runs?: string[]; engineLabel?: string; outputTable?: string; onDone?: (jobId: string) => void }) {
   const [job, setJob] = useState<RemoteJob>({ status: "idle", job_id: null, log: "", err: null });
@@ -80,10 +104,16 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     try {
       const runsParam = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
       const r = await fetch(`${API}/dataset/${accession}/pipeline/remote${runsParam}`, { method: "POST" });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) {
+        setJob({ status: "error", job_id: null, log: "", err: await describeHttpError(r), failure: "server" });
+        return;
+      }
       const { job_id } = await r.json();
       setJob({ status: "running", job_id, log: "", err: null });
-    } catch (e) { setJob({ status: "error", job_id: null, log: "", err: String(e) }); }
+    } catch (e) {
+      // fetch() rejects only on transport failure — server down, DNS, CORS, abort.
+      setJob({ status: "error", job_id: null, log: "", err: String(e), failure: "network" });
+    }
   };
 
   const stop = async () => {
@@ -201,8 +231,15 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
                 `Dataset : ${accession}`,
                 runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
                 "",
-                "Submission failed — could not reach the API.",
-                "Check that the local API server is running (uv run api/main.py).",
+                ...(job.failure === "server"
+                  ? [
+                      "Submission failed — the API answered with an error.",
+                      "This is not a connectivity problem; the detail below names the layer that failed.",
+                    ]
+                  : [
+                      `Submission failed — could not reach the API at ${API}.`,
+                      "Check that the local API server is running (uv run api/main.py).",
+                    ]),
                 job.err ? `Error   : ${job.err}` : "",
               ].filter(Boolean).join("\n")
             : [
