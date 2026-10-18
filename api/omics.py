@@ -1218,21 +1218,71 @@ def _download_sh(ctx: dict) -> str:
              '  [ "$n" = "$2" ]',
              "}",
              ""]
+    # fetch_one <name> <size> <url> — checks cache, resumes via curl -C -, then links into raw/.
+    lines += [
+        "fetch_one() {",
+        "  local name=$1 size=$2 url=$3",
+        '  if have "$name" "$size"; then',
+        '    echo "  ✓ $name already downloaded"',
+        "  else",
+        '    echo "  ↓ $name"',
+        '    curl -C - -o "$CACHE/$name" "$url"',
+        "  fi",
+        '  ln -sf "$CACHE/$name" "raw/$name"',
+        "}",
+        "",
+    ]
+
+    # Build manifest: one entry per file that has an FTP URL.
+    manifest_rows = []
     for f in ctx["raw"]:
         if not f.get("ftp"):
             continue
         name = pathlib.PurePath(f.get("file_name") or "").name
         size = f.get("size_bytes") or ""
-        lines += [
-            f'if have "{name}" "{size}"; then',
-            f'  echo "  ✓ {name} already downloaded"',
-            "else",
-            f'  echo "  ↓ {name}"',
-            f'  curl -C - -o "$CACHE/{name}" "{f["ftp"]}"',
-            "fi",
-            f'ln -sf "$CACHE/{name}" "raw/{name}"',
-        ]
-    lines.append("")
+        manifest_rows.append((name, size, f["ftp"]))
+
+    if not manifest_rows:
+        lines.append("")
+        return "\n".join(lines)
+
+    # Emit a tab-separated manifest and a wave loop (PRIDEMAP_DOWNLOAD_JOBS-way parallel,
+    # default 4). Portable bash 3.2 (macOS): no wait -n; use fixed-size waves instead.
+    # Error reporting: record each PID alongside its filename so a failed download names itself.
+    lines += [
+        "# Manifest: name<TAB>size<TAB>url",
+        "MANIFEST=(",
+    ]
+    for name, size, url in manifest_rows:
+        lines.append(f'  "{name}\t{size}\t{url}"')
+    lines += [
+        ")",
+        "",
+        'N="${PRIDEMAP_DOWNLOAD_JOBS:-4}"',
+        "wave_pids=()   # parallel: PID",
+        "wave_names=()  # parallel: matching filename for error messages",
+        "",
+        "flush_wave() {",
+        "  local i ok=0",
+        "  for i in \"${!wave_pids[@]}\"; do",
+        "    wait \"${wave_pids[$i]}\" || { echo \"ERROR: download failed for ${wave_names[$i]}\"; ok=1; }",
+        "  done",
+        "  wave_pids=(); wave_names=()",
+        "  return $ok",
+        "}",
+        "",
+        "for entry in \"${MANIFEST[@]}\"; do",
+        "  IFS=$'\\t' read -r _name _size _url <<< \"$entry\"",
+        "  fetch_one \"$_name\" \"$_size\" \"$_url\" &",
+        "  wave_pids+=(\"$!\")",
+        "  wave_names+=(\"$_name\")",
+        "  if [ \"${#wave_pids[@]}\" -ge \"$N\" ]; then",
+        "    flush_wave || exit 1",
+        "  fi",
+        "done",
+        "[ \"${#wave_pids[@]}\" -gt 0 ] && { flush_wave || exit 1; }",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -2367,10 +2417,30 @@ def local_mq_info():
 
 @router.get("/dataset/{accession}/pipeline/remote/active")
 def pipeline_remote_active(accession: str):
-    """Return the active job for this accession (if any) so the UI can resume after a page reload."""
+    """Return the active job for this accession (if any) so the UI can resume after a page reload.
+
+    Phase 2: if the in-process cache misses (e.g. after an API restart), fall back to the Modal
+    Dict via GET /jobs/{accession} on the remote server so the job is still discoverable.
+    """
     job_id = _active_remote_jobs.get(accession)
+
+    if not job_id:
+        # Phase 2 fallback: ask the remote server's durable Dict.
+        modal_url = os.environ.get("MQ_SERVER_URL", "").strip().rstrip("/")
+        if modal_url:
+            try:
+                req = urllib.request.Request(f"{modal_url}/jobs/{accession}", headers=_mq_auth_headers())
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
+                job_id = data.get("job_id")
+                if job_id:
+                    _active_remote_jobs[accession] = job_id  # repopulate in-process cache
+            except Exception:
+                pass
+
     if not job_id:
         return {"job_id": None, "status": None}
+
     base_url = _mq_remote_url()
     req = urllib.request.Request(f"{base_url}/status/{job_id}", headers=_mq_auth_headers())
     try:
