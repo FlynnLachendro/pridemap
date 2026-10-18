@@ -44,10 +44,25 @@ WEB_PORT=$(find_free_port 3000)
 
 if [ "$API_PORT" != "8000" ]; then
   echo "⚠️  Port 8000 is in use — API will use :$API_PORT instead"
+  echo "   (:8000 is held by something else, so anything still pointing there is not this API)"
 fi
 if [ "$WEB_PORT" != "3000" ]; then
   echo "⚠️  Port 3000 is in use — Web UI will use :$WEB_PORT instead"
 fi
+
+# 2b. Record the resolved API URL for the web app.
+# web/lib/api.ts falls back to http://localhost:8000 when NEXT_PUBLIC_API_URL is unset, so a web
+# server started on its own — plain `npm run dev` in web/, not this script — calls whatever holds
+# :8000, which is a foreign process whenever find_free_port moved the API. Next.js reads
+# web/.env.local automatically, so recording the resolved URL there keeps both start paths in
+# agreement. An already-exported NEXT_PUBLIC_API_URL wins, so a deliberate override still stands.
+API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:$API_PORT}
+if [ -f web/.env.local ]; then
+  grep -v '^NEXT_PUBLIC_API_URL=' web/.env.local > web/.env.local.tmp || true
+  mv web/.env.local.tmp web/.env.local
+fi
+echo "NEXT_PUBLIC_API_URL=$API_URL" >> web/.env.local
+echo "📝 web/.env.local → NEXT_PUBLIC_API_URL=$API_URL"
 
 # 3. API
 echo ""
@@ -64,7 +79,7 @@ echo "🌐 Starting web UI on http://localhost:$WEB_PORT ..."
     npm i
     echo "✅ npm install complete"
   fi
-  exec env PORT=$WEB_PORT NEXT_PUBLIC_API_URL=http://localhost:$API_PORT npm run dev -- --port $WEB_PORT
+  exec env PORT=$WEB_PORT NEXT_PUBLIC_API_URL=$API_URL npm run dev -- --port $WEB_PORT
 ) &
 WEB=$!
 
