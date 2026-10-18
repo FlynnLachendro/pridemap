@@ -385,6 +385,17 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
             zf.extractall(work_dir)
         _log("kit unpacked")
 
+        # Log container CPUs vs mqpar numThreads so we can verify they match.
+        _log(f"container CPUs available: {os.cpu_count()}")
+        mqpar_files = list(work_dir.rglob("mqpar.xml"))
+        if mqpar_files:
+            import re as _re
+            mqpar_text = mqpar_files[0].read_text(errors="replace")
+            m = _re.search(r"<numThreads>(\d+)</numThreads>", mqpar_text)
+            _log(f"mqpar.xml numThreads: {m.group(1) if m else 'not found'} (file: {mqpar_files[0].relative_to(work_dir)})")
+        else:
+            _log("mqpar.xml: not found in kit")
+
         run_script = work_dir / "run_all.sh"
         if not run_script.exists():
             raise FileNotFoundError("run_all.sh not found in kit")
