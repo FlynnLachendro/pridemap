@@ -263,11 +263,25 @@ def _annot_cache_dir() -> pathlib.Path:
     return p
 
 
+def pride_https_url(ftp: str) -> str:
+    """An EBI archive path served over HTTPS instead of FTP.
+
+    EBI serves the same path under https:// with byte-range support, so `curl -C -` still resumes.
+    The index records ftp:// URLs, but plain FTP is unusable from a Modal container: a two-run
+    download sat for 38 minutes and fetched 0 bytes while the stage still reported success. HTTPS
+    also gives `curl -f` something to act on — a stalled FTP control channel has no status code.
+
+    Single owner of the rewrite, so the raw-file manifest and the annotation fetch cannot disagree
+    about which transport is used.
+    """
+    return ftp.replace("ftp://", "https://", 1)
+
+
 def _fetch_annot_bytes(ftp: str | None) -> bytes | None:
-    """Fetch annotation file bytes, caching locally so EBI FTP is only hit once per file."""
+    """Fetch annotation file bytes, caching locally so EBI is only hit once per file."""
     if not ftp:
         return None
-    url = ftp.replace("ftp://", "https://", 1)
+    url = pride_https_url(ftp)
     # Stable cache key: last two path components (accession/filename) joined with __
     parts = url.rstrip("/").split("/")
     cache_name = "__".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
@@ -1244,7 +1258,7 @@ def _download_sh(ctx: dict) -> str:
             continue
         name = pathlib.PurePath(f.get("file_name") or "").name
         size = f.get("size_bytes") or ""
-        manifest_rows.append((name, size, f["ftp"]))
+        manifest_rows.append((name, size, pride_https_url(f["ftp"])))
 
     if not manifest_rows:
         lines.append("")

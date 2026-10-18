@@ -39,3 +39,5 @@ fasta/
 reanalysis/
 # Pre-commit hook cache: records the staged-file hash of the last passing run.
 .gate-cache/
+.api.pid
+.api.log
