@@ -54,33 +54,61 @@ MaxQuant ships as managed .NET (CIL) assemblies plus five native x86-64 Bruker l
 | Host | Behaviour |
 |---|---|
 | **x86-64 / amd64** (Linux or macOS Intel) | Uses the published Bioconda image `quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1` directly |
-| **arm64 / Apple Silicon (M1/M2/M3)** | `preflight.sh` builds `pridemap/maxquant:2.0.3.0-native` once: copies the .NET assemblies out of the amd64 image without executing them, then wraps them in the multi-arch `mono:6.12` base. Mono's JIT runs in its native arm64 configuration, which is the path Mono is tested in. The one-time build takes a few minutes. |
-| **Bruker raw data** | Bruker's vendor libraries (`libtimsdata.so`, `libbaf2sql_c.so`) are x86-64 only. `preflight.sh` forces the amd64 image and Docker's QEMU emulation on arm64 hosts. Emulation adds time but is the only option. |
+| **arm64 / Apple Silicon (M1/M2/M3), non-Bruker data** | `preflight.sh` builds `pridemap/maxquant:2.0.3.0-native` once using `mcr.microsoft.com/dotnet/sdk:3.1-bullseye` as the base. The container runs as `linux/amd64` under Docker's QEMU emulation; this is required for three reasons described below. The one-time build takes a few minutes. |
+| **Bruker raw data (any host)** | Bruker's vendor libraries (`libtimsdata.so`, `libbaf2sql_c.so`) are x86-64 only — QEMU emulation is always used regardless of host architecture. |
 
-### Why not emulation for arm64 non-Bruker?
+### Why the dotnet SDK image is required on arm64 (three root causes)
 
-Mono's JIT aborts in its own trampolines when running under QEMU (`SIGABRT: Assertion at …`). The
-native rebuild avoids this; the amd64 image is only kept as a source of the .NET assemblies, not
-executed on the arm64 host.
+Three independent bugs surface when running MaxQuant in Docker on Apple Silicon. The generated
+`preflight.sh` + `run_all.sh` handle all three automatically.
+
+**1. `DotNetCore31Installed()` check** — MaxQuant parses `dotnet --info` stdout looking for a line
+that starts with `"3.1"` (an installed SDK). The runtime-only image (`dotnet/runtime:3.1`) has no
+SDK lines and the check fails with *"Please install .NET Core 3.1 SDK"*. A wrapper script at
+`/usr/bin/dotnet` is bypassed because dotnet resolves its own host binary path internally (not via
+`PATH`). Fix: use `mcr.microsoft.com/dotnet/sdk:3.1-bullseye`, which natively outputs
+`3.1.426 [/usr/share/dotnet/sdk]`.
+
+**2. Worker subprocess ENOENT** — `QueueingSystem.WorkDispatcher.GetCommandFilename()` wraps the
+executable path in literal `"` characters for Windows compatibility. On Linux `execve` receives
+`""/opt/maxquant/MaxQuantTask.exe""` → ENOENT. Fix: `<useDotNetCore>True</useDotNetCore>` in
+`mqpar.xml`; MaxQuant then launches workers as `dotnet MaxQuantTaskCore.dll <args>` with no embedded
+quotes.
+
+**3. ThermoRawFileReader symlink bug** — `RawFileReaderAdapter.FileFactory(path)` sets
+`IsError=True` when given a symlink path, causing `SelectInstrument` to throw
+`ArgumentOutOfRangeException`, which surfaces as *"NoSelectedDeviceException: RunHeaderEx"*. Fix:
+`run_all.sh` resolves each symlink in `raw/` to its real path and rewrites the paths in
+`mqpar.docker.xml` before running the container; the parent directory of the real file is
+bind-mounted into the container.
+
+### Why `3.1-bullseye` and not `3.1-buster` or `3.1-bullseye-slim`
+
+- `3.1-bullseye-slim` does not exist in the Microsoft registry.
+- `sdk:3.1` (Debian Buster / 10) causes ThermoRawFileReader to fail with a *NoSelectedDeviceException* — only Debian Bullseye (11) works.
+- `sdk:3.1-bullseye` is the correct tag.
 
 ## Manual image management
 
 ```bash
-# Pull the amd64 image
+# Pull the amd64 image (source of .NET assemblies)
 docker pull quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1
 
-# Verify it runs (amd64 host or QEMU)
-docker run --rm quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1 maxquant --version
+# Build the native arm64-compatible image by hand (normally done by preflight.sh)
+# Requires the .NET assemblies copied to bin/ first — see preflight.sh for the extract step
+docker build --platform linux/amd64 -t pridemap/maxquant:2.0.3.0-native .
 
-# On arm64: the generated preflight.sh builds the native image automatically.
-# To do it by hand, run preflight.sh once from any downloaded kit.
+# Verify it runs
+docker run --rm --platform linux/amd64 pridemap/maxquant:2.0.3.0-native maxquant --version
 ```
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `SIGABRT: Assertion at … should not be reached` | Running the amd64 image under QEMU on arm64; let `preflight.sh` build the native image instead |
+| `Please install .NET Core 3.1 SDK` | Image is missing the SDK (runtime-only). Rebuild with `mcr.microsoft.com/dotnet/sdk:3.1-bullseye` as the base. |
+| `NoSelectedDeviceException: RunHeaderEx` | ThermoRawFileReader received a symlink path. Re-run `preflight.sh` — it rebuilds the image and ensures `run_all.sh` resolves symlinks. Alternatively run from the kit directory so `run_all.sh` handles path rewriting. |
+| `ENOENT` on MaxQuant worker launch | `<useDotNetCore>` is missing or false in `mqpar.xml`. The generated kit always includes it; re-download the kit if the error persists. |
 | `Given path for proc folder does not exist` | Run from inside the kit directory (`cd PXD012345_kit && bash run_all.sh`); `run_all.sh` substitutes absolute paths at startup |
 | Preflight: `MaxQuant not found` | Docker pulled fine but the image tag mismatched; re-run `preflight.sh` — it re-provisions |
 | Disk full mid-run | `run_all.sh` resumes; free space and re-run it |
