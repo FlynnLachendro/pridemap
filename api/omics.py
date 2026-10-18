@@ -2361,6 +2361,25 @@ def _mq_health_check(base_url: str, attempt_timeout: int = 10) -> dict:
         return {"ok": False, "status_code": None, "detail": str(e)}
 
 
+def _fetch_modal_logs(app_name: str = "pridemap-maxquant", tail: int = 30) -> str:
+    """Best-effort fetch of recent Modal container logs via the CLI.
+
+    Returns the last `tail` lines as a string, or empty string on any failure.
+    Never raises — diagnostic only.
+    """
+    import subprocess as _sp
+    try:
+        result = _sp.run(
+            ["uvx", "modal", "app", "logs", app_name, "--tail", str(tail)],
+            capture_output=True, text=True, timeout=15,
+        )
+        output = (result.stdout + result.stderr).strip()
+        return output if output else ""
+    except Exception as exc:
+        logger.debug("_fetch_modal_logs failed: %s", exc)
+        return ""
+
+
 def _mq_await_ready(
     base_url: str,
     wall_timeout: int = 120,
@@ -2376,27 +2395,36 @@ def _mq_await_ready(
     Use this at the start of every function that calls the Modal API.
     """
     import time as _time
-    deadline = _time.monotonic() + wall_timeout
+    start = _time.monotonic()
+    deadline = start + wall_timeout
     attempt = 0
     last_detail = ""
+    logger.info("mq_await_ready  starting  url=%s  budget=%ds", base_url, wall_timeout)
     while _time.monotonic() < deadline:
         attempt += 1
+        elapsed = int(_time.monotonic() - start)
         remaining = deadline - _time.monotonic()
         this_timeout = min(attempt_timeout, max(1, int(remaining)))
-        logger.info("mq_await_ready  attempt=%d  timeout=%ds", attempt, this_timeout)
+        logger.info("mq_await_ready  attempt=%d  elapsed=%ds  remaining=%ds  probe_timeout=%ds",
+                    attempt, elapsed, int(remaining), this_timeout)
         result = _mq_health_check(base_url, attempt_timeout=this_timeout)
         if result["ok"]:
-            logger.info("mq_await_ready  ready after %d attempt(s)", attempt)
+            logger.info("mq_await_ready  READY  attempt=%d  elapsed=%ds", attempt, int(_time.monotonic() - start))
             return
         last_detail = result["detail"]
+        logger.info("mq_await_ready  not ready yet  attempt=%d  detail=%r", attempt, last_detail[:80])
         # Don't sleep if we've already used the budget.
         sleep_for = min(poll_interval, max(0, deadline - _time.monotonic()))
         if sleep_for > 0:
             _time.sleep(sleep_for)
+    modal_logs = _fetch_modal_logs()
+    if modal_logs:
+        logger.error("mq_await_ready  TIMEOUT — Modal container logs:\n%s", modal_logs)
     raise HTTPException(
         503,
         f"Modal MQ server did not become ready within {wall_timeout}s "
-        f"(last error: {last_detail})",
+        f"(last error: {last_detail})"
+        + (f"\n\nModal container logs (last 30 lines):\n{modal_logs}" if modal_logs else ""),
     )
 
 
@@ -2497,11 +2525,13 @@ def pipeline_remote_active(accession: str):
 
 
 @router.post("/dataset/{accession}/pipeline/remote")
-def pipeline_remote_start(accession: str, request: Request, runs: str = ""):
+def pipeline_remote_start(accession: str, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
     _mq_await_ready(base_url)  # waits up to 120 s for Modal cold-start before uploading
-    kit_bytes, _ = search_kit(accession, _api_base(request), "", runs=parse_runs(runs))
+    # api_base is intentionally empty: Modal downloads raw files directly from PRIDE,
+    # not from the local API server which it cannot reach.
+    kit_bytes, _ = search_kit(accession, "", "", runs=parse_runs(runs))
     kit_kb = len(kit_bytes) / 1024
     logger.info("pipeline_remote_start  accession=%s  kit=%.1f KB  url=%s/run", accession, kit_kb, base_url)
     boundary = "PrideMapBoundary"
