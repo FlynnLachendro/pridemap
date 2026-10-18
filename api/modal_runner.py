@@ -199,7 +199,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
         # Pull the latest state of the raw-file cache so already-downloaded files are visible.
         # download_raw.sh's have() check then skips them; curl -C - resumes any partial files.
         _vol_sync("reload", raw_vol)
-        _log(f"raw cache: {RAW_CACHE_MOUNT} (reloaded)")
+        _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
 
         env = {
             **os.environ,

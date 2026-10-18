@@ -301,6 +301,88 @@ def test_stage_events_are_empty_before_the_first_stage_ships(tmp_path):
     assert events == []
 
 
+def test_vol_sync_swallows_any_exception():
+    """Scenario: _vol_sync is called when no Modal Volume is mounted (off-Modal or test env).
+
+    Slice: raw-file volume lifecycle.
+    Given a Volume-like object whose action raises an arbitrary exception,
+    When _vol_sync is called with it,
+    Then no exception propagates — the local filesystem is already coherent off Modal and a
+    raised exception here would abort the job rather than logging a soft warning.
+    """
+    ### Given
+    class _BrokenVolume:
+        def commit(self):
+            raise RuntimeError("no volume mounted")
+
+    ### When / Then (must not raise)
+    modal_runner._vol_sync("commit", _BrokenVolume())
+
+
+def test_vol_sync_calls_the_supplied_volume_not_the_default():
+    """Scenario: _vol_sync is called with an explicit Volume (e.g. raw_vol instead of vol).
+
+    Slice: raw-file volume lifecycle.
+    Given a tracked volume and the module-level vol replaced with a separate sentinel,
+    When _vol_sync is called with the tracked volume,
+    Then only the tracked volume's method is called — raw_vol commits must not land on vol.
+    """
+    ### Given
+    calls: list[str] = []
+
+    class _TrackedVolume:
+        def reload(self):
+            calls.append("reload")
+
+    ### When
+    modal_runner._vol_sync("reload", _TrackedVolume())
+
+    ### Then
+    assert calls == ["reload"]
+
+
+def test_vol_sync_falls_back_to_module_vol_when_none_supplied():
+    """Scenario: _vol_sync is called without an explicit Volume (the job-results vol path).
+
+    Slice: raw-file volume lifecycle.
+    Given the module-level vol is replaced with a tracked sentinel,
+    When _vol_sync is called with no volume argument,
+    Then the module-level vol's method is invoked — existing callers must not silently no-op.
+    """
+    ### Given
+    calls: list[str] = []
+
+    class _TrackedVol:
+        def commit(self):
+            calls.append("commit")
+
+    ### When
+    with mock.patch.object(modal_runner, "vol", _TrackedVol()):
+        modal_runner._vol_sync("commit")
+
+    ### Then
+    assert calls == ["commit"]
+
+
+def test_raw_cache_mount_is_a_persistent_path_not_a_tempdir():
+    """Scenario: the raw-file cache is pointed at the Modal Volume mount, not an ephemeral tempdir.
+
+    Slice: raw-file volume lifecycle.
+    Given the module constants for the two Volume mounts,
+    When they are inspected,
+    Then RAW_CACHE_MOUNT is a stable absolute path distinct from VOLUME_MOUNT, and neither is a
+    temp-directory prefix — the original regression was PRIDEMAP_RAW_DIR pointing at mkdtemp().
+    """
+    ### Given / When
+    raw = modal_runner.RAW_CACHE_MOUNT
+    data = modal_runner.VOLUME_MOUNT
+
+    ### Then
+    assert raw.startswith("/"), "must be an absolute path mountable by Modal"
+    assert not raw.startswith("/tmp"), "must not be an ephemeral tempdir — that was the regression"
+    assert raw != data, "raw-file cache and job-results volume must be separate mounts"
+
+
 if __name__ == "__main__":
     import pytest
 
