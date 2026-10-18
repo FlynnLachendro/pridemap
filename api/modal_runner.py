@@ -90,21 +90,23 @@ web_image = (
 
 # Heavy MaxQuant image for the compute worker.
 #
-# Uses the same SDK-based image as the local macOS Docker setup for exact parity.
-# The biocontainers image (quay.io/biocontainers/maxquant:2.0.3.0--py310hdfd78af_1) has .NET
-# runtime only; MaxQuant's DotNetCore31Installed() checks `dotnet --info` for a line starting
-# with "3.1" (an installed SDK). The runtime-only image has no such line and the run fails
-# immediately with "Please install .NET Core 3.1 SDK" — before mqpar.xml is even read.
-# mcr.microsoft.com/dotnet/sdk:3.1-bullseye (the base of pridemap/maxquant:2.0.3.0-native)
-# outputs "3.1.426 [/usr/share/dotnet/sdk]" which satisfies the check.
+# Built from docker/maxquant/Dockerfile (a multi-stage build) so Modal constructs the image
+# at deploy time without a separate registry push.  The Dockerfile replicates what
+# preflight.sh does locally: copies MaxQuant assemblies from the biocontainers image onto
+# the .NET SDK base (mcr.microsoft.com/dotnet/sdk:3.1-bullseye), giving exact parity with
+# the local macOS Docker setup.
 #
-# The SDK image is Debian Bullseye and ships curl and ca-certificates; the static-curl
-# and CA-bundle workarounds the previous image needed are not required here.
+# Why the SDK base is required: MaxQuant's DotNetCore31Installed() checks `dotnet --info`
+# for a line starting with "3.1" (an installed SDK).  The biocontainers image has .NET
+# runtime only; no such line exists and the run fails immediately with
+# "Please install .NET Core 3.1 SDK" — before mqpar.xml is even read.
+# The SDK image outputs "3.1.426 [/usr/share/dotnet/sdk]" which satisfies the check.
+#
+# The SDK image (Debian Bullseye) ships curl and ca-certificates, so the static-curl
+# fetch and CA-bundle workarounds the old image required are not needed here.
+_DOCKERFILE = pathlib.Path(__file__).parent.parent / "docker" / "maxquant" / "Dockerfile"
 image = (
-    modal.Image.from_registry(
-        "pridemap/maxquant:2.0.3.0-native",
-        force_build=False,
-    )
+    modal.Image.from_dockerfile(_DOCKERFILE)
     .run_commands(
         # Prove TLS actually works against the two hosts this pipeline fetches from, at
         # BUILD time. A range request keeps it to a few bytes; -f makes an HTTP error a failure.
