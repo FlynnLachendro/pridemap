@@ -340,11 +340,19 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
             ].filter(Boolean).join("\n")}
           </pre>
         ) : (
-          <details key="full" className="text-xs">
+          <details key="full" className="text-xs" open>
             <summary className="cursor-pointer text-faint hover:text-foreground">
               output ({b.text.split("\n").length} lines)
             </summary>
-            <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">{b.text}</pre>
+            <pre className="mt-1 max-h-48 overflow-auto bg-muted/50 p-2 rounded text-[11px] leading-snug">
+              {[
+                `Dataset : ${accession}`,
+                runs?.length ? `Runs    : ${runs.join(", ")}` : "Runs    : all",
+                job.job_id ? `Job ID  : ${job.job_id}` : "",
+                "",
+                b.text,
+              ].filter(Boolean).join("\n")}
+            </pre>
           </details>
         ),
       )}
