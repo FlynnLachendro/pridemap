@@ -18,6 +18,12 @@ FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:3.1-bullseye
 
 COPY --from=source /usr/local/bin/ /opt/maxquant/
 
+# Modal requires Python to be present in the image so it can bootstrap its own runtime.
+# The .NET SDK base ships none; install the system Python from Bullseye's apt repository.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN rm -f /opt/maxquant/global.json \
  && printf '#!/bin/sh\nexec dotnet /opt/maxquant/MaxQuantCmd.exe "$@"\n' \
       > /usr/local/bin/maxquant \
