@@ -7,9 +7,12 @@ Verify:  curl $MQ_SERVER_URL/health
 Contract (consumed by api/omics.py lines 2276-2487):
   GET  /health                → {"ok": true}
   POST /run                   → {"job_id": "..."}   multipart field: kit (zip)
-  GET  /status/{job_id}       → {"status": "running"|"done"|"error", "log": "...", "progress": [...]}
+  GET  /status/{job_id}       → {"status": "running"|"done"|"error", "log": "...", "progress": [...],
+                                 "cpu": {...}|null}
                                  progress carries run_all.sh's own stage events, which is what lets
                                  the caller show stages, elapsed time and ETA for a remote job.
+                                 cpu is the search container's own CPU/memory measurement (see
+                                 CpuSampler) — null until the search phase starts writing it.
   GET  /results/{job_id}      → proteinGroups.txt (TSV)
   DELETE /job/{job_id}        → {"deleted": bool, "cancelled": bool, "problems": [...]}
   GET  /jobs/{accession}      → {"job_id": "..."|null}   (Phase 2: durable lookup)
@@ -25,11 +28,13 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import zipfile
+from collections.abc import Callable
 
 import modal
 import modal.exception
@@ -50,6 +55,33 @@ secret  = Secret.from_name("pridemap-mq-token")   # provides MQ_TOKEN
 VOLUME_MOUNT   = "/data"       # where both @app.function decorators mount `vol` (job results)
 RAW_CACHE_MOUNT = "/raw-cache" # where run_maxquant mounts `raw_vol` (cached raw files, cross-job)
 DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
+
+# Single source of truth for container sizing. Change one number here to resize both the Modal
+# decorator and the log lines that describe the phase; the runtime also patches mqpar.xml's
+# numThreads to os.cpu_count() so the kit's static value is never wrong by accident.
+#
+# Why 8 and not 16. Measured on a 2-file run (Modal call fc-01M58HFAWP9KNBCEM528M7HQPQ, 16 CPU):
+# feature detection 893 s + deisotoping 596 s + MS/MS preparation 190 s = 1679 s of a 1826 s run,
+# i.e. 92% of wall clock. Those three phases parallelise ONE THREAD PER RAW FILE, not across
+# numThreads — proof: the two files' feature detection finished at 619 s and 893 s (ratio 1.44)
+# against raw sizes of 1.607 GB and 2.421 GB (ratio 1.51), so they ran concurrently, each bound by
+# its own file. Fourteen of sixteen cores were idle for the dominant phase. The phases that DO fan
+# out (creating protein files, digesting proteins) measured 26 s and 22 s at 8 workers, which is
+# noise against 1679 s. So the second eight cores buy nothing on a small run and cost double.
+#
+# This number is not the lever on wall clock. With n raw files the floor is the LARGEST SINGLE FILE
+# on ONE thread, whatever the core count. The lever is keeping MaxQuant's scratch off the network
+# Volume — see _stage_raw_local — and, for bigger runs, more raw files to spread over more cores.
+# cpu_report() exists so the next run measures what it actually used rather than being guessed at.
+MAXQUANT_SEARCH_CPU    = 8
+MAXQUANT_SEARCH_MEMORY = 65536   # MB (64 GB)
+# Set explicitly rather than inherited. MaxQuant's scratch now lands on this container-local disk
+# instead of raw_vol, so the ceiling has to cover the raw set plus its intermediates: the 24-file
+# PXD046787 run is 57.6 GB of raw alone. 512 GiB is also Modal's default, so naming it here changes
+# nothing today and makes the dependency visible when a dataset outgrows it.
+MAXQUANT_SEARCH_DISK   = 524288  # MB (512 GiB)
+MAXQUANT_DOWNLOAD_CPU    = 2
+MAXQUANT_DOWNLOAD_MEMORY = 4096  # MB (4 GB)
 
 
 def _vol_sync(action: str, v: "Volume | None" = None) -> None:
@@ -83,6 +115,276 @@ def _vol_commit(v: "Volume | None" = None, *, what: str = "volume") -> bool:
         # there is no off-Modal caller to stay quiet for.
         print(f"WARNING: {what} commit failed — resume may re-run stages: {exc}", flush=True)
         return False
+
+
+# ----------------------------------------------------------------------------- CPU / memory telemetry
+#
+# "Is MaxQuant using the threads we passed in?" was unanswerable: numThreads is patched to the core
+# count and logged, which proves what we ASKED for and nothing about what ran. These three pure
+# functions turn two cgroup samples into that answer, and cpu_report() is what the UI draws.
+#
+# cgroup, not /proc/stat: inside a Modal container /proc/stat is the HOST's, so a busy neighbour
+# reads as our own work. The cgroup counters are scoped to this container, which is also exactly
+# what Modal bills. Where there is no cgroup (macOS, a plain test host) every reader returns None
+# and the report is omitted rather than invented.
+#
+# Modal containers are cgroup **v1**, established by probing one rather than by assuming:
+#   /sys/fs/cgroup/cpuacct/cpuacct.usage        910000000        (nanoseconds)
+#   /sys/fs/cgroup/memory/memory.usage_in_bytes  55934976
+#   /sys/fs/cgroup/cpu.stat                     FileNotFoundError
+# The first version of this read only the v2 paths, so a live container reported its core count and
+# no usage at all — the readout looked present and measured nothing. v1 is therefore tried first,
+# with v2 kept second so a future Modal migration does not silently blind this again.
+
+CPU_REPORT_FILE = "cpu.json"
+CGROUP_V1_CPUACCT = "/sys/fs/cgroup/cpuacct/cpuacct.usage"        # nanoseconds
+CGROUP_V2_CPU_STAT = "/sys/fs/cgroup/cpu.stat"                    # usage_usec key
+CGROUP_MEM_FILES = (
+    "/sys/fs/cgroup/memory/memory.usage_in_bytes",                # v1
+    "/sys/fs/cgroup/memory.current",                              # v2
+)
+
+
+def parse_cgroup_usage_usec(text: str) -> int | None:
+    """Cumulative CPU microseconds from a cgroup v2 cpu.stat body, or None if absent."""
+    for line in text.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "usage_usec":
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None
+
+
+def parse_cpuacct_usage_usec(text: str) -> int | None:
+    """Cumulative CPU microseconds from a cgroup v1 cpuacct.usage body.
+
+    The file holds NANOseconds as a bare integer. Converting here rather than at the call site keeps
+    every caller working in one unit — mixing the two silently reports a thousand times too much CPU.
+    """
+    try:
+        return int(text.strip()) // 1000
+    except (ValueError, AttributeError):
+        return None
+
+
+def busy_cores(prev_usec: int, cur_usec: int, elapsed_s: float) -> float | None:
+    """Cores busy on average between two cpu.stat samples taken elapsed_s apart.
+
+    One core pinned for the whole interval is 1.0. Returns None when the interval is degenerate or
+    the counter went backwards (a container restart), because a wrong number here would be read as
+    a measurement.
+    """
+    if elapsed_s <= 0 or cur_usec < prev_usec:
+        return None
+    return (cur_usec - prev_usec) / (elapsed_s * 1_000_000)
+
+
+def cpu_report(
+    *,
+    cores: int,
+    allocated: int,
+    busy: float | None,
+    rss_bytes: int | None,
+    memory_mb: int,
+    peak_busy: float | None = None,
+    peak_rss_bytes: int | None = None,
+) -> dict:
+    """The /status payload describing this container's CPU and memory use.
+
+    Rounded here rather than in the UI so the card and the log agree on the figures, and so the
+    numbers that get pasted into a sizing decision are the numbers that were measured.
+    """
+    # `cores` is the RESERVATION, because that is what is paid for and what busy_pct should be read
+    # against. `host_cores` is what os.cpu_count() saw, kept because the two differ (a cpu=8
+    # container reported 24) and a percentage quoted against the wrong one is worse than none.
+    report: dict = {
+        "cores": allocated,
+        "host_cores": cores,
+        "allocated": allocated,
+        "memory_gb": round(memory_mb / 1024, 1),
+        "ts": time.time(),
+    }
+    if busy is not None:
+        report["busy_cores"] = round(busy, 2)
+        report["busy_pct"] = round(100 * busy / allocated) if allocated else None
+    if peak_busy is not None:
+        report["peak_busy_cores"] = round(peak_busy, 2)
+    if rss_bytes is not None:
+        report["rss_gb"] = round(rss_bytes / 1024**3, 1)
+    if peak_rss_bytes is not None:
+        report["peak_rss_gb"] = round(peak_rss_bytes / 1024**3, 1)
+    return report
+
+
+def _read_int_file(path: str) -> int | None:
+    try:
+        return int(pathlib.Path(path).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _cgroup_usage_usec() -> int | None:
+    """This container's cumulative CPU time in microseconds, from whichever cgroup version exists.
+
+    v1 first because that is what Modal containers actually present; v2 second so the readout keeps
+    working if that changes. Both absent means "cannot measure", which the report states rather
+    than papering over with a zero.
+    """
+    for path, parse in (
+        (CGROUP_V1_CPUACCT, parse_cpuacct_usage_usec),
+        (CGROUP_V2_CPU_STAT, parse_cgroup_usage_usec),
+    ):
+        try:
+            usage = parse(pathlib.Path(path).read_text())
+        except OSError:
+            continue
+        if usage is not None:
+            return usage
+    return None
+
+
+def _cgroup_memory_bytes() -> int | None:
+    """This container's current memory use, from whichever cgroup version exists."""
+    for path in CGROUP_MEM_FILES:
+        value = _read_int_file(path)
+        if value is not None:
+            return value
+    return None
+
+
+class CpuSampler:
+    """Turns repeated polls into a cpu_report dict. Holds the previous sample; that is all its state.
+
+    Separate from the shipper thread that drives it so the sampling interval is whatever the caller
+    already ticks on, and so a failure to read a cgroup file degrades to "no figures this tick"
+    rather than killing the thread that also ships stage events.
+    """
+
+    def __init__(self, *, allocated: int, memory_mb: int) -> None:
+        self.allocated = allocated
+        self.memory_mb = memory_mb
+        self.cores = os.cpu_count() or allocated
+        self._prev_usec = _cgroup_usage_usec()
+        self._prev_at = time.monotonic()
+        self._peak_busy: float | None = None
+        self._peak_rss: int | None = None
+
+    def sample(self) -> dict:
+        cur_usec, cur_at = _cgroup_usage_usec(), time.monotonic()
+        busy = None
+        if cur_usec is not None and self._prev_usec is not None:
+            busy = busy_cores(self._prev_usec, cur_usec, cur_at - self._prev_at)
+        if cur_usec is not None:
+            self._prev_usec, self._prev_at = cur_usec, cur_at
+        if busy is not None:
+            self._peak_busy = busy if self._peak_busy is None else max(self._peak_busy, busy)
+
+        rss = _cgroup_memory_bytes()
+        if rss is not None:
+            self._peak_rss = rss if self._peak_rss is None else max(self._peak_rss, rss)
+
+        return cpu_report(
+            cores=self.cores,
+            allocated=self.allocated,
+            busy=busy,
+            rss_bytes=rss,
+            memory_mb=self.memory_mb,
+            peak_busy=self._peak_busy,
+            peak_rss_bytes=self._peak_rss,
+        )
+
+
+# ----------------------------------------------------------------------------- raw staging (the real speed lever)
+
+def raw_names_in_mqpar(mqpar_text: str) -> "set[str]":
+    """The raw file names a kit's mqpar.xml actually searches.
+
+    Needed because the raw cache is per ACCESSION while a run is per SELECTION: the cache directory
+    for PXD046787 holds every file ever downloaded for it, so staging the directory wholesale copies
+    57.6 GB for a two-file search. Reading the names from <filePaths> stages only what this run
+    opens. An empty set means "could not tell", which the caller treats as "take everything" rather
+    than as "take nothing" — searching fewer files than asked for would be a wrong result, where
+    copying too many is only wasteful.
+    """
+    import re as _re
+    return {
+        pathlib.PurePath(p).name
+        for p in _re.findall(r"<string>([^<]*\.raw)</string>", mqpar_text, _re.IGNORECASE)
+    }
+
+
+def _stage_raw_local(
+    accession: str, dest_root: pathlib.Path, log: Callable[[str], None],
+    wanted: "set[str] | None" = None,
+) -> pathlib.Path | None:
+    """Copy this accession's cached raw files from raw_vol onto container-local disk.
+
+    THE reason the search was slow. MaxQuant writes its per-file intermediates NEXT TO each raw
+    file — `<name>.index` and a `<name>/` directory holding n0/p0 — and the kit's download_raw.sh
+    symlinks raw/<name> at $PRIDEMAP_RAW_DIR, which was the raw_vol mount. So feature detection and
+    deisotoping, the two write-heavy phases and 81% of the run, were doing random writes across a
+    network filesystem that Modal documents as "optimized for write-once, read-many", where a write
+    inside a file can cost a rewrite of the whole file. `modal volume ls pridemap-raw PXD046787`
+    shows the evidence: 2019_12_13_Daria_01.index and 2019_12_13_Daria_01/ sitting beside the .raw.
+
+    Pointing PRIDEMAP_RAW_DIR at the returned directory puts all of that on the container's
+    ephemeral SSD. The copy itself is a sequential read of a few GB — seconds to a minute — against
+    phases measured in tens of minutes.
+
+    Returns the staging root to use as PRIDEMAP_RAW_DIR, or None to leave the caller on raw_vol:
+    a missing cache (nothing downloaded yet, so download_raw.sh must run for real) or a copy that
+    fails part way, where continuing on the network volume is slow but correct and aborting the run
+    would not be. Symlinks are preserved as symlinks-to-local rather than resolved, because that is
+    the exact shape run_all.sh already works with.
+    """
+    src_dir = pathlib.Path(RAW_CACHE_MOUNT) / accession
+    if not src_dir.is_dir():
+        log(f"raw staging: {src_dir} not present — leaving PRIDEMAP_RAW_DIR on {RAW_CACHE_MOUNT}")
+        return None
+
+    raws = sorted(p for p in src_dir.glob("*.raw") if p.is_file())
+    if wanted:
+        selected = [p for p in raws if p.name in wanted]
+        if selected:
+            skipped = len(raws) - len(selected)
+            if skipped:
+                log(f"raw staging: {len(selected)} of {len(raws)} cached file(s) are in this run's "
+                    f"selection — skipping {skipped} not searched here")
+            raws = selected
+        else:
+            # The names did not line up with the cache. Copying everything is slower but cannot
+            # make the search wrong, which is the right way round to be wrong here.
+            log(f"raw staging: none of {sorted(wanted)} matched the cache — staging all "
+                f"{len(raws)} cached file(s)")
+    if not raws:
+        log(f"raw staging: no .raw files in {src_dir} — leaving PRIDEMAP_RAW_DIR on {RAW_CACHE_MOUNT}")
+        return None
+
+    dest_dir = dest_root / accession
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    total = sum(p.stat().st_size for p in raws)
+    log(f"raw staging: copying {len(raws)} file(s), {total / 1024**3:.1f} GB → {dest_dir} (local SSD)")
+    started = time.monotonic()
+    try:
+        for p in raws:
+            target = dest_dir / p.name
+            if target.exists() and target.stat().st_size == p.stat().st_size:
+                continue   # a retry in the same container; the bytes are already here
+            shutil.copyfile(p, target)
+    except OSError as exc:
+        # Not fatal. The volume path still works, so say what was lost and carry on.
+        log(f"raw staging FAILED ({exc}) — falling back to {RAW_CACHE_MOUNT}; "
+            f"MaxQuant scratch will go to the network volume and the search will be slower")
+        return None
+
+    secs = time.monotonic() - started
+    rate = total / 1024**2 / secs if secs > 0 else 0
+    log(f"raw staging: done in {secs:.0f} s ({rate:.0f} MB/s) — "
+        f"MaxQuant intermediates will be written to local disk, not the volume")
+    return dest_root
+
 
 # ----------------------------------------------------------------------------- container images
 
@@ -186,8 +488,8 @@ image = (
     image=image,
     volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
     secrets=[secret],
-    cpu=2,
-    memory=4096,
+    cpu=MAXQUANT_DOWNLOAD_CPU,
+    memory=MAXQUANT_DOWNLOAD_MEMORY,
     timeout=7200,   # 2 h — enough for any current public PRIDE dataset
 )
 def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
@@ -212,6 +514,7 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     _vol_sync("reload")        # see the job_dir the orchestrator created and committed
     _vol_sync("reload", raw_vol)
     _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
+    _log(f"container CPUs available: {os.cpu_count()} (allocated: {MAXQUANT_DOWNLOAD_CPU})")
 
     # Concurrent-download guard: two containers downloading the same accession simultaneously
     # both run `curl -C -` against the same partial file on raw_vol, producing a corrupt result.
@@ -318,8 +621,9 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     image=image,
     volumes={VOLUME_MOUNT: vol, RAW_CACHE_MOUNT: raw_vol},
     secrets=[secret],
-    cpu=16,
-    memory=65536,   # 64 GB
+    cpu=MAXQUANT_SEARCH_CPU,
+    memory=MAXQUANT_SEARCH_MEMORY,
+    ephemeral_disk=MAXQUANT_SEARCH_DISK,
     timeout=86400,  # 24 h
 )
 def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
@@ -331,6 +635,7 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     job_dir = DATA_ROOT / job_id
     log_path = job_dir / "run.log"
     progress_path = job_dir / "progress.jsonl"
+    cpu_path = job_dir / CPU_REPORT_FILE
 
     # Reload before first write so the log lines from _download_raw are visible in the file
     # we append to, and so the raw files committed by _download_raw are on-disk.
@@ -366,13 +671,32 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
             except OSError:
                 pass
 
+    # The same 15 s tick that ships stage events also answers "how many cores is MaxQuant actually
+    # using", because that question needs two samples an interval apart and this is the interval we
+    # already have. A failed write is dropped: the readout is diagnostic, and losing a tick of it
+    # must never take down the thread the stage display depends on.
+    sampler = CpuSampler(allocated=MAXQUANT_SEARCH_CPU, memory_mb=MAXQUANT_SEARCH_MEMORY)
+
+    def _ship_cpu(report: "dict | None" = None) -> dict:
+        report = sampler.sample() if report is None else report
+        try:
+            cpu_path.write_text(json.dumps(report))
+        except OSError:
+            pass
+        return report
+
     _stop_shipper = threading.Event()
 
     def _shipper() -> None:
+        # raw_vol is NOT committed here any more. It used to be, every 15 s for the whole search —
+        # committing a volume MaxQuant was actively writing scratch into, for raw files that cannot
+        # change during a search. Pure overhead, and the exact commit contention Modal's volume docs
+        # warn against. With _stage_raw_local in place the search container only ever READS raw_vol,
+        # so there is nothing of ours to commit.
         while not _stop_shipper.wait(15):
             _ship_stages()
+            _ship_cpu()
             _vol_commit()
-            _vol_commit(raw_vol, what="raw cache")
 
     shipper = threading.Thread(target=_shipper, daemon=True)
     shipper.start()
@@ -384,6 +708,38 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
         with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
             zf.extractall(work_dir)
         _log("kit unpacked")
+
+        # Patch mqpar.xml numThreads to the ALLOCATION, not to os.cpu_count().
+        #
+        # These are not the same number and assuming they were is a live bug: with cpu=8 a container
+        # reported os.cpu_count() == 24, because Modal exposes the host's cores (and allows bursting
+        # to request + 16) rather than the reservation. Sizing MaxQuant's thread pool from 24 on an
+        # 8-core reservation oversubscribes it 3:1 in exactly the Andromeda phases that DO fan out,
+        # which is where the threads were supposed to help. It previously went unnoticed only because
+        # cpu=16 happened to land on 16-core hosts, so the two numbers agreed by coincidence.
+        #
+        # MAXQUANT_SEARCH_CPU is what we reserve and therefore what we are guaranteed to get, so it
+        # is what the thread count is sized from. Both numbers are logged because their disagreement
+        # is the thing worth seeing.
+        import re as _re
+        host_cpus = os.cpu_count() or MAXQUANT_SEARCH_CPU
+        actual_cpus = MAXQUANT_SEARCH_CPU
+        _log(f"container CPUs: {actual_cpus} reserved, {host_cpus} visible on the host "
+             f"(numThreads is sized from the reservation)")
+        # Also the source of which raw files this run searches — see raw_names_in_mqpar.
+        wanted_raws: set[str] = set()
+        mqpar_files = list(work_dir.rglob("mqpar.xml"))
+        if mqpar_files:
+            mqpar_path = mqpar_files[0]
+            mqpar_text = mqpar_path.read_text(errors="replace")
+            wanted_raws = raw_names_in_mqpar(mqpar_text)
+            m = _re.search(r"<numThreads>(\d+)</numThreads>", mqpar_text)
+            old_threads = m.group(1) if m else "not found"
+            patched = _re.sub(r"<numThreads>\d+</numThreads>", f"<numThreads>{actual_cpus}</numThreads>", mqpar_text)
+            mqpar_path.write_text(patched)
+            _log(f"mqpar.xml numThreads: {old_threads} → {actual_cpus} (patched, file: {mqpar_path.relative_to(work_dir)})")
+        else:
+            _log("mqpar.xml: not found in kit — numThreads not patched")
 
         run_script = work_dir / "run_all.sh"
         if not run_script.exists():
@@ -409,10 +765,19 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
         # seconds rather than tens of GB. Markers would only have saved that have() check and a
         # ~10 s FASTA fetch.
         #
-        # raw files are already in raw_vol — download_raw.sh's have() check skips them instantly
+        # Stage the raw files onto local disk FIRST, then point the kit at wherever they ended up.
+        # download_raw.sh's have() checks name+size in $PRIDEMAP_RAW_DIR, so a successful stage makes
+        # the download stage a no-op against local copies and every MaxQuant intermediate it writes
+        # beside them lands on ephemeral SSD. A failed stage returns None and this falls back to the
+        # volume mount — the behaviour before this change, slower but correct.
+        raw_root = (
+            _stage_raw_local(accession, work_dir / "raw-local", _log, wanted_raws)
+            or pathlib.Path(RAW_CACHE_MOUNT)
+        )
+
         env = {
             **os.environ,
-            "PRIDEMAP_RAW_DIR": RAW_CACHE_MOUNT,
+            "PRIDEMAP_RAW_DIR": str(raw_root),
             "MAXQUANT_CMD": "maxquant",
             # The tools are in the image; preflight must not warn about a Docker daemon that is not
             # meant to exist here, in a log the UI now shows the user.
@@ -432,8 +797,6 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
         for line in proc.stdout:  # type: ignore[union-attr]
             _log(line.rstrip())
         proc.wait()
-
-        _vol_commit(raw_vol, what="raw cache")
 
         # Every failure below RAISES. Writing "error" into progress.jsonl and returning normally is
         # what made a dead run report as finished: the FunctionCall completed without an exception,
@@ -461,8 +824,11 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     finally:
         _stop_shipper.set()
         _ship_stages()
+        # One final sample, written AND logged — taking two would leave the second with no interval
+        # to measure. The peak is what a sizing decision needs, and the log is where it survives
+        # after the job directory is cleaned up.
+        _log(f"CPU/RAM used: {json.dumps(_ship_cpu())}")
         _vol_commit()
-        _vol_commit(raw_vol, what="raw cache")
 
 
 # ----------------------------------------------------------------------------- orchestrator (lightweight)
@@ -508,7 +874,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     phases_path = job_dir / "phases.jsonl"
 
     _log(f"job_id={job_id}  accession={accession}")
-    _log("phase 1/2: download (cheap container — 2 CPU / 4 GB)")
+    _log(f"phase 1/2: download (cheap container — {MAXQUANT_DOWNLOAD_CPU} CPU / {MAXQUANT_DOWNLOAD_MEMORY // 1024} GB)")
     _write_progress(progress_path, "running", "download phase starting")
     _write_stage_event(phases_path, "run_started", "", "pipeline start")
     _write_stage_event(phases_path, "stage_started", "download", "Download raw files from PRIDE")
@@ -527,7 +893,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
 
     _write_stage_event(phases_path, "stage_finished", "download", "completed")
     _vol_sync("reload")   # pull log lines written by the download worker
-    _log("phase 2/2: MaxQuant search (expensive container — 16 CPU / 64 GB)")
+    _log(f"phase 2/2: MaxQuant search (expensive container — {MAXQUANT_SEARCH_CPU} CPU / {MAXQUANT_SEARCH_MEMORY // 1024} GB)")
     _write_progress(progress_path, "running", "search phase starting")
     _write_stage_event(phases_path, "stage_started", "search_dda", "MaxQuant search starting")
     _vol_commit()
@@ -553,19 +919,25 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     memory=1024,
     timeout=3600,
 )
-def prune_raw_cache(max_age_days: int = 30) -> dict:
+def prune_raw_cache(max_age_days: int = 30, skip: "list[str] | None" = None) -> dict:
     """Remove accession directories from raw_vol that have not been accessed recently.
 
     Only removes a directory when EVERY raw file inside it is older than max_age_days, so
     an accession that is currently downloading or was recently used is never touched.
     Lock files (.downloading) are ignored when measuring age — only .raw files count.
 
+    `skip` names accessions to leave alone whatever their age. Age alone is not sufficient
+    protection: a raw file's mtime is when it was DOWNLOADED, so a dataset cached a month ago and
+    being searched right now looks exactly like one nobody wants, and deleting it mid-search pulls
+    the input out from under a 24-hour job. The caller knows which jobs are live; this function
+    cannot, so it takes the answer rather than guessing. pridemap-janitor passes the accessions of
+    every running job and every in-flight download.
+
     Run manually:  modal run api/modal_runner.py::prune_raw_cache
     Override age:  modal run api/modal_runner.py::prune_raw_cache --max-age-days 7
     """
-    import shutil
-
     _vol_sync("reload", raw_vol)
+    protected = set(skip or ())
     cutoff = time.time() - max_age_days * 86400
     cache_root = pathlib.Path(RAW_CACHE_MOUNT)
     removed: list[str] = []
@@ -575,6 +947,9 @@ def prune_raw_cache(max_age_days: int = 30) -> dict:
         if not entry.is_dir() or entry.name.startswith("."):
             continue
         accession = entry.name
+        if accession in protected:
+            kept.append(f"{accession} (in use — protected by caller)")
+            continue
         raw_files = [f for f in entry.rglob("*") if f.is_file() and not f.name.startswith(".")]
         if not raw_files:
             continue
@@ -723,6 +1098,9 @@ class _ModalBackend:
 
     def job_progress(self, job_id: str) -> list[dict]:
         return _read_stage_events(job_id)
+
+    def job_cpu(self, job_id: str) -> dict | None:
+        return _read_cpu(job_id)
 
     def results_path(self, job_id: str) -> pathlib.Path | None:
         job_dir = _job_dir(job_id)
@@ -880,6 +1258,23 @@ def _read_log(job_id: str) -> str:
         return (job_dir / "run.log").read_text(errors="replace")[-8000:]  # last 8 KB
     except FileNotFoundError:
         return ""
+
+
+def _read_cpu(job_id: str) -> dict | None:
+    """This job's last CPU/memory sample, or None when there is no measurement.
+
+    None is a distinct answer from zero usage: a job that has not reached the search phase, a server
+    deployed before the readout existed, and a host without cgroup v2 all have nothing to report, and
+    the card must say so rather than draw an idle container.
+    """
+    job_dir = _job_dir(job_id)
+    if job_dir is None:
+        return None
+    try:
+        report = json.loads((job_dir / CPU_REPORT_FILE).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return report if isinstance(report, dict) else None
 
 
 def _read_stage_events(job_id: str) -> list[dict]:
