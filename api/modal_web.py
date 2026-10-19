@@ -48,7 +48,7 @@ def source_fingerprint(paths: Iterable[pathlib.Path]) -> str:
 class Backend(Protocol):
     """The Modal-side operations the gateway needs. Implemented for real in modal_runner.py."""
 
-    def spawn_job(self, kit_bytes: bytes, accession: str) -> str: ...
+    def spawn_job(self, kit_bytes: bytes, accession: str, force: bool = False) -> str: ...
     def accession_from_kit(self, kit_bytes: bytes) -> str: ...
 
     def job_key_from_kit(self, kit_bytes: bytes, accession: str) -> str: ...
@@ -58,7 +58,7 @@ class Backend(Protocol):
     def job_progress(self, job_id: str) -> list[dict]: ...
     def job_cpu(self, job_id: str) -> dict | None: ...
     def results_path(self, job_id: str) -> pathlib.Path | None: ...
-    def delete_job(self, job_id: str) -> dict: ...
+    def delete_job(self, job_id: str, purge: bool = False) -> dict: ...
     def list_jobs(self) -> list[tuple[str, str]]: ...
     def job_for_accession(self, accession: str) -> str | None: ...
 
@@ -84,7 +84,9 @@ def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = 
         }
 
     @api.post("/run")
-    async def run(request: Request, authorization: str = Header(default="")) -> dict:
+    async def run(
+        request: Request, force: bool = False, authorization: str = Header(default=""),
+    ) -> dict:
         _check_token(authorization)
         form = await request.form()
         kit_file = form.get("kit")
@@ -97,7 +99,9 @@ def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = 
         # selection of the same dataset replace the first's entry, hiding a running job from /jobs.
         # The key is carried in the kit because `runs` never reaches this side.
         key = backend.job_key_from_kit(kit_bytes, accession)
-        job_id = backend.spawn_job(kit_bytes, accession)
+        # force=1 recomputes a search whose inputs are already cached. Default off, so an accidental
+        # second submission costs a container start rather than another full search.
+        job_id = backend.spawn_job(kit_bytes, accession, force)
         backend.record_job(key, job_id)
         return {"job_id": job_id}
 
@@ -132,9 +136,14 @@ def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = 
         )
 
     @api.delete("/job/{job_id}")
-    def delete_job(job_id: str, authorization: str = Header(default="")) -> dict:
+    def delete_job(
+        job_id: str, purge: bool = False, authorization: str = Header(default=""),
+    ) -> dict:
         _check_token(authorization)
-        return backend.delete_job(job_id)
+        # purge=1 is required to destroy a finished run's output tables. Without it this cancels the
+        # call and releases the registry slot but keeps the results, because Stop used to mean
+        # "delete my results" and that is how the first successful search's table was lost.
+        return backend.delete_job(job_id, purge)
 
     @api.get("/jobs")
     def list_jobs(authorization: str = Header(default="")) -> dict:

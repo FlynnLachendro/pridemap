@@ -57,9 +57,13 @@ class FakeBackend:
         self.spawned: list[tuple[int, str]] = []
         self.recorded: list[tuple[str, str]] = []
         self.jobs: dict[str, str] = {}
+        #: Whether each spawn asked for a forced recompute, so a test can assert the default.
+        self.forced: list[bool] = []
+        self.purged: list[bool] = []
 
-    def spawn_job(self, kit_bytes: bytes, accession: str) -> str:
+    def spawn_job(self, kit_bytes: bytes, accession: str, force: bool = False) -> str:
         self.spawned.append((len(kit_bytes), accession))
+        self.forced.append(force)
         return "fc-123"
 
     def accession_from_kit(self, kit_bytes: bytes) -> str:
@@ -86,8 +90,9 @@ class FakeBackend:
     def results_path(self, job_id: str) -> pathlib.Path | None:
         return None
 
-    def delete_job(self, job_id: str) -> dict:
-        return {"deleted": True, "cancelled": True, "problems": []}
+    def delete_job(self, job_id: str, purge: bool = False) -> dict:
+        self.purged.append(purge)
+        return {"deleted": True, "cancelled": True, "kept_results": False, "problems": []}
 
     def list_jobs(self) -> list[tuple[str, str]]:
         return list(self.jobs.items())
@@ -130,6 +135,100 @@ def test_run_accepts_a_multipart_kit():
     assert r.json()["job_id"] == "fc-123"
     assert backend.spawned == [(len(kit), "PXD046787")], "the handler must forward the kit bytes once"
     assert backend.recorded == [("PXD046787", "fc-123")], "the job id must be recorded before responding"
+
+
+def test_a_plain_submission_does_not_force_a_recompute():
+    """Scenario: the Run button is pressed, or pressed twice, with no force asked for.
+
+    Slice: modal gateway — POST /run force default.
+    Given a gateway and a kit,
+    When the kit is POSTed without a force parameter,
+    Then the backend is asked to spawn with force=False, so a cached result can be reused.
+
+    This default is the fix for a stray click costing another 45-minute search. If force ever
+    defaults to True the cache still fills but never serves, which is indistinguishable from having
+    no cache at all except on the bill.
+    """
+    ### Given
+    client, backend = _client()
+
+    ### When
+    r = client.post(
+        "/run",
+        files={"kit": ("kit.zip", _kit_bytes(), "application/zip")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    ### Then
+    assert r.status_code == 200, r.text
+    assert backend.forced == [False]
+
+
+def test_force_is_passed_through_when_asked_for():
+    """Scenario: the user explicitly asks to recompute a search whose inputs are cached.
+
+    Slice: modal gateway — POST /run?force=1.
+    Given a gateway and a kit,
+    When the kit is POSTed with force=1,
+    Then the backend is asked to spawn with force=True.
+    """
+    ### Given
+    client, backend = _client()
+
+    ### When
+    r = client.post(
+        "/run?force=1",
+        files={"kit": ("kit.zip", _kit_bytes(), "application/zip")},
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    ### Then
+    assert r.status_code == 200, r.text
+    assert backend.forced == [True]
+
+
+def test_stopping_a_job_does_not_purge_its_results_by_default():
+    """Scenario: Stop is pressed on a job that has already produced a protein table.
+
+    Slice: modal gateway — DELETE /job default.
+    Given a gateway,
+    When a job is deleted with no purge parameter,
+    Then the backend is asked NOT to purge.
+
+    Stop used to mean "delete my results": it cancelled nothing on a finished job and removed the
+    whole directory, which is how the first search that ever ran to completion lost its table, its
+    log and its measurements — and the loss then looked like a reason to run it all again.
+    """
+    ### Given
+    client, backend = _client()
+
+    ### When
+    r = client.request("DELETE", "/job/fc-123", headers={"Authorization": f"Bearer {TOKEN}"})
+
+    ### Then
+    assert r.status_code == 200, r.text
+    assert backend.purged == [False]
+
+
+def test_purge_is_passed_through_when_asked_for():
+    """Scenario: the caller genuinely wants a finished run's output removed.
+
+    Slice: modal gateway — DELETE /job?purge=1.
+    Given a gateway,
+    When a job is deleted with purge=1,
+    Then the backend is asked to purge.
+    """
+    ### Given
+    client, backend = _client()
+
+    ### When
+    r = client.request(
+        "DELETE", "/job/fc-123?purge=1", headers={"Authorization": f"Bearer {TOKEN}"}
+    )
+
+    ### Then
+    assert r.status_code == 200, r.text
+    assert backend.purged == [True]
 
 
 def test_status_relays_the_runs_own_stage_events():
