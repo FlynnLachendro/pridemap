@@ -144,7 +144,9 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   const uploadSeen = useRef<string | null>(null);
   useEffect(() => {
     // job.upload_id means results came from the transfer cache — already handled in mount/start.
-    if (job.status !== "done" || !job.job_id || job.upload_id || uploadSeen.current === job.job_id || !onDone) return;
+    // Deliberately NOT conditional on onDone: the transfer is what writes the cache entry, so
+    // skipping it when no callback is mounted would make every later run re-pay the whole search.
+    if (job.status !== "done" || !job.job_id || job.upload_id || uploadSeen.current === job.job_id) return;
     uploadSeen.current = job.job_id;
     const id = job.job_id;
     setJob((j) => ({ ...j, status: "transferring" }));
@@ -158,11 +160,15 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         const u = await fetch(`${API}/analyse/inspect`, { method: "POST", body: fd });
         if (!u.ok) throw new Error(await describeHttpError(u));
         const { upload_id } = await u.json();
-        setJob((j) => ({ ...j, status: "done" }));
-        onDone(upload_id);
-        // Record in server-side transfer cache so future runs skip MaxQuant entirely.
-        const runsParam = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
-        fetch(`${API}/dataset/${accession}/pipeline/remote/complete${runsParam}&upload_id=${encodeURIComponent(upload_id)}`, { method: "POST" }).catch(() => {});
+        setJob((j) => ({ ...j, status: "done", upload_id }));
+        onDone?.(upload_id);
+        // Record in the server-side transfer cache so a repeat of this same selection skips the
+        // search entirely. Built with URLSearchParams because hand-joining produced "...complete&
+        // upload_id=" whenever runs was empty — no "?", so the id never arrived, the endpoint
+        // rejected the call, and nothing was ever cached.
+        const q = new URLSearchParams({ upload_id });
+        if (runs?.length) q.set("runs", runs.join(","));
+        fetch(`${API}/dataset/${accession}/pipeline/remote/complete?${q}`, { method: "POST" }).catch(() => {});
       } catch (e) {
         setJob((j) => ({ ...j, status: "error", err: `Could not load results into Analyse: ${String(e)}`, failure: "server" }));
       }

@@ -2030,13 +2030,20 @@ def run_all_sh(ctx: dict, plan: dict, mq_cmd: str = "MaxQuantCmd.exe", diann_cmd
         'printf "\\n%s\\n" "──────────────────────────────────────────────"',
         'printf "Pipeline complete.\\n\\n"',
         'if [ -s uploaded.txt ]; then',
-        '  printf "Already loaded into PRIDE Map — open Analyse and pick group A and group B:\\n"',
+        '  printf "Loaded into PRIDE Map — open Analyse and the comparison is already on screen:\\n"',
         '  while IFS="$(printf \'\\t\')" read -r t _; do printf "  • %s\\n" "$t"; done < uploaded.txt',
         "else",
-        '  printf "Upload these in PRIDE Map → Analyse:\\n"',
+        # A run launched from PRIDE Map is built with no API URL on purpose — the container cannot
+        # reach the app's API — so the app collects the table from the volume afterwards instead.
+        # Telling that user to upload it by hand described a manual step that does not exist, and
+        # named a file the app was already holding.
+        '  printf "Protein table(s) ready:\\n"',
         *[f'  printf "  • %s\\n" "{t}"' for t in tables],
+        '  printf "\\nStarted from PRIDE Map? It collects these itself — open Analyse, nothing to upload.\\n"',
+        '  printf "Running this kit standalone? Upload them in PRIDE Map → Analyse.\\n"',
         "fi",
-        'printf "\\nThat gives log2 fold change, Welch t-test, Benjamini-Hochberg FDR and a volcano plot.\\n"',
+        'printf "\\nEither way: log2 fold change and detection per protein, plus a Welch t-test with\\n"',
+        'printf "Benjamini-Hochberg FDR and a volcano plot once a group has two or more replicates.\\n"',
         'printf "Stage-by-stage record: progress.jsonl\\n"',
         "",
     ]
@@ -2515,14 +2522,45 @@ def _load_transfer_cache() -> None:
         _transfer_cache = {}
 
 
+def _write_transfer_cache() -> None:
+    try:
+        _TRANSFER_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TRANSFER_CACHE_FILE.write_text(json.dumps(_transfer_cache, indent=2))
+    except Exception as exc:
+        logger.warning("transfer cache write failed: %s", exc)
+
+
 def _save_transfer_entry(key: str, upload_id: str) -> None:
     with _transfer_cache_lock:
         _transfer_cache[key] = upload_id
-        try:
-            _TRANSFER_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _TRANSFER_CACHE_FILE.write_text(json.dumps(_transfer_cache, indent=2))
-        except Exception as exc:
-            logger.warning("transfer cache write failed: %s", exc)
+        _write_transfer_cache()
+
+
+def _cached_upload(key: str) -> str | None:
+    """The cached upload for this selection, but only while that upload is still readable.
+
+    An entry that outlives its upload is worse than no entry at all. The hit is served by both the
+    resume path and the submit path, so a deleted upload makes Analyse 404 AND makes Run return the
+    same dead id instead of searching again — the selection can never be recovered without editing
+    the cache file by hand. Dropping the entry here turns that dead end into one slow run.
+
+    Same rule the search result cache already follows: an entry counts only when its table is
+    there, never because a record says it should be.
+    """
+    upload_id = _transfer_cache.get(key)
+    if not upload_id:
+        return None
+    from main import upload_path
+    try:
+        upload_path(upload_id)
+    except Exception:
+        logger.info("transfer cache: dropping %s → %s, the upload is gone", key, upload_id)
+        with _transfer_cache_lock:
+            if _transfer_cache.get(key) == upload_id:
+                del _transfer_cache[key]
+                _write_transfer_cache()
+        return None
+    return upload_id
 
 
 _load_transfer_cache()
@@ -2728,7 +2766,7 @@ def pipeline_remote_active(accession: str, runs: str = ""):
     key = _remote_job_key(accession, runs)
 
     # Transfer cache hit: results already uploaded to Analyse in a previous session — skip everything.
-    upload_id = _transfer_cache.get(key)
+    upload_id = _cached_upload(key)
     if upload_id:
         logger.info("pipeline_remote_active  cache hit for %s → upload_id=%s", key, upload_id)
         return {"job_id": None, "status": "done", "upload_id": upload_id, "cached": True}
@@ -2887,7 +2925,7 @@ def pipeline_remote_start(accession: str, runs: str = ""):
     key = _remote_job_key(accession, runs)
 
     # Transfer cache hit: results already in Analyse from a previous run — skip Modal entirely.
-    upload_id = _transfer_cache.get(key)
+    upload_id = _cached_upload(key)
     if upload_id:
         logger.info("pipeline_remote_start  cache hit for %s → upload_id=%s", key, upload_id)
         return {"job_id": None, "status": "done", "upload_id": upload_id, "cached": True}
