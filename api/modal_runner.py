@@ -78,7 +78,7 @@ MAXQUANT_SEARCH_MEMORY = 20480   # MB (20 GB); measured peak RSS: 13.4 GB; 1.5×
 # Set explicitly rather than inherited. MaxQuant's scratch lands on container-local disk.
 # Right-sized from telemetry: peak 15.8 GB on a 2-run PXD046787 job; 2× headroom → 40 GB.
 # Scale this up for datasets with more runs or larger raw files.
-MAXQUANT_SEARCH_DISK   = 40960   # MB (40 GB); measured peak disk: 15.8 GB; 2× headroom → 40 GB  (was 512 GiB)
+MAXQUANT_SEARCH_DISK   = 524288  # MB (512 GiB); Modal's minimum — cannot go lower regardless of measured peak
 MAXQUANT_DOWNLOAD_CPU    = 1     # measured peak: 0.22 busy cores (network-bound); 1.25× headroom → 1
 MAXQUANT_DOWNLOAD_MEMORY = 1024  # MB (1 GB); measured peak: 0.1 GB RSS; 1.5× headroom → 1 GB
 
