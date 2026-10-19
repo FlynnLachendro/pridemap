@@ -2696,6 +2696,10 @@ def pipeline_remote_active(accession: str, runs: str = ""):
             data = json.loads(resp.read())
         if data.get("status") in ("done", "error"):
             _active_remote_jobs.pop(key, None)
+            # Don't hand back a completed job on page-reload: the auto-transfer already ran (or
+            # failed) in the original session. Returning job_id=None here prevents RunRemote from
+            # trying to re-transfer results that are no longer on the Modal volume.
+            return {"job_id": None, "status": None}
         return {"job_id": job_id, **_remote_stage_payload(accession, runs, data)}
     except Exception:
         return {"job_id": job_id, "status": "running", "log": "", "stage_progress": False, "stages": []}
