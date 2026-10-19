@@ -2,11 +2,15 @@
 
 PRIDE Map can offload MaxQuant searches to [Modal](https://modal.com), a
 serverless container platform. The appeal over the other two paths: the search
-runs on 16 cores and 64 GB rather than whatever your laptop can spare, the
+runs on a dedicated 8-core container rather than whatever your laptop can spare, the
 laptop can be **shut down mid-run** with results collected later from any
 machine, and because Modal is x86-64 the arm64 workarounds that
 [maxquant-local.md](maxquant-local.md) carries simply do not apply — Bruker data
 included.
+
+A finished search is **cached by the content of its inputs**, so submitting the same
+raw files with the same search parameters returns the earlier tables in seconds
+instead of repeating the work. See [Result cache](#result-cache).
 
 > ### STATUS: Phases 1a, 1b and 2 are built; not yet deployed
 >
@@ -31,20 +35,33 @@ Your machine                          Modal (serverless, x86-64)
 ──────────────────────────────────    ──────────────────────────────────────────────
 PRIDE Map UI                          pridemap-maxquant app
   │                                         │
-  │  POST /dataset/{acc}/pipeline/remote    │  POST /run       ← kit.zip upload (KB)
-  │  GET  …/remote/{id}/status             │  GET  /status/{id}
+  │  POST /dataset/{acc}/pipeline/remote    │  POST /run?force=    ← kit.zip upload (KB)
+  │  GET  …/remote/{id}/status             │  GET  /status/{id}   → status, log, stages, cpu
   │  GET  …/remote/{id}/results            │  GET  /results/{id}
   └──► PRIDE Map API (localhost:8000) ──►  └──► https://<workspace>--pridemap-mq.modal.run
                                                   │
-                                                  └──► PRIDE FTP (raw files, GB)
+                                                  ├─ run_maxquant       1 CPU   orchestrator
+                                                  │    ├─ _download_raw  1 CPU   ──► PRIDE FTP (GB)
+                                                  │    │                         ──► Volume: pridemap-raw
+                                                  │    └─ _run_maxquant_search  8 CPU / 20 GB
+                                                  │         stages raw → local SSD, then searches
+                                                  │                         ──► Volume: pridemap-runs
+                                                  │                              /<job_id>/  log, stages
+                                                  │                              /cache/search/<key>/
+                                                  └──► pridemap-janitor app (6-hourly, separate)
 ```
 
 1. PRIDE Map API bundles the search kit (scripts + MaxQuant XML configs) as a
   `kit.zip` — a few KB. **Raw files are not in it.**
 2. It POSTs the zip to `MQ_SERVER_URL/run` with `Authorization: Bearer $MQ_TOKEN`.
-3. Modal spawns a container, which downloads the raw files **directly from PRIDE
-  FTP at datacentre speed** and runs `run_all.sh`. The files never cross your
-   uplink.
+3. Modal spawns a lightweight orchestrator, which sequences a cheap 1-CPU download
+  worker and then the 8-CPU search worker. The download worker fetches the raw files
+  **directly from PRIDE FTP at datacentre speed** into a shared Volume, so the files
+  never cross your uplink and a second run of the same dataset skips the download
+  entirely. The search worker copies that run's raw files onto container-local SSD
+  before starting MaxQuant — see the storage split below for why that is worth a
+  factor of six — and runs `run_all.sh`. If the same inputs and parameters have been
+  searched before, it returns the cached tables instead.
 4. The container writes its log and `run_all.sh`'s stage events to a Volume; PRIDE Map polls
   `/status/{job_id}` every 3 seconds and shows the same stage list, elapsed time and ETA a local
   run shows — the two cards render through one component, from one reduction of the same events.
@@ -63,6 +80,50 @@ running jobs are managed. Worth opening now if you have not seen it before.
 
 
 
+## Result cache
+
+A completed search is stored under a key derived from **the content of its inputs plus
+the parameters that change the result**. Submit the same raw files with the same search
+settings and the tables come back in seconds; MaxQuant is not run.
+
+What the key covers:
+
+- the **sha256 of every raw file** in the run, not name and size — a re-downloaded or
+  repaired file can keep both;
+- the search parameters from `mqpar.xml`: FASTA identity, taxonomy, enzymes, fixed and
+  variable modifications, missed cleavages, both FDR thresholds, `minPepLen`,
+  `lfqMode`, `matchBetweenRuns`, and the MS/MS tolerances.
+
+What it deliberately ignores, because these differ on every run while describing
+identical science: `filePaths`, `fixedCombinedFolder`, `fixedSearchFolder` (all carry
+the per-container kit directory) and `numThreads` (rewritten at container start).
+Hashing `mqpar.xml` verbatim would mean the cache never hit.
+
+Two properties worth understanding:
+
+- **Keyed on the whole input set, never per file.** MaxQuant's LFQ and iBAQ
+  normalisation is global across a search, so a two-file result is not valid for any
+  part of a three-file run. Caching per file and recombining would be a faster wrong
+  answer.
+- **An entry is valid only if its table is readable.** There is no "complete" flag that
+  could disagree with disk. Persistent stage markers were tried earlier in this project
+  and reverted for exactly that reason: the marker outlived the products it described,
+  so the next run skipped work whose outputs no longer existed. Entries are published
+  through a temporary directory and moved into place, and only after the run has
+  produced a protein table.
+
+A cache hit is written to the run log rather than applied silently — reusing scientific
+output without saying so is how a stale number reaches a paper. To recompute anyway:
+
+```bash
+curl -X POST -H "Authorization: Bearer $MQ_TOKEN" \
+     -F kit=@kit.zip "$MQ_SERVER_URL/run?force=1"
+```
+
+Entries live under `/data/cache/search/<key>/` on the `pridemap-runs` Volume with a
+`manifest.json` recording the inputs, so an entry can always be traced back to the run
+that produced it.
+
 ## Cost and limits
 
 Read this before running the setup — the ceiling matters more than the steps.
@@ -70,8 +131,9 @@ Read this before running the setup — the ceiling matters more than the steps.
 
 |                             |                                                          |
 | --------------------------- | -------------------------------------------------------- |
-| Worker size                 | `cpu=16`, `memory=65536` (64 GB), `timeout=86400` (24 h) |
-| Worst case, one runaway job | **~$12–15** if it burns the full 24 h timeout            |
+| Search worker               | `cpu=8`, `memory=20480` (20 GB), `ephemeral_disk=524288` (512 GiB), `timeout=86400` (24 h) |
+| Download worker             | `cpu=1`, `memory=1024` (1 GB), `timeout=7200` (2 h)      |
+| Worst case, one runaway job | **~$6–8** if it burns the full 24 h timeout              |
 | Modal free tier             | roughly **$30/month** of compute credit                  |
 | First deploy                | pulls a multi-GB image — **expect 2–5 minutes**          |
 | Cold start after idle       | the same 2–5 min on the first search                     |
@@ -89,10 +151,39 @@ holding `MQ_SERVER_URL` and `MQ_TOKEN` — no Modal credentials, no dashboard:
 curl -H "Authorization: Bearer $MQ_TOKEN" "$MQ_SERVER_URL/jobs"
 # → {"jobs": [{"accession": "PXD055942", "job_id": "fc-…", "status": "running"}]}
 
-# Kill one.
+# Kill one. A finished job's output tables are KEPT — add ?purge=1 to delete them too.
 curl -X DELETE -H "Authorization: Bearer $MQ_TOKEN" "$MQ_SERVER_URL/job/fc-…"
-# → {"deleted": true, "cancelled": true, "problems": []}
+# → {"deleted": true, "cancelled": true, "kept_results": false, "problems": []}
 ```
+
+`kept_results: true` means the job had already produced `proteinGroups.txt`, so the
+call cancelled it and released the registry slot but left the tables in place. This
+is deliberate: the Stop button used to remove the whole job directory, and the first
+search that ever ran to completion lost its protein table, log and resource
+measurements that way — after which re-running looked necessary.
+
+**What the container is actually using.** Each worker reports its own CPU, memory and
+disk from its cgroup, so sizing comes from measurement rather than from what was
+requested:
+
+```bash
+curl -H "Authorization: Bearer $MQ_TOKEN" "$MQ_SERVER_URL/status/fc-…" | jq .cpu
+# → {"cores": 8, "host_cores": 24, "busy_cores": 7.5, "busy_pct": 94,
+#    "peak_busy_cores": 9.65, "rss_gb": 10.7, "peak_rss_gb": 13.4,
+#    "peak_disk_used_gb": 15.1, "phase": "search", "phases": {...}}
+
+# Aggregate peaks across past jobs, with recommended constants.
+curl -H "Authorization: Bearer $MQ_TOKEN" "$MQ_SERVER_URL/resource-advice"
+```
+
+Two things to know before acting on those numbers:
+
+- `cores` is the **reservation**; `host_cores` is what `os.cpu_count()` sees, and the
+  two differ — a `cpu=8` container reported 24. Percentages are against the
+  reservation, and `mqpar.xml`'s `numThreads` is sized from it. `peak_busy_cores` can
+  exceed the reservation because Modal allows bursting to request + 16 cores.
+- `/resource-advice` only aggregates jobs whose reports survived, so a short or failed
+  run can dominate it. Check `jobs_analysed` before applying anything it suggests.
 
 **Read the response.** `cancelled: false`, or a non-empty `problems`, means the
 compute may still be billing — fall back to the dashboard and confirm. A
@@ -181,6 +272,35 @@ when you Ctrl-C, while deploy creates the persistent endpoint this design needs.
 **Copy the URL the command prints.** Do not construct it by hand — it embeds
 your workspace slug. It will look like
 `https://<workspace>--pridemap-mq.modal.run`.
+
+Note that the gateway container stays warm for 30 minutes after the last request
+(`scaledown_window=1800`), and a warm container keeps serving the code it started
+with. After a deploy, `GET /health` reports a `source_sha` — compare it against the
+local files before concluding a change is live:
+
+```bash
+curl "$MQ_SERVER_URL/health"    # → {"ok": true, "source_sha": "…", …}
+```
+
+### 5. Deploy the janitor (optional)
+
+A second, separate app reclaims volume storage on a six-hourly schedule. It is
+deliberately not part of `pridemap-maxquant`, so a broken janitor cannot block
+deploying a fix to the search.
+
+| Command | Category | What it does |
+| ------- | -------- | ------------ |
+| `modal run api/modal_janitor.py` | maintenance | Dry run — prints what would be deleted, deletes nothing |
+| `modal run api/modal_janitor.py::usage_now` | maintenance | Reports what the two volumes currently hold |
+| `modal run api/modal_janitor.py::sweep_now` | maintenance | Runs the sweep immediately |
+| `modal deploy api/modal_janitor.py` | one-off | Installs the six-hourly schedule |
+| `modal run api/modal_runner.py::prune_raw_cache` | maintenance | Evicts cached raw files older than 30 days (`--max-age-days N` to override) |
+
+It only removes storage that regenerates on the next request: MaxQuant scratch left on
+the raw volume, stale `.downloading` locks, and job directories whose calls have
+finished. It never cancels a `FunctionCall`, never touches a running job's directory or
+a busy accession, and fails closed — an unreadable job registry aborts the sweep.
+Raw file eviction is delegated to `prune_raw_cache` rather than reimplemented.
 
 Checklist for the deploy to actually work:
 
@@ -316,7 +436,7 @@ Then unset `MQ_SERVER_URL` and `MQ_TOKEN` in `.env` and restart the API. The
 
 Two other things survive a partial teardown:
 
-- An orphaned in-flight worker bills 16 cores until its 86400 s timeout fires.
+- An orphaned in-flight worker bills 8 cores until its 86400 s timeout fires.
 Cancel it from the dashboard or with `FunctionCall.from_id(...).cancel()`.
 - A `keep_warm=1` container (Phase 3, if enabled) bills continuously even with
 no jobs running.
@@ -392,22 +512,44 @@ image = (
 
 ```python
 @app.function(
-    image=image, volumes={"/data": vol}, secrets=[secret],
-    cpu=16, memory=65536,   # 64 GB
-    timeout=86400,          # 24 h — NOT the 300 s default
+    image=image, volumes={"/data": vol, "/raw-cache": raw_vol}, secrets=[secret],
+    cpu=8, memory=20480,            # 20 GB — measured peak RSS 13.4 GB
+    ephemeral_disk=524288,          # 512 GiB — Modal's MINIMUM, not a target
+    timeout=86400,                  # 24 h — NOT the 300 s default
 )
-def run_maxquant(kit_bytes: bytes, accession: str) -> str: ...
+def _run_maxquant_search(kit_bytes, accession, job_id, force=False) -> None: ...
 ```
 
-**Storage split — raw files must not go on the Volume.** 24 × 1–5 GB = up to
-120 GB; `vol.commit()` serialises the whole dirty set back to object storage,
-costing minutes and real money for pure scratch.
+**Storage split — MaxQuant's scratch must not go on the Volume.** This is the single
+biggest lever on wall clock, and getting it wrong cost a factor of six.
 
-- Unpack the kit and run the pipeline under container-local `/tmp/<job_id>/`,
-with `PRIDEMAP_RAW_DIR=/tmp/<job_id>/cache`. Discarded on container exit, no
-commit cost. This also removes the `ln -sf` symlink question entirely.
-- Check Modal's ephemeral-disk allowance covers the dataset; raise the
-`ephemeral_disk` parameter if a large deposition exceeds it.
+MaxQuant writes per-file intermediates **next to each raw file** — `<name>.index` and
+a `<name>/` directory — and follows symlinks to do it. The kit symlinks `raw/` at
+`$PRIDEMAP_RAW_DIR`, so pointing that at the `raw-cache` Volume put every intermediate
+on a network filesystem Modal documents as "write-once, read-many", where a write
+inside an existing file can cost a rewrite of the whole file. Feature detection and
+deisotoping are exactly the write-heavy phases:
+
+| Feature detection | raw dir on Volume | raw dir on local SSD |
+| ----------------- | ----------------- | -------------------- |
+| 1.6 GB file       | 619 s             | **96 s**             |
+| 2.4 GB file       | 893 s             | **148 s**            |
+
+So `_stage_raw_local` copies the run's raw files from `/raw-cache` onto container-local
+disk before MaxQuant starts and points `PRIDEMAP_RAW_DIR` there — 3.8 GB in about 2 s
+at ~2.1 GB/s. It stages only the files this run's `mqpar.xml` names, because the cache
+is per accession while a run is per selection: staging the directory wholesale would
+copy all 57.6 GB of PXD046787 for a two-file search.
+
+The search container therefore only ever **reads** `raw-cache`, and does not commit it.
+Committing it on a timer during the search was pure overhead on data that cannot change.
+
+- `ephemeral_disk` has a **floor of 512 GiB** (`[524288, 3145728]` MiB). Measured peak
+use is ~15 GB on a two-run job, about 3% of the minimum you are obliged to request, so
+this is not a cost lever downwards and no measurement can inform it. Deriving it from
+observed usage produced 40960 and then 20480 MiB, and the platform rejected both with
+`Function disk request out of bounds`. Raise it only for a dataset whose raw set plus
+intermediates exceeds 512 GiB.
 - The Volume holds **only** `/data/<job_id>/`: `progress.jsonl`, `run.log`, and
 the final `combined/txt/proteinGroups.txt`.
 - A background shipper loop copies `progress.jsonl` + `run.log` into
@@ -425,10 +567,11 @@ ASGI app decorated `@modal.asgi_app(label="pridemap-mq")`, with
 | Endpoint                | Behaviour                                                                                                                                                                                     |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /health`           | `{"ok": true}` — satisfies the client's health gate                                                                                                                                           |
-| `POST /run`             | multipart field `kit`; **reject bad bearer token before any work**; `run_maxquant.spawn(...)`; write `jobs[accession] = call.object_id` **before** responding; return `{"job_id": ...}`       |
-| `GET /status/{job_id}`  | see below. Returns `{status, log, progress}` — `progress` is `run_all.sh`'s own stage events, copied off the container's work dir onto the Volume, and is what the UI's stages, elapsed time and ETA are computed from |
+| `POST /run`             | multipart field `kit`; optional `?force=1` to recompute a cached search; **reject bad bearer token before any work**; `run_maxquant.spawn(...)`; write `jobs[accession] = call.object_id` **before** responding; return `{"job_id": ...}`       |
+| `GET /status/{job_id}`  | see below. Returns `{status, log, progress, cpu}` — `progress` is `run_all.sh`'s own stage events, copied off the container's work dir onto the Volume, and is what the UI's stages, elapsed time and ETA are computed from; `cpu` is the container's own cgroup measurement, or `null` when nothing has been measured yet |
+| `GET /resource-advice`  | per-phase peak CPU, memory and disk across past jobs, with recommended constants. Check `jobs_analysed` — a short or failed run can dominate it |
 | `GET /results/{job_id}` | `vol.reload()`, stream `combined/txt/proteinGroups.txt`                                                                                                                                       |
-| `DELETE /job/{job_id}`  | cancel if live, drop the `jobs` entry, remove the Volume dir. Reports `{deleted, cancelled, problems}` — a swallowed cancel error here tells the caller a 16-core job stopped when it did not |
+| `DELETE /job/{job_id}`  | cancel if live, drop the `jobs` entry, and remove the Volume dir **only when the job produced no results** — pass `?purge=1` to delete a finished run's tables deliberately. Reports `{deleted, cancelled, kept_results, problems}` — a swallowed cancel error here tells the caller an 8-core job stopped when it did not |
 | `GET /jobs`             | all known accession→job_id with live status, so a runaway job can be found and killed over HTTP without Modal credentials                                                                     |
 | `GET /jobs/{accession}` | *(Phase 2)* read `jobs`, return the job_id                                                                                                                                                    |
 
@@ -443,7 +586,7 @@ as failed.
 
 **Why Phase 2 is not optional.** If the API process dies, `_active_remote_jobs`
 (`api/omics.py:2281`) loses the accession→job_id mapping. Without a reader for
-the `modal.Dict`, the job runs to completion unreachable, billing 16 cores for
+the `modal.Dict`, the job runs to completion unreachable, billing 8 cores for
 up to 24 h. Phase 2 is that reader, and it ships alongside this.
 
 ## Phase 1b — Push scooter: parallel raw-file downloads
@@ -500,10 +643,26 @@ Modal Dict becomes the source of truth.
 
 Only after 1a/1b/2 run on real data.
 
-- `cpu=16, memory=65536` are starting guesses. Read peak usage from
-`uvx modal app logs pridemap-maxquant` and tune.
-- Set `<numThreads>` in `mqpar.xml` to match the Modal `cpu` value — a mismatch
-means paying for cores MaxQuant never uses.
+**Done, from measurement rather than guesswork** — each container reports its own
+cgroup figures (`GET /status/{id}` → `cpu`, aggregated by `GET /resource-advice`), and
+the constants were set from observed peaks: search `cpu=8, memory=20480`, download
+`cpu=1, memory=1024`.
+
+What the measurements showed, and what is still open:
+
+- MaxQuant's early phases — feature detection, deisotoping, MS/MS preparation — run
+**one thread per raw file**, not one per core. On a two-file search that is ~2 busy
+cores whatever the allocation, so `numThreads` is sized from the reservation but more
+cores do not shorten those phases. The Andromeda phases do fan out and saturated all 8
+(`peak_busy_cores` 9.65, bursting past the reservation), so **8 is a floor rather than
+a settled optimum** — whether raising it helps depends on whether Modal bills the burst,
+which has not been checked.
+- `<numThreads>` is patched at container start from `MAXQUANT_SEARCH_CPU`, **not** from
+`os.cpu_count()`: a `cpu=8` container reports 24 visible cores, so sizing the thread
+pool from the host count oversubscribed the Andromeda phases 3:1.
+- The download worker's figures (0.22 busy cores, 0.1 GB RSS) were taken on a **warm
+cache**, where that container does almost nothing. They are not a valid basis for its
+sizing; a cold 57.6 GB download has never been measured.
 - `keep_warm=1` removes the 2–5 min cold start if demo reliability outweighs
 cost. Note it bills continuously.
 
