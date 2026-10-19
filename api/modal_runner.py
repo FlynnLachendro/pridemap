@@ -24,6 +24,7 @@ Contract (consumed by api/omics.py lines 2276-2487):
 # dependencies = ["modal>=0.73"]
 # ///
 
+import hashlib
 import io
 import json
 import os
@@ -365,6 +366,122 @@ class CpuSampler:
             disk_total_bytes=disk_total,
             peak_disk_used_bytes=self._peak_disk,
         )
+
+
+# ----------------------------------------------------------------------------- result cache
+#
+# Two deliberate choices, both reactions to how this went wrong before.
+#
+# ARTIFACT-GATED, NOT MARKER-GATED. Persistent stage markers were tried and reverted — see the long
+# comment in _run_maxquant_search. A `<stage>.done` file on the volume claimed "this work is
+# finished" while the work's PRODUCTS lived in an ephemeral work dir that was empty on the next run,
+# so the second run skipped stages and handed MaxQuant paths to files nothing had created. A marker
+# that can outlive its artifact is a lie the pipeline cannot detect. Here an entry exists if and
+# only if its table is readable: there is no separate completion flag that can disagree with disk.
+#
+# KEYED ON CONTENT, NOT ON THE KIT. Hashing the kit zip or mqpar.xml verbatim would never hit:
+# <filePaths> carries the per-container kit directory and <numThreads> is rewritten at container
+# start, so both differ on every run while describing identical science. The key is the raw inputs
+# plus the parameters that actually change the result.
+
+SEARCH_CACHE_SUBDIR = "cache/search"
+#: mqpar fields that differ between runs WITHOUT changing the science: absolute paths, and the
+#: thread count we patch per container. Everything else in the file is a search parameter.
+MQPAR_VOLATILE_TAGS = ("filePaths", "fixedCombinedFolder", "fixedSearchFolder", "numThreads")
+#: Tags holding a PATH whose basename still identifies the input. Blanking these would be wrong —
+#: searching a different proteome is different science — but keeping the absolute path would be too:
+#: it contains the per-container kit directory, so the key would never match between runs. A test
+#: caught this: the first version left fastaFilePath alone and every single run was a cache miss,
+#: which is the failure mode where a cache quietly does nothing at all.
+MQPAR_PATH_IDENTITY_TAGS = ("fastaFilePath",)
+#: The table whose presence defines a cache entry as valid.
+CACHE_RESULT_FILE = "proteinGroups.txt"
+
+
+def normalise_mqpar(text: str) -> str:
+    """mqpar.xml reduced to the fields that change the result, for hashing.
+
+    Volatile tags are blanked rather than removed, so a parameter file that stops specifying one is
+    not hashed identically to one that specifies it differently. Path-identity tags keep their
+    basename, which is the part that names the input rather than the container that held it.
+    """
+    import re as _re
+    out = text
+    for tag in MQPAR_VOLATILE_TAGS:
+        out = _re.sub(rf"<{tag}>.*?</{tag}>", f"<{tag}/>", out, flags=_re.DOTALL | _re.IGNORECASE)
+        out = _re.sub(rf"<{tag}\s*/>", f"<{tag}/>", out, flags=_re.IGNORECASE)
+    for tag in MQPAR_PATH_IDENTITY_TAGS:
+        out = _re.sub(
+            rf"<{tag}>([^<]*)</{tag}>",
+            lambda m, _t=tag: f"<{_t}>{pathlib.PurePath(m.group(1).strip()).name}</{_t}>",
+            out,
+            flags=_re.IGNORECASE,
+        )
+    return _re.sub(r"\s+", " ", out).strip()
+
+
+def search_cache_key(raw_ids: "list[tuple[str, str]]", mqpar_text: str) -> str:
+    """The cache key for one search: its raw inputs plus its search parameters.
+
+    `raw_ids` is (filename, content hash) per raw file. Content rather than name+size, because the
+    key asserts the science is identical and a re-downloaded or repaired file can carry the same
+    name and length. Hashing costs about 2 s for 3.8 GB at the throughput staging measures, against
+    a search measured in tens of minutes.
+
+    Keyed on the WHOLE SET, never per file. MaxQuant's LFQ and iBAQ normalisation is global across
+    the files in a run, so a result computed over a different set is not interchangeable even for
+    the files in common. Caching per file and recombining would be a faster wrong answer.
+    """
+    h = hashlib.sha256()
+    for name, digest in sorted(raw_ids):
+        h.update(name.encode())
+        h.update(b"\0")
+        h.update(digest.encode())
+        h.update(b"\0")
+    h.update(b"mqpar\0")
+    h.update(normalise_mqpar(mqpar_text).encode())
+    return h.hexdigest()[:32]
+
+
+def sha256_file(path: pathlib.Path, chunk: int = 8 << 20) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while block := f.read(chunk):
+            h.update(block)
+    return h.hexdigest()
+
+
+def search_cache_dir(key: str) -> pathlib.Path:
+    return DATA_ROOT / SEARCH_CACHE_SUBDIR / key
+
+
+def cached_results(key: str) -> "pathlib.Path | None":
+    """The cached table directory for this key, or None when there is no usable entry."""
+    txt = search_cache_dir(key) / "txt"
+    return txt if (txt / CACHE_RESULT_FILE).is_file() else None
+
+
+def store_results(key: str, txt_dir: pathlib.Path, manifest: dict) -> bool:
+    """Publish one search's tables into the cache. True when the entry is readable afterwards.
+
+    Staged through a temporary directory and moved into place, so a container that dies mid-copy
+    cannot leave a partial entry that the next run would treat as a hit.
+    """
+    dest = search_cache_dir(key)
+    if (dest / "txt" / CACHE_RESULT_FILE).is_file():
+        return True   # already published, by this run or a concurrent one
+    staging = dest.parent / f".incoming-{key}-{os.getpid()}"
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(txt_dir, staging / "txt")
+        (staging / "manifest.json").write_text(json.dumps(manifest, indent=1))
+        os.replace(staging, dest)
+        return True
+    except OSError as exc:
+        print(f"WARNING: could not cache results for {key}: {exc}", flush=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        return False
 
 
 # ----------------------------------------------------------------------------- raw staging (the real speed lever)
@@ -715,11 +832,17 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     ephemeral_disk=MAXQUANT_SEARCH_DISK,
     timeout=86400,  # 24 h
 )
-def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
+def _run_maxquant_search(
+    kit_bytes: bytes, accession: str, job_id: str, force: bool = False,
+) -> None:
     """Run MaxQuant. Raw files are already in raw_vol — download_raw.sh's have() skips them.
 
     The expensive 64 GB container only starts after _download_raw has committed all raw files,
     so it spends zero time waiting for downloads.
+
+    `force` recomputes even when an identical input set is already cached, and still republishes
+    the result. Default False: the point of the cache is that a stray click, a reload, or a second
+    tab costs a container start rather than another 45-minute search.
     """
     job_dir = DATA_ROOT / job_id
     log_path = job_dir / "run.log"
@@ -821,8 +944,12 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
         actual_cpus = MAXQUANT_SEARCH_CPU
         _log(f"container CPUs: {actual_cpus} reserved, {host_cpus} visible on the host "
              f"(numThreads is sized from the reservation)")
-        # Also the source of which raw files this run searches — see raw_names_in_mqpar.
+        # Also the source of which raw files this run searches — see raw_names_in_mqpar — and of the
+        # parameter half of the cache key. Read BEFORE the numThreads patch, so the key is over what
+        # the kit asked for; normalise_mqpar blanks numThreads regardless, but hashing the original
+        # keeps the key independent of the container that happened to run it.
         wanted_raws: set[str] = set()
+        mqpar_text = ""
         mqpar_files = list(work_dir.rglob("mqpar.xml"))
         if mqpar_files:
             mqpar_path = mqpar_files[0]
@@ -870,6 +997,51 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
             or pathlib.Path(RAW_CACHE_MOUNT)
         )
 
+        # Cache lookup, after staging because the key is over the raw file CONTENT and the staged
+        # copies are on local disk — hashing them there costs seconds rather than streaming GB back
+        # off the network volume. A hit means an identical input set was searched with identical
+        # parameters, so re-running would burn ~45 min to produce the same table.
+        cache_key = ""
+        raw_ids: list[tuple[str, str]] = []
+        raw_dir = raw_root / accession
+        try:
+            raw_files = sorted(p for p in raw_dir.glob("*.raw") if p.is_file())
+            if wanted_raws:
+                raw_files = [p for p in raw_files if p.name in wanted_raws] or raw_files
+            if raw_files and mqpar_files:
+                started = time.monotonic()
+                raw_ids = [(p.name, sha256_file(p)) for p in raw_files]
+                cache_key = search_cache_key(raw_ids, mqpar_text)
+                _log(f"cache key {cache_key} over {len(raw_ids)} raw file(s) "
+                     f"(hashed in {time.monotonic() - started:.0f} s)")
+        except OSError as exc:
+            # No key means no caching, which is only slow. Guessing a key would be wrong.
+            _log(f"cache key could not be computed ({exc}) — this run will not be cached")
+
+        if cache_key and not force:
+            hit = cached_results(cache_key)
+            if hit is not None:
+                out_dir = job_dir / "combined" / "txt"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for src in sorted(hit.glob("*")):
+                    if src.is_file():
+                        shutil.copyfile(src, out_dir / src.name)
+                manifest = {}
+                try:
+                    manifest = json.loads((hit.parent / "manifest.json").read_text())
+                except (OSError, json.JSONDecodeError):
+                    pass
+                when, src_job = manifest.get("completed_at", "an earlier run"), manifest.get("job_id", "unknown")
+                # Said out loud, in the log the UI shows. Serving cached science silently is how a
+                # stale number ends up in a paper; the user has to know to reach for Force re-run.
+                _log(f"CACHE HIT {cache_key} — reusing results from {when} (job {src_job}). "
+                     f"MaxQuant was not run. Use force to recompute.")
+                _write_progress(progress_path, "done", f"complete (reused cached results from {when})")
+                return
+            _log(f"cache miss {cache_key} — running MaxQuant")
+        elif force:
+            _log(f"force requested — running MaxQuant even though key {cache_key or '(none)'} may be cached")
+
         env = {
             **os.environ,
             "PRIDEMAP_RAW_DIR": str(raw_root),
@@ -910,6 +1082,25 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "proteinGroups.txt").write_bytes(protein_src.read_bytes())
         _log("proteinGroups.txt copied to volume")
+
+        # Populate the cache only now — AFTER search_failure() passed. A run that produced no
+        # protein table must never leave an entry behind for the next run to trust.
+        if cache_key:
+            stored = store_results(
+                cache_key,
+                protein_src.parent,
+                {
+                    "key": cache_key,
+                    "accession": accession,
+                    "job_id": job_id,
+                    "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "raw_files": [name for name, _ in raw_ids],
+                    "raw_sha256": {name: digest for name, digest in raw_ids},
+                    "maxquant_search_cpu": MAXQUANT_SEARCH_CPU,
+                },
+            )
+            _log(f"results cached under {cache_key}" if stored else "results could NOT be cached")
+
         _write_progress(progress_path, "done", "complete")
 
     except Exception as exc:
@@ -937,8 +1128,10 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     timeout=86400,   # Modal's maximum (24 h). _download_raw is capped at 2 h, leaving up to
                      # 22 h for MaxQuant — sufficient for all but the largest public datasets.
 )
-def run_maxquant(kit_bytes: bytes, accession: str) -> str:
+def run_maxquant(kit_bytes: bytes, accession: str, force: bool = False) -> str:
     """Lightweight orchestrator: sequences download (cheap) then search (expensive).
+
+    `force` is passed straight through to the search so a cached result is recomputed on request.
 
     Returning this function's own call_id keeps the polling contract unchanged:
     /status maps call_id → "running" while this orchestrator is alive (i.e. while either
@@ -994,7 +1187,7 @@ def run_maxquant(kit_bytes: bytes, accession: str) -> str:
     _vol_commit()
 
     try:
-        _run_maxquant_search.remote(kit_bytes, accession, job_id)
+        _run_maxquant_search.remote(kit_bytes, accession, job_id, force)
     except Exception as exc:
         _log(f"MAXQUANT FAILED: {exc}")
         _write_progress(progress_path, "error", f"maxquant failed: {exc}")
@@ -1153,9 +1346,9 @@ class _ModalBackend:
     which has no FastAPI installed.
     """
 
-    def spawn_job(self, kit_bytes: bytes, accession: str) -> str:
+    def spawn_job(self, kit_bytes: bytes, accession: str, force: bool = False) -> str:
         # object_id is read before responding so the caller always receives a pollable id.
-        return run_maxquant.spawn(kit_bytes, accession).object_id
+        return run_maxquant.spawn(kit_bytes, accession, force).object_id
 
     def accession_from_kit(self, kit_bytes: bytes) -> str:
         return _accession_from_kit(kit_bytes)
@@ -1204,9 +1397,16 @@ class _ModalBackend:
         path = job_dir / "combined" / "txt" / "proteinGroups.txt"
         return path if path.exists() else None
 
-    def delete_job(self, job_id: str) -> dict:
+    def delete_job(self, job_id: str, purge: bool = False) -> dict:
         # This is the budget stop-button, so every step reports what it actually did. Swallowing a
         # failed cancel here means a 16-core job keeps billing while the caller is told it stopped.
+        #
+        # It is NOT a delete-my-results button, which is what it used to be. Stop on a finished job
+        # cancelled nothing and then rmtree'd the directory, so the first search that ever ran to
+        # completion lost its protein table, its log and its measurements — and the loss looked like
+        # a reason to run the whole thing again. A completed run's output is now kept unless the
+        # caller explicitly asks to purge it; the registry entry is released either way, which is
+        # what actually unblocks the next submission.
         problems: list[str] = []
 
         try:
@@ -1217,15 +1417,25 @@ class _ModalBackend:
             problems.append(f"cancel failed: {exc}")
 
         job_dir = _job_dir(job_id)
+        has_results = job_dir is not None and (job_dir / "combined" / "txt" / CACHE_RESULT_FILE).is_file()
+        kept_results = False
+
         if job_dir is not None and job_dir.exists():
-            import shutil
-            shutil.rmtree(job_dir, ignore_errors=True)
-            if job_dir.exists():
-                problems.append("volume directory could not be removed")
-            try:
-                vol.commit()
-            except Exception as exc:
-                problems.append(f"volume commit failed: {exc}")
+            if has_results and not purge:
+                kept_results = True
+                print(
+                    f"keeping results for {job_id}: it produced {CACHE_RESULT_FILE}. "
+                    f"Pass purge to delete them.",
+                    flush=True,
+                )
+            else:
+                shutil.rmtree(job_dir, ignore_errors=True)
+                if job_dir.exists():
+                    problems.append("volume directory could not be removed")
+                try:
+                    vol.commit()
+                except Exception as exc:
+                    problems.append(f"volume commit failed: {exc}")
 
         try:
             for acc, jid in list(jobs.items()):
@@ -1234,7 +1444,12 @@ class _ModalBackend:
         except Exception as exc:
             problems.append(f"jobs dict cleanup failed: {exc}")
 
-        return {"deleted": not problems, "cancelled": cancelled, "problems": problems}
+        return {
+            "deleted": not problems and not kept_results,
+            "cancelled": cancelled,
+            "kept_results": kept_results,
+            "problems": problems,
+        }
 
     def list_jobs(self) -> list[tuple[str, str]]:
         return list(jobs.items())
