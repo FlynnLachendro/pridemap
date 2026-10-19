@@ -2496,6 +2496,37 @@ def corrections_stats():
 # In-process store: accession -> job_id.  Survives UI close/reopen; cleared on DELETE or server restart.
 _active_remote_jobs: dict[str, str] = {}
 
+# ----------------------------------------------------------------------------- transfer result cache
+# Maps selection_key → upload_id. Persisted to disk so the same comparison never re-runs MaxQuant
+# across API restarts. On a cache hit pipeline_remote_active / pipeline_remote_start return
+# {status: "done", upload_id} immediately — no Modal cold-start, no transfer, no Welch re-run.
+import threading as _threading
+
+_TRANSFER_CACHE_FILE = pathlib.Path.home() / ".pridemap" / "transfer_cache.json"
+_transfer_cache: dict[str, str] = {}
+_transfer_cache_lock = _threading.Lock()
+
+
+def _load_transfer_cache() -> None:
+    global _transfer_cache
+    try:
+        _transfer_cache = json.loads(_TRANSFER_CACHE_FILE.read_text())
+    except Exception:
+        _transfer_cache = {}
+
+
+def _save_transfer_entry(key: str, upload_id: str) -> None:
+    with _transfer_cache_lock:
+        _transfer_cache[key] = upload_id
+        try:
+            _TRANSFER_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _TRANSFER_CACHE_FILE.write_text(json.dumps(_transfer_cache, indent=2))
+        except Exception as exc:
+            logger.warning("transfer cache write failed: %s", exc)
+
+
+_load_transfer_cache()
+
 
 def _mq_remote_url() -> str:
     url = os.environ.get("MQ_SERVER_URL", "").rstrip("/")
@@ -2695,6 +2726,13 @@ def pipeline_remote_active(accession: str, runs: str = ""):
     Dict via GET /jobs/{accession} on the remote server so the job is still discoverable.
     """
     key = _remote_job_key(accession, runs)
+
+    # Transfer cache hit: results already uploaded to Analyse in a previous session — skip everything.
+    upload_id = _transfer_cache.get(key)
+    if upload_id:
+        logger.info("pipeline_remote_active  cache hit for %s → upload_id=%s", key, upload_id)
+        return {"job_id": None, "status": "done", "upload_id": upload_id, "cached": True}
+
     job_id = _active_remote_jobs.get(key)
     if job_id == _SUBMIT_PENDING:
         # A submission for this selection is mid-flight in another request. Reporting it as active
@@ -2827,11 +2865,32 @@ def remote_submission_problems(accession: str, runs: str, kit_bytes: bytes) -> l
     return problems
 
 
+@router.post("/dataset/{accession}/pipeline/remote/complete")
+def pipeline_remote_complete(accession: str, runs: str = "", upload_id: str = ""):
+    """Record that a completed transfer has been uploaded to Analyse for this selection.
+
+    Called by the frontend after a successful auto-transfer so future runs for the same
+    (accession, run selection) skip MaxQuant entirely and land directly on the Analyse page.
+    """
+    if not upload_id:
+        raise HTTPException(400, "upload_id is required")
+    key = _remote_job_key(accession, runs)
+    _save_transfer_entry(key, upload_id)
+    logger.info("pipeline_remote_complete  cached %s → %s", key, upload_id)
+    return {"ok": True, "cached": True}
+
+
 @router.post("/dataset/{accession}/pipeline/remote")
 def pipeline_remote_start(accession: str, runs: str = ""):
     """Submit the search kit to the remote MaxQuant server. Returns {job_id}."""
     base_url = _mq_remote_url()
     key = _remote_job_key(accession, runs)
+
+    # Transfer cache hit: results already in Analyse from a previous run — skip Modal entirely.
+    upload_id = _transfer_cache.get(key)
+    if upload_id:
+        logger.info("pipeline_remote_start  cache hit for %s → upload_id=%s", key, upload_id)
+        return {"job_id": None, "status": "done", "upload_id": upload_id, "cached": True}
 
     # Idempotent submit. A second click, a second tab, or a reload against a job the card lost track
     # of used to spawn another 16 CPU / 64 GB container and overwrite the registry entry — orphaning

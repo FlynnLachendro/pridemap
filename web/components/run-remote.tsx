@@ -33,6 +33,8 @@ type RemoteJob = {
   // The search container's own CPU/memory measurement. Null until the search phase starts writing
   // it, and from a server deployed before the readout existed — both mean "nothing to draw".
   cpu?: CpuReport | null;
+  // Set when results come from the transfer cache — upload already done, skip the auto-transfer.
+  upload_id?: string;
 };
 
 /** What a poll of the remote job returns, once the API has reduced the relayed stage events. */
@@ -73,13 +75,21 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   // without it the relayed events are matched against the wrong stage list.
   const runsQS = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
 
-  // Resume an in-progress job after UI close/reopen
+  // Resume an in-progress job after UI close/reopen, or restore from transfer cache on reload.
   useEffect(() => {
     let live = true;
     fetch(`${API}/dataset/${accession}/pipeline/remote/active${runsQS}`)
       .then((r) => r.ok ? r.json() : null)
       .then((d) => {
-        if (!live || !d?.job_id) return;
+        if (!live) return;
+        if (d?.upload_id && d?.status === "done") {
+          // Transfer cache hit: results already in Analyse — jump straight to the comparison page.
+          setJob({ status: "done", job_id: null, log: "", err: null,
+                   stages: [], stage_progress: false, upload_id: d.upload_id });
+          onDone?.(d.upload_id);
+          return;
+        }
+        if (!d?.job_id) return;
         const s = (d.status === "done" || d.status === "error") ? d.status : "running";
         setJob({ status: s as RemoteJob["status"], job_id: d.job_id, log: d.log ?? "", err: null,
                  stages: d.stages ?? [], stage_progress: d.stage_progress ?? false,
@@ -133,7 +143,8 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   // This replaces the manual download-then-upload step the user would otherwise have to perform.
   const uploadSeen = useRef<string | null>(null);
   useEffect(() => {
-    if (job.status !== "done" || !job.job_id || uploadSeen.current === job.job_id || !onDone) return;
+    // job.upload_id means results came from the transfer cache — already handled in mount/start.
+    if (job.status !== "done" || !job.job_id || job.upload_id || uploadSeen.current === job.job_id || !onDone) return;
     uploadSeen.current = job.job_id;
     const id = job.job_id;
     setJob((j) => ({ ...j, status: "transferring" }));
@@ -149,11 +160,14 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         const { upload_id } = await u.json();
         setJob((j) => ({ ...j, status: "done" }));
         onDone(upload_id);
+        // Record in server-side transfer cache so future runs skip MaxQuant entirely.
+        const runsParam = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
+        fetch(`${API}/dataset/${accession}/pipeline/remote/complete${runsParam}&upload_id=${encodeURIComponent(upload_id)}`, { method: "POST" }).catch(() => {});
       } catch (e) {
         setJob((j) => ({ ...j, status: "error", err: `Could not load results into Analyse: ${String(e)}`, failure: "server" }));
       }
     })();
-  }, [job.status, job.job_id, accession, onDone]);
+  }, [job.status, job.job_id, job.upload_id, accession, runs, onDone]);
 
   // Clean up on unmount only after job finishes
   useEffect(() => {
@@ -191,8 +205,14 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         setJob({ status: "error", job_id: null, log: "", err: await describeHttpError(r), failure: "server" });
         return;
       }
-      const { job_id } = await r.json();
-      setJob({ status: "running", job_id, log: "", err: null });
+      const data = await r.json();
+      if (data.upload_id && data.status === "done") {
+        // Transfer cache hit: skip MaxQuant entirely and go straight to the Analyse page.
+        setJob({ status: "done", job_id: null, log: "", err: null, upload_id: data.upload_id });
+        onDone?.(data.upload_id);
+        return;
+      }
+      setJob({ status: "running", job_id: data.job_id, log: "", err: null });
     } catch (e) {
       // fetch() rejects only on transport failure — server down, DNS, CORS, abort.
       setJob({ status: "error", job_id: null, log: "", err: String(e), failure: "network" });
