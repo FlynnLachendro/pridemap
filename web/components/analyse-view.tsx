@@ -892,6 +892,7 @@ function WelchResults({ out, uploadId, reportBody }: { out: RunOut; uploadId: st
         <div>{s.n_proteins.toLocaleString()} rows in the table{s.n_dropped_contaminants ? `, ${s.n_dropped_contaminants} dropped as contaminants` : ""}; rows with fewer than {s.min_valid} values in either group were skipped. Intensities {s.log_transform === "log2" ? `were log2-transformed (99th percentile of raw values ≈ ${s.p99_raw?.toLocaleString()})` : "were used as given (already log-scale)"}. {s.test}.</div>
       </div>
       <Volcano points={out.volcano} />
+      <TopHits rows={out.rows} />
       <ResultsTable rows={out.rows} columns={out.columns} uploadId={uploadId} />
     </div>
   );
@@ -910,13 +911,16 @@ function niceTicks(min: number, max: number, n = 6): number[] {
 function Volcano({ points }: { points: Pt[] }) {
   const [hover, setHover] = useState<Pt | null>(null);
   const W = 760, H = 440, m = { l: 56, r: 16, t: 20, b: 48 };
-  const { pts, xmax, ymax, sx, sy } = useMemo(() => {
+  const { pts, xmax, ymax, sx, sy, sigThreshold, topLabels } = useMemo(() => {
     const pts = points.filter((p) => p.log2fc !== null && p.neglog10p !== null) as (Pt & { log2fc: number; neglog10p: number })[];
     const xmax = Math.max(1, ...pts.map((p) => Math.abs(p.log2fc))) * 1.05;
     const ymax = Math.max(1, ...pts.map((p) => p.neglog10p)) * 1.05;
     const sx = (x: number) => m.l + ((x + xmax) / (2 * xmax)) * (W - m.l - m.r);
     const sy = (y: number) => H - m.b - (y / ymax) * (H - m.t - m.b);
-    return { pts, xmax, ymax, sx, sy };
+    const sigPts = pts.filter((p) => p.sig !== "ns");
+    const sigThreshold = sigPts.length > 0 ? Math.min(...sigPts.map((p) => p.neglog10p)) : null;
+    const topLabels = [...sigPts].sort((a, b) => b.neglog10p - a.neglog10p).slice(0, 5);
+    return { pts, xmax, ymax, sx, sy, sigThreshold, topLabels };
   }, [points, m.l, m.r, m.t, m.b]);
   const xt = niceTicks(-xmax, xmax), yt = niceTicks(0, ymax);
   const r = pts.length > 5000 ? 1.8 : 2.6;
@@ -958,9 +962,75 @@ function Volcano({ points }: { points: Pt[] }) {
               onMouseEnter={() => setHover(p)} onMouseLeave={() => setHover(null)}
             />
           ))}
+          {sigThreshold !== null && (
+            <g className="text-muted-foreground">
+              <line x1={m.l} x2={W - m.r} y1={sy(sigThreshold)} y2={sy(sigThreshold)} stroke="currentColor" strokeWidth={0.8} strokeDasharray="4 3" />
+              <text x={W - m.r - 2} y={sy(sigThreshold) - 3} textAnchor="end" fontSize={9} fill="currentColor">q = 0.05</text>
+            </g>
+          )}
+          {topLabels.map((p, i) => {
+            const cx = sx(p.log2fc), cy = sy(p.neglog10p);
+            const labelX = cx + (p.log2fc >= 0 ? 6 : -6);
+            const anchor = p.log2fc >= 0 ? "start" : "end";
+            const label = p.id.length > 18 ? p.id.slice(0, 17) + "…" : p.id;
+            return (
+              <text key={`lbl-${i}`} x={labelX} y={cy - 4} textAnchor={anchor} fontSize={9}
+                className={p.sig === "up" ? "text-peak" : "text-teal"} fill="currentColor" fontWeight="600" pointerEvents="none">
+                {label}
+              </text>
+            );
+          })}
           {hover && hover.log2fc !== null && hover.neglog10p !== null && (
             <circle cx={sx(hover.log2fc)} cy={sy(hover.neglog10p)} r={r + 3} fill="none" className="text-foreground" stroke="currentColor" strokeWidth={1.2} pointerEvents="none" />
           )}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+function TopHits({ rows }: { rows: Row[] }) {
+  const hits = useMemo(() => {
+    return rows
+      .filter((r): r is Row & { q: number; log2fc: number } => r.q !== null && r.q < 0.05 && r.log2fc !== null)
+      .sort((a, b) => a.q - b.q)
+      .slice(0, 10);
+  }, [rows]);
+  if (hits.length === 0) return null;
+  const W = 600, rH = 28, padL = 200, padR = 80, padT = 8, padB = 8;
+  const H = padT + hits.length * rH + padB;
+  const xmax = Math.max(0.5, ...hits.map((h) => Math.abs(h.log2fc)));
+  const sx = (v: number) => padL + ((v + xmax) / (2 * xmax)) * (W - padL - padR);
+  const z = sx(0);
+  return (
+    <div className="rounded-xl border bg-card p-3 grid gap-1">
+      <div className="flex flex-wrap items-center gap-3 text-xs px-1">
+        <span className="font-semibold">Top hits</span>
+        <span className="text-muted-foreground">q &lt; 0.05, ranked by significance · bar = log2FC · positive = higher in B</span>
+        <span className="flex items-center gap-1 ml-auto"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> up</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> down</span>
+      </div>
+      <div className="overflow-x-auto">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-[600px] mx-auto block" role="img" aria-label="horizontal bar chart of top significant proteins by log2 fold change">
+          <line x1={z} x2={z} y1={0} y2={H} className="text-muted-foreground" stroke="currentColor" strokeWidth={0.8} strokeDasharray="3 2" />
+          {hits.map((h, i) => {
+            const y = padT + i * rH;
+            const up = h.log2fc > 0;
+            const bx = up ? z : sx(h.log2fc);
+            const bw = Math.max(2, Math.abs(sx(h.log2fc) - z));
+            const label = h.id.length > 26 ? h.id.slice(0, 25) + "…" : h.id;
+            return (
+              <g key={`${h.id}-${i}`}>
+                <text x={padL - 6} y={y + rH * 0.66} textAnchor="end" fontSize={10} className="text-muted-foreground" fill="currentColor">{label}</text>
+                <g className={up ? "text-peak" : "text-teal"}>
+                  <rect x={bx} y={y + rH * 0.18} width={bw} height={rH * 0.64} fill="currentColor" opacity={0.85} rx={2} />
+                  <text x={up ? sx(h.log2fc) + 4 : sx(h.log2fc) - 4} y={y + rH * 0.66} textAnchor={up ? "start" : "end"} fontSize={9} fill="currentColor" fontWeight="600">
+                    {(h.log2fc > 0 ? "+" : "") + h.log2fc.toFixed(2)}
+                  </text>
+                </g>
+              </g>
+            );
+          })}
         </svg>
       </div>
     </div>
