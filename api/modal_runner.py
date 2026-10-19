@@ -73,15 +73,14 @@ DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
 # on ONE thread, whatever the core count. The lever is keeping MaxQuant's scratch off the network
 # Volume — see _stage_raw_local — and, for bigger runs, more raw files to spread over more cores.
 # cpu_report() exists so the next run measures what it actually used rather than being guessed at.
-MAXQUANT_SEARCH_CPU    = 8
-MAXQUANT_SEARCH_MEMORY = 65536   # MB (64 GB)
-# Set explicitly rather than inherited. MaxQuant's scratch now lands on this container-local disk
-# instead of raw_vol, so the ceiling has to cover the raw set plus its intermediates: the 24-file
-# PXD046787 run is 57.6 GB of raw alone. 512 GiB is also Modal's default, so naming it here changes
-# nothing today and makes the dependency visible when a dataset outgrows it.
-MAXQUANT_SEARCH_DISK   = 524288  # MB (512 GiB)
-MAXQUANT_DOWNLOAD_CPU    = 2
-MAXQUANT_DOWNLOAD_MEMORY = 4096  # MB (4 GB)
+MAXQUANT_SEARCH_CPU    = 8       # measured peak busy: 10.09 cores (bursting on host beyond reservation is normal); keep 8
+MAXQUANT_SEARCH_MEMORY = 20480   # MB (20 GB); measured peak RSS: 13.4 GB; 1.5× headroom → 20 GB  (was 64 GB)
+# Set explicitly rather than inherited. MaxQuant's scratch lands on container-local disk.
+# Right-sized from telemetry: peak 15.8 GB on a 2-run PXD046787 job; 2× headroom → 40 GB.
+# Scale this up for datasets with more runs or larger raw files.
+MAXQUANT_SEARCH_DISK   = 40960   # MB (40 GB); measured peak disk: 15.8 GB; 2× headroom → 40 GB  (was 512 GiB)
+MAXQUANT_DOWNLOAD_CPU    = 1     # measured peak: 0.22 busy cores (network-bound); 1.25× headroom → 1
+MAXQUANT_DOWNLOAD_MEMORY = 1024  # MB (1 GB); measured peak: 0.1 GB RSS; 1.5× headroom → 1 GB
 
 
 def _vol_sync(action: str, v: "Volume | None" = None) -> None:
@@ -1236,6 +1235,87 @@ class _ModalBackend:
             return jobs.get(accession)
         except Exception:
             return None
+
+    def resource_advice(self) -> dict:
+        """Scan completed job directories and recommend resource allocations.
+
+        Reads cpu-{phase}.json from every job directory on the volume, aggregates
+        per-phase peak values across all runs, and returns current constants vs
+        recommended values. Headroom: 2× CPU busy cores, 1.5× RSS, 2× disk peak.
+        """
+        import math
+
+        peaks: dict[str, dict] = {phase: {} for phase in CPU_REPORT_PHASES}
+        job_count = 0
+
+        try:
+            job_dirs = [p for p in DATA_ROOT.iterdir() if p.is_dir()]
+        except (OSError, NotImplementedError) as exc:
+            return {"error": f"could not list job directories: {exc}", "jobs_analysed": 0}
+
+        for job_dir in job_dirs:
+            found_any = False
+            for phase in CPU_REPORT_PHASES:
+                try:
+                    report = json.loads((job_dir / cpu_report_file(phase)).read_text())
+                except (OSError, json.JSONDecodeError, ValueError):
+                    continue
+                found_any = True
+                p = peaks[phase]
+                for key in ("peak_busy_cores", "peak_rss_gb", "peak_disk_used_gb"):
+                    val = report.get(key)
+                    if val is not None:
+                        p[key] = max(p.get(key, 0.0), float(val))
+            if found_any:
+                job_count += 1
+
+        def _nice_cpu(cores: float) -> int:
+            return max(1, math.ceil(cores))
+
+        def _nice_mem_mb(gb: float) -> int:
+            return max(1024, math.ceil(gb) * 1024)
+
+        def _nice_disk_mb(gb: float) -> int:
+            return max(10240, math.ceil(gb / 10) * 10 * 1024)
+
+        sp, dp = peaks["search"], peaks["download"]
+        search_rec: dict = {}
+        download_rec: dict = {}
+
+        # CPU headroom: 1.25× peak busy cores, rounded up. MaxQuant numThreads is set to
+        # the allocation, so over-allocating wastes money without helping throughput.
+        # Memory: 1.5× peak RSS — allows for heap growth between samples.
+        # Disk: 2× peak used — combining and writing tables can double the working set.
+        if sp.get("peak_busy_cores") is not None:
+            search_rec["cpu"] = _nice_cpu(sp["peak_busy_cores"] * 1.25)
+        if sp.get("peak_rss_gb") is not None:
+            search_rec["memory_mb"] = _nice_mem_mb(sp["peak_rss_gb"] * 1.5)
+        if sp.get("peak_disk_used_gb") is not None:
+            search_rec["ephemeral_disk_mb"] = _nice_disk_mb(sp["peak_disk_used_gb"] * 2.0)
+
+        if dp.get("peak_busy_cores") is not None:
+            download_rec["cpu"] = _nice_cpu(dp["peak_busy_cores"] * 1.25)
+        if dp.get("peak_rss_gb") is not None:
+            download_rec["memory_mb"] = _nice_mem_mb(dp["peak_rss_gb"] * 1.5)
+
+        return {
+            "jobs_analysed": job_count,
+            "peaks": peaks,
+            "current": {
+                "search": {
+                    "cpu": MAXQUANT_SEARCH_CPU,
+                    "memory_mb": MAXQUANT_SEARCH_MEMORY,
+                    "ephemeral_disk_mb": MAXQUANT_SEARCH_DISK,
+                },
+                "download": {
+                    "cpu": MAXQUANT_DOWNLOAD_CPU,
+                    "memory_mb": MAXQUANT_DOWNLOAD_MEMORY,
+                },
+            },
+            "recommended": {"search": search_rec, "download": download_rec},
+            "headroom": {"cpu": "1.25×", "memory": "1.5×", "disk": "2×"},
+            "note": "recommendations improve as more completed jobs accumulate on the volume",
+        }
 
 
 @app.function(

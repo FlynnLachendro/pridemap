@@ -61,6 +61,7 @@ class Backend(Protocol):
     def delete_job(self, job_id: str) -> dict: ...
     def list_jobs(self) -> list[tuple[str, str]]: ...
     def job_for_accession(self, accession: str) -> str | None: ...
+    def resource_advice(self) -> dict: ...
 
 
 def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = "unknown") -> FastAPI:
@@ -151,5 +152,17 @@ def build_app(backend: Backend, *, expected_token: str = "", fingerprint: str = 
     def jobs_for_accession(accession: str, authorization: str = Header(default="")) -> dict:
         _check_token(authorization)
         return {"job_id": backend.job_for_accession(accession)}
+
+    @api.get("/resource-advice")
+    def resource_advice(authorization: str = Header(default="")) -> dict:
+        """Scan completed job directories and return resource sizing recommendations.
+
+        Aggregates per-phase peak CPU, memory and disk values across all runs on the
+        volume, then applies headroom multipliers (2× CPU, 1.5× memory, 2× disk) to
+        produce recommended container constants. Use these to right-size MAXQUANT_*
+        constants in modal_runner.py rather than keeping the initial guesses.
+        """
+        _check_token(authorization)
+        return backend.resource_advice()
 
     return api

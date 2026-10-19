@@ -2609,6 +2609,26 @@ def _mq_await_ready(
     )
 
 
+@router.get("/remote-mq/resource-advice")
+def remote_mq_resource_advice():
+    """Relay GET /resource-advice from the Modal runner.
+
+    Returns per-phase peak measurements and recommended container constants derived
+    from all completed jobs on the Modal volume. Use the recommendations to update
+    MAXQUANT_* constants in modal_runner.py and redeploy.
+    """
+    base_url = _mq_remote_url()
+    url = f"{base_url}/resource-advice"
+    req = urllib.request.Request(url, headers=_mq_auth_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise _mq_upstream_error(url, e.code, e.read().decode(errors="replace"))
+    except Exception as e:
+        raise HTTPException(502, f"remote MQ server unreachable: {e}")
+
+
 @router.get("/remote-mq")
 def remote_mq_info():
     """Tells the UI whether a remote MaxQuant server is configured.
