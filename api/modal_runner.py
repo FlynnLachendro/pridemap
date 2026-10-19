@@ -73,12 +73,21 @@ DATA_ROOT = pathlib.Path(os.environ.get("PRIDEMAP_DATA_ROOT", VOLUME_MOUNT))
 # on ONE thread, whatever the core count. The lever is keeping MaxQuant's scratch off the network
 # Volume — see _stage_raw_local — and, for bigger runs, more raw files to spread over more cores.
 # cpu_report() exists so the next run measures what it actually used rather than being guessed at.
+#: Modal's accepted ephemeral_disk range in MiB, enforced at deploy time. Named here because two
+#: separate attempts to derive the value from measured usage were rejected by the platform, and the
+#: bound is the reason — not the measurement.
+MODAL_DISK_MIN_MB = 524288    # 512 GiB
+MODAL_DISK_MAX_MB = 3145728   # 3 TiB
+
 MAXQUANT_SEARCH_CPU    = 8       # measured peak busy: 10.09 cores (bursting on host beyond reservation is normal); keep 8
 MAXQUANT_SEARCH_MEMORY = 20480   # MB (20 GB); measured peak RSS: 13.4 GB; 1.5× headroom → 20 GB  (was 64 GB)
 # Set explicitly rather than inherited. MaxQuant's scratch lands on container-local disk.
-# Right-sized from telemetry: peak 15.8 GB on a 2-run PXD046787 job; 2× headroom → 40 GB.
-# Scale this up for datasets with more runs or larger raw files.
-MAXQUANT_SEARCH_DISK   = 524288  # MB (512 GiB); Modal's minimum — cannot go lower regardless of measured peak
+#
+# This is NOT right-sized from telemetry and cannot be: Modal enforces 512 GiB as the LOWER bound
+# for ephemeral_disk, so the measured peak (~15 GB on a two-run job) is irrelevant to the value.
+# Deriving it from the measurement produced 40960 and then 20480 MiB and both were rejected at
+# deploy time. Raise it only for a dataset whose raw set plus intermediates exceeds 512 GiB.
+MAXQUANT_SEARCH_DISK   = MODAL_DISK_MIN_MB
 MAXQUANT_DOWNLOAD_CPU    = 1     # measured peak: 0.22 busy cores (network-bound); 1.25× headroom → 1
 MAXQUANT_DOWNLOAD_MEMORY = 1024  # MB (1 GB); measured peak: 0.1 GB RSS; 1.5× headroom → 1 GB
 
@@ -1276,7 +1285,17 @@ class _ModalBackend:
             return max(1024, math.ceil(gb) * 1024)
 
         def _nice_disk_mb(gb: float) -> int:
-            return max(10240, math.ceil(gb / 10) * 10 * 1024)
+            # Clamped to what Modal actually accepts. Unclamped this produced 40960 and then 20480
+            # MiB from real measurements, and BOTH were rejected at deploy time with "Function disk
+            # request out of bounds: must be between 524288 and 3145728 MiB" — so following the
+            # advice broke the deploy twice. A recommendation that cannot be applied is not advice.
+            #
+            # Note what this means for sizing: ephemeral_disk has a 512 GiB FLOOR, so disk is not a
+            # cost lever downwards at all. Measured peak use is ~15 GB on a two-run job, which is 3%
+            # of the minimum we are obliged to request. Only a dataset needing more than 512 GiB
+            # makes this number worth changing.
+            want = max(MODAL_DISK_MIN_MB, math.ceil(gb / 10) * 10 * 1024)
+            return min(MODAL_DISK_MAX_MB, want)
 
         sp, dp = peaks["search"], peaks["download"]
         search_rec: dict = {}
