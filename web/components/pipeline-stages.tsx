@@ -240,6 +240,13 @@ export type CpuReport = {
   peak_busy_cores?: number;
   rss_gb?: number;
   peak_rss_gb?: number;
+  /** Which container reported this — "search", "download". Every pillar is sized per function. */
+  phase?: string;
+  disk_used_gb?: number;
+  peak_disk_used_gb?: number;
+  disk_total_gb?: number;
+  /** Each phase's own report, so one phase's figures never size another's allocation. */
+  phases?: Record<string, CpuReport>;
 };
 
 /** One line of "is MaxQuant actually using the cores we paid for".
@@ -270,11 +277,16 @@ export function CpuPill({ cpu }: { cpu?: CpuReport | null }) {
           : "Measured inside the search container, not requested — cgroup CPU and memory accounting."
       }
     >
+      {cpu.phase && `${cpu.phase}: `}
       {cpuText}
       {cpu.host_cores != null && cpu.host_cores !== cpu.cores && ` (host has ${cpu.host_cores})`}
       {cpu.peak_busy_cores != null && ` · peak ${cpu.peak_busy_cores.toFixed(1)}`}
       {cpu.rss_gb != null && ` · RAM ${cpu.rss_gb.toFixed(1)} / ${cpu.memory_gb} GB`}
       {cpu.peak_rss_gb != null && ` (peak ${cpu.peak_rss_gb.toFixed(1)})`}
+      {/* Disk is shown as peak-of-total because that is the number ephemeral_disk has to cover;
+          current usage dips as MaxQuant deletes intermediates and would under-report the ceiling. */}
+      {cpu.peak_disk_used_gb != null && cpu.disk_total_gb != null &&
+        ` · disk peak ${cpu.peak_disk_used_gb.toFixed(1)} / ${cpu.disk_total_gb.toFixed(0)} GB`}
     </span>
   );
 }

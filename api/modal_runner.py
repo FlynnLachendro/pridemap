@@ -136,7 +136,15 @@ def _vol_commit(v: "Volume | None" = None, *, what: str = "volume") -> bool:
 # no usage at all — the readout looked present and measured nothing. v1 is therefore tried first,
 # with v2 kept second so a future Modal migration does not silently blind this again.
 
-CPU_REPORT_FILE = "cpu.json"
+#: One report file per phase. A single cpu.json meant whichever container wrote last won, so the
+#: download worker's figures erased the search worker's and neither could be attributed. Each pillar
+#: is declared per function, so each function reports separately.
+CPU_REPORT_FILE = "cpu.json"            # legacy single-phase name, still read for in-flight jobs
+CPU_REPORT_PHASES = ("search", "download")
+
+
+def cpu_report_file(phase: str) -> str:
+    return f"cpu-{phase}.json"
 CGROUP_V1_CPUACCT = "/sys/fs/cgroup/cpuacct/cpuacct.usage"        # nanoseconds
 CGROUP_V2_CPU_STAT = "/sys/fs/cgroup/cpu.stat"                    # usage_usec key
 CGROUP_MEM_FILES = (
@@ -190,11 +198,20 @@ def cpu_report(
     memory_mb: int,
     peak_busy: float | None = None,
     peak_rss_bytes: int | None = None,
+    phase: str = "",
+    disk_used_bytes: int | None = None,
+    disk_total_bytes: int | None = None,
+    peak_disk_used_bytes: int | None = None,
 ) -> dict:
-    """The /status payload describing this container's CPU and memory use.
+    """The /status payload describing one container's CPU, memory and disk use.
 
     Rounded here rather than in the UI so the card and the log agree on the figures, and so the
     numbers that get pasted into a sizing decision are the numbers that were measured.
+
+    `phase` names which container this came from, because every resource pillar is sized per
+    function and a figure with no owner cannot size anything: 8.7 GB peak means "lower the search
+    worker's 64 GB" or "the 4 GB download worker is about to OOM" depending entirely on who
+    reported it.
     """
     # `cores` is the RESERVATION, because that is what is paid for and what busy_pct should be read
     # against. `host_cores` is what os.cpu_count() saw, kept because the two differ (a cpu=8
@@ -206,6 +223,8 @@ def cpu_report(
         "memory_gb": round(memory_mb / 1024, 1),
         "ts": time.time(),
     }
+    if phase:
+        report["phase"] = phase
     if busy is not None:
         report["busy_cores"] = round(busy, 2)
         report["busy_pct"] = round(100 * busy / allocated) if allocated else None
@@ -215,6 +234,15 @@ def cpu_report(
         report["rss_gb"] = round(rss_bytes / 1024**3, 1)
     if peak_rss_bytes is not None:
         report["peak_rss_gb"] = round(peak_rss_bytes / 1024**3, 1)
+    # Disk is the pillar that was sized by guess: ephemeral_disk was set to 512 GiB because that is
+    # Modal's default, with no measurement of what a run actually needs. Staging raw files locally
+    # made it load-bearing rather than incidental, so it gets measured like the others.
+    if disk_used_bytes is not None:
+        report["disk_used_gb"] = round(disk_used_bytes / 1024**3, 1)
+    if peak_disk_used_bytes is not None:
+        report["peak_disk_used_gb"] = round(peak_disk_used_bytes / 1024**3, 1)
+    if disk_total_bytes is not None:
+        report["disk_total_gb"] = round(disk_total_bytes / 1024**3, 1)
     return report
 
 
@@ -254,22 +282,49 @@ def _cgroup_memory_bytes() -> int | None:
     return None
 
 
+def _disk_usage(path: "pathlib.Path | None") -> "tuple[int | None, int | None]":
+    """(used, total) bytes on the filesystem holding `path`, or (None, None).
+
+    Measures the EPHEMERAL disk, which is why the caller passes its own work dir rather than "/":
+    the raw staging copy and every MaxQuant intermediate land there, and that is the figure
+    ephemeral_disk has to cover.
+    """
+    if path is None:
+        return None, None
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return None, None
+    return usage.used, usage.total
+
+
 class CpuSampler:
     """Turns repeated polls into a cpu_report dict. Holds the previous sample; that is all its state.
 
     Separate from the shipper thread that drives it so the sampling interval is whatever the caller
     already ticks on, and so a failure to read a cgroup file degrades to "no figures this tick"
     rather than killing the thread that also ships stage events.
+
+    One of these per function, each labelled with its `phase`. Every resource pillar — cpu, memory,
+    ephemeral_disk, timeout — is declared per function, so sizing any of them needs figures
+    attributed to the function that produced them. Before this, only the search worker reported
+    anything, which is why three of the four containers were still sized by assumption.
     """
 
-    def __init__(self, *, allocated: int, memory_mb: int) -> None:
+    def __init__(
+        self, *, allocated: int, memory_mb: int, phase: str = "",
+        disk_path: "pathlib.Path | None" = None,
+    ) -> None:
         self.allocated = allocated
         self.memory_mb = memory_mb
+        self.phase = phase
+        self.disk_path = disk_path
         self.cores = os.cpu_count() or allocated
         self._prev_usec = _cgroup_usage_usec()
         self._prev_at = time.monotonic()
         self._peak_busy: float | None = None
         self._peak_rss: int | None = None
+        self._peak_disk: int | None = None
 
     def sample(self) -> dict:
         cur_usec, cur_at = _cgroup_usage_usec(), time.monotonic()
@@ -285,6 +340,10 @@ class CpuSampler:
         if rss is not None:
             self._peak_rss = rss if self._peak_rss is None else max(self._peak_rss, rss)
 
+        disk_used, disk_total = _disk_usage(self.disk_path)
+        if disk_used is not None:
+            self._peak_disk = disk_used if self._peak_disk is None else max(self._peak_disk, disk_used)
+
         return cpu_report(
             cores=self.cores,
             allocated=self.allocated,
@@ -293,6 +352,10 @@ class CpuSampler:
             memory_mb=self.memory_mb,
             peak_busy=self._peak_busy,
             peak_rss_bytes=self._peak_rss,
+            phase=self.phase,
+            disk_used_bytes=disk_used,
+            disk_total_bytes=disk_total,
+            peak_disk_used_bytes=self._peak_disk,
         )
 
 
@@ -514,7 +577,23 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
     _vol_sync("reload")        # see the job_dir the orchestrator created and committed
     _vol_sync("reload", raw_vol)
     _log(f"raw cache: {RAW_CACHE_MOUNT} (reload attempted — failures are swallowed off Modal)")
-    _log(f"container CPUs available: {os.cpu_count()} (allocated: {MAXQUANT_DOWNLOAD_CPU})")
+    _log(f"container CPUs: {MAXQUANT_DOWNLOAD_CPU} reserved, {os.cpu_count()} visible on the host")
+
+    # This phase's own resource figures. Downloading is I/O bound, so 2 CPU and 4 GB were a guess
+    # that nothing had ever checked — and the guess is per function, so the search worker's numbers
+    # say nothing about it. Reported under its own phase name so the two cannot be confused.
+    dl_sampler = CpuSampler(
+        allocated=MAXQUANT_DOWNLOAD_CPU, memory_mb=MAXQUANT_DOWNLOAD_MEMORY, phase="download",
+    )
+    dl_cpu_path = job_dir / cpu_report_file("download")
+
+    def _ship_dl_cpu() -> dict:
+        report = dl_sampler.sample()
+        try:
+            dl_cpu_path.write_text(json.dumps(report))
+        except OSError:
+            pass   # diagnostic only; must never break the download
+        return report
 
     # Concurrent-download guard: two containers downloading the same accession simultaneously
     # both run `curl -C -` against the same partial file on raw_vol, producing a corrupt result.
@@ -586,6 +665,7 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
 
     def _ship() -> None:
         while not _stop.wait(15):
+            _ship_dl_cpu()
             _vol_commit()
             _vol_commit(raw_vol, what="raw cache")
 
@@ -611,6 +691,7 @@ def _download_raw(kit_bytes: bytes, accession: str, job_id: str) -> None:
         _stop.set()
         if lock_acquired:
             lock_file.unlink(missing_ok=True)   # release lock so concurrent jobs can proceed
+        _log(f"resources used (download): {json.dumps(_ship_dl_cpu())}")
         _vol_commit(raw_vol, what="raw cache")
         _vol_commit()
 
@@ -635,7 +716,7 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     job_dir = DATA_ROOT / job_id
     log_path = job_dir / "run.log"
     progress_path = job_dir / "progress.jsonl"
-    cpu_path = job_dir / CPU_REPORT_FILE
+    cpu_path = job_dir / cpu_report_file("search")
 
     # Reload before first write so the log lines from _download_raw are visible in the file
     # we append to, and so the raw files committed by _download_raw are on-disk.
@@ -675,7 +756,12 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
     # using", because that question needs two samples an interval apart and this is the interval we
     # already have. A failed write is dropped: the readout is diagnostic, and losing a tick of it
     # must never take down the thread the stage display depends on.
-    sampler = CpuSampler(allocated=MAXQUANT_SEARCH_CPU, memory_mb=MAXQUANT_SEARCH_MEMORY)
+    # disk_path is set after the work dir exists (below); until then the sampler reports cpu/memory
+    # only. ephemeral_disk is what the staging copy and MaxQuant's intermediates consume, so the
+    # figure has to come from the filesystem holding the work dir rather than from "/".
+    sampler = CpuSampler(
+        allocated=MAXQUANT_SEARCH_CPU, memory_mb=MAXQUANT_SEARCH_MEMORY, phase="search",
+    )
 
     def _ship_cpu(report: "dict | None" = None) -> dict:
         report = sampler.sample() if report is None else report
@@ -703,6 +789,7 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
 
     try:
         work_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"mq-{job_id}-"))
+        sampler.disk_path = work_dir   # now the ephemeral disk can be measured, not assumed
         kit_progress.append(work_dir / "progress.jsonl")
 
         with zipfile.ZipFile(io.BytesIO(kit_bytes)) as zf:
@@ -827,7 +914,7 @@ def _run_maxquant_search(kit_bytes: bytes, accession: str, job_id: str) -> None:
         # One final sample, written AND logged — taking two would leave the second with no interval
         # to measure. The peak is what a sizing decision needs, and the log is where it survives
         # after the job directory is cleaned up.
-        _log(f"CPU/RAM used: {json.dumps(_ship_cpu())}")
+        _log(f"resources used (search): {json.dumps(_ship_cpu())}")
         _vol_commit()
 
 
@@ -1261,20 +1348,34 @@ def _read_log(job_id: str) -> str:
 
 
 def _read_cpu(job_id: str) -> dict | None:
-    """This job's last CPU/memory sample, or None when there is no measurement.
+    """This job's resource measurements, or None when there is nothing measured.
 
     None is a distinct answer from zero usage: a job that has not reached the search phase, a server
-    deployed before the readout existed, and a host without cgroup v2 all have nothing to report, and
-    the card must say so rather than draw an idle container.
+    deployed before the readout existed, and a host without a readable cgroup all have nothing to
+    report, and the card must say so rather than draw an idle container.
+
+    The search worker's figures are the headline because that is the expensive container, but every
+    phase's report is carried under `phases` so the download and orchestrator allocations can be
+    sized from their own numbers rather than from the search worker's.
     """
     job_dir = _job_dir(job_id)
     if job_dir is None:
         return None
-    try:
-        report = json.loads((job_dir / CPU_REPORT_FILE).read_text())
-    except (OSError, json.JSONDecodeError):
+
+    def _load(name: str) -> dict | None:
+        try:
+            report = json.loads((job_dir / name).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        return report if isinstance(report, dict) else None
+
+    phases = {p: r for p in CPU_REPORT_PHASES if (r := _load(cpu_report_file(p))) is not None}
+    # Prefer the search worker, fall back to whatever else reported, and finally to the legacy
+    # single-phase file so a job already in flight when this deployed still shows figures.
+    headline = phases.get("search") or next(iter(phases.values()), None) or _load(CPU_REPORT_FILE)
+    if headline is None:
         return None
-    return report if isinstance(report, dict) else None
+    return {**headline, "phases": phases} if phases else headline
 
 
 def _read_stage_events(job_id: str) -> list[dict]:
