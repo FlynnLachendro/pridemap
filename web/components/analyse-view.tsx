@@ -25,10 +25,14 @@ type Inspect = {
   id_columns: string[]; numeric_columns: string[]; suggested_groups: Group[]; contaminant_columns: string[];
   mztab?: MzTab | null;
 };
-type Row = { id: string; log2fc: number | null; t: number | null; p: number | null; q: number | null; mean_a: number | null; mean_b: number | null; n_a: number; n_b: number };
+// detection is present only in the descriptive (one-column-a-side) comparison, where a protein seen
+// in one sample and not the other is the finding — there is no p-value to carry it.
+type Row = { id: string; log2fc: number | null; t: number | null; p: number | null; q: number | null; mean_a: number | null; mean_b: number | null; n_a: number; n_b: number; detection?: "both" | "a_only" | "b_only" };
 type Pt = { id: string; log2fc: number | null; neglog10p: number | null; sig: "up" | "down" | "ns" };
 type RunOut = {
-  summary: { n_proteins: number; n_dropped_contaminants: number; n_tested: number; n_sig_q05: number; n_up: number; n_down: number; log_transform: string; p99_raw: number | null; min_valid: number; sign: string; test: string };
+  // comparison === "descriptive" is the one-column-a-side answer: no inference, so n_tested and the
+  // significance counts are all zero and the detection counts carry the result instead.
+  summary: { n_proteins: number; n_dropped_contaminants: number; n_tested: number; n_sig_q05: number; n_up: number; n_down: number; log_transform: string; p99_raw: number | null; min_valid: number; sign: string; test: string; comparison?: string; n_quantified_both?: number; n_a_only?: number; n_b_only?: number; replicates?: { a: number; b: number } };
   columns: string[]; rows: Row[]; volcano: Pt[];
 };
 type SampleRow = { file_name: string; run: string; size_bytes: number | null; ftp: string | null; annotations: Record<string, { value: string; source: string; source_kind: string }>; label: string; local: boolean };
@@ -47,7 +51,14 @@ async function jfetch<T>(r: Promise<Response>): Promise<T> {
   }
   return res.json();
 }
-const fmt = (v: number | null | undefined, d = 3) => (v === null || v === undefined ? "—" : Math.abs(v) < 1e-3 && v !== 0 ? v.toExponential(2) : v.toFixed(d));
+// Non-numbers pass through as text rather than being formatted. The descriptive comparison adds a
+// "detection" column whose values are words ("both", "a_only"), and a call site casting those to
+// number reached v.toFixed and threw at render. Guarding the formatter rather than that one caller
+// keeps every column safe, including ones added later.
+const fmt = (v: number | string | null | undefined, d = 3) =>
+  v === null || v === undefined ? "—"
+    : typeof v !== "number" ? String(v)
+      : Math.abs(v) < 1e-3 && v !== 0 ? v.toExponential(2) : v.toFixed(d);
 const csvCell = (v: unknown) => { const s = v === null || v === undefined ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 
 type PrideTable = { file_name: string; category: string; size_bytes: number | null; kind: string; openable: boolean };
@@ -690,14 +701,21 @@ export function AnalyseView() {
     } catch (e) { setErr(String(e)); } finally { setBusy(null); }
   };
 
-  const canRun = !!inspect && !busy && !!idCol && colsA.length >= 2 && colsB.length >= 2;
+  // One column a side is a real comparison — two samples out of a deposition is often all there is.
+  // /analyse/run answers it descriptively (fold change and detection, no p-values) rather than
+  // refusing, so gating the button at two would hide an answer the backend is willing to give.
+  const canRun = !!inspect && !busy && !!idCol && colsA.length >= 1 && colsB.length >= 1;
 
   // When the pipeline hands a table back with group hints, run the analysis automatically so the
   // user lands on the volcano plot without an extra click.
   const autoRan = useRef(false);
   useEffect(() => { autoRan.current = false; }, [uploadParam]);
   useEffect(() => {
-    if (autoRan.current || !canRun || (!hintA && !hintB) || result !== null || busy !== null) return;
+    // Any ?upload= is a table the pipeline just handed back, so run it. Previously this also
+    // required a hint, which the pipeline does not always carry — so the common case landed on a
+    // filled-in form that still had to be submitted by hand. The groups are already chosen by
+    // then (suggested_groups, refined by any hints), so there is nothing left to ask.
+    if (autoRan.current || !canRun || !uploadParam || result !== null || busy !== null) return;
     autoRan.current = true;
     run();
     // run() closes over current state; canRun changing is the only stable signal to watch.
@@ -795,7 +813,9 @@ export function AnalyseView() {
 
           <div className="flex items-center gap-3">
             <button type="button" onClick={run} disabled={!canRun} className="btn btn-primary btn-lg px-6" data-tour="run">{busy ? <><span className="spinner mr-2" />Running…</> : "Run"}</button>
-            <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · each group needs ≥ 2 replicates</span>
+            <span className="text-xs text-muted-foreground">{colsA.length} vs {colsB.length} samples · {colsA.length < 2 || colsB.length < 2
+              ? "one sample a side: fold change and detection, no p-values"
+              : "Welch t-test with Benjamini–Hochberg FDR"}</span>
           </div>
         </div>
       )}
@@ -859,6 +879,7 @@ function Tile({ label, value, cls }: { label: string; value: number; cls?: strin
 
 function WelchResults({ out, uploadId, reportBody }: { out: RunOut; uploadId: string; reportBody: Record<string, unknown> | null }) {
   const s = out.summary;
+  const descriptive = s.comparison === "descriptive";
   const [reporting, setReporting] = useState(false);
   const downloadReport = async () => {
     if (!reportBody) return;
@@ -880,18 +901,32 @@ function WelchResults({ out, uploadId, reportBody }: { out: RunOut; uploadId: st
         <div><b>Report bundle for publication.</b> <span className="text-muted-foreground">A zip with a Methods paragraph written from these exact parameters, every tested protein as CSV, the parameters, a standalone <code>reproduce.py</code> that regenerates the result, and software versions. Upload it next to the paper.</span></div>
         <button type="button" onClick={downloadReport} disabled={!reportBody || reporting} className="btn btn-primary ml-auto" data-tour="report">{reporting ? <><span className="spinner mr-2" />Building…</> : "Download report bundle"}</button>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <Tile label="proteins tested" value={s.n_tested} />
-        <Tile label="significant (q < 0.05)" value={s.n_sig_q05} />
-        <Tile label="up: higher in B" value={s.n_up} cls="bg-peak-soft text-peak" />
-        <Tile label="down: higher in A" value={s.n_down} cls="bg-teal-soft text-teal" />
-      </div>
+      {descriptive ? (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Tile label="proteins quantified" value={s.n_proteins} />
+          <Tile label="seen in both" value={s.n_quantified_both ?? 0} />
+          <Tile label="A only" value={s.n_a_only ?? 0} cls="bg-teal-soft text-teal" />
+          <Tile label="B only" value={s.n_b_only ?? 0} cls="bg-peak-soft text-peak" />
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Tile label="proteins tested" value={s.n_tested} />
+          <Tile label="significant (q < 0.05)" value={s.n_sig_q05} />
+          <Tile label="up: higher in B" value={s.n_up} cls="bg-peak-soft text-peak" />
+          <Tile label="down: higher in A" value={s.n_down} cls="bg-teal-soft text-teal" />
+        </div>
+      )}
       <div className="text-xs text-muted-foreground grid gap-0.5">
         <div><b>log2FC</b> = log2(mean B ÷ mean A): +1 means twice as much in B, −1 means half. {s.sign}.</div>
-        <div><b>q</b> = the t-test p-value corrected for testing {s.n_tested.toLocaleString()} proteins at once (Benjamini–Hochberg); q &lt; 0.05 means about 5% of the proteins called significant are expected to be false positives.</div>
-        <div>{s.n_proteins.toLocaleString()} rows in the table{s.n_dropped_contaminants ? `, ${s.n_dropped_contaminants} dropped as contaminants` : ""}; rows with fewer than {s.min_valid} values in either group were skipped. Intensities {s.log_transform === "log2" ? `were log2-transformed (99th percentile of raw values ≈ ${s.p99_raw?.toLocaleString()})` : "were used as given (already log-scale)"}. {s.test}.</div>
+        {descriptive
+          ? <div><b>No p-values.</b> With {s.replicates?.a ?? 1} sample in A and {s.replicates?.b ?? 1} in B there is no within-group variance, so nothing here is a significance claim. The fold changes rank what differs most, and <b>A only</b> / <b>B only</b> are proteins detected in one sample and not the other — usually the most interesting rows in a two-sample comparison.</div>
+          : <div><b>q</b> = the t-test p-value corrected for testing {s.n_tested.toLocaleString()} proteins at once (Benjamini–Hochberg); q &lt; 0.05 means about 5% of the proteins called significant are expected to be false positives.</div>}
+        <div>{s.n_proteins.toLocaleString()} rows in the table{s.n_dropped_contaminants ? `, ${s.n_dropped_contaminants} dropped as contaminants` : ""}; {descriptive ? "proteins absent from both samples were skipped" : `rows with fewer than ${s.min_valid} values in either group were skipped`}. Intensities {s.log_transform === "log2" ? `were log2-transformed (99th percentile of raw values ≈ ${s.p99_raw?.toLocaleString()})` : "were used as given (already log-scale)"}. {s.test}.</div>
       </div>
       <Volcano points={out.volcano} />
+      {/* The volcano renders nothing without p-values, so the descriptive comparison would otherwise
+          have no scatter at all. MAPlot shows the same cloud against abundance instead. */}
+      {descriptive && <MAPlot rows={out.rows} log2={s.log_transform === "log2"} />}
       <TopHits rows={out.rows} />
       <ResultsTable rows={out.rows} columns={out.columns} uploadId={uploadId} />
     </div>
@@ -910,6 +945,10 @@ function niceTicks(min: number, max: number, n = 6): number[] {
 
 function Volcano({ points }: { points: Pt[] }) {
   const [hover, setHover] = useState<Pt | null>(null);
+  // A volcano plots significance against fold change, so a comparison with no p-values has nothing
+  // to put on it. Rendering the empty axes anyway read as "nothing was found" rather than "this
+  // chart does not apply here"; the Top hits bar chart carries the visual in that case.
+  const empty = points.every((p) => p.neglog10p === null) || points.length === 0;
   const W = 760, H = 440, m = { l: 56, r: 16, t: 20, b: 48 };
   const { pts, xmax, ymax, sx, sy, sigThreshold, topLabels } = useMemo(() => {
     const pts = points.filter((p) => p.log2fc !== null && p.neglog10p !== null) as (Pt & { log2fc: number; neglog10p: number })[];
@@ -925,6 +964,7 @@ function Volcano({ points }: { points: Pt[] }) {
   const xt = niceTicks(-xmax, xmax), yt = niceTicks(0, ymax);
   const r = pts.length > 5000 ? 1.8 : 2.6;
   const order = [...pts.filter((p) => p.sig === "ns"), ...pts.filter((p) => p.sig !== "ns")];
+  if (empty) return null;  // after the hooks above, which must run on every render
   return (
     <div className="rounded-xl border bg-card p-3 grid gap-1">
       <div className="flex flex-wrap items-center gap-3 text-xs px-1">
@@ -989,12 +1029,141 @@ function Volcano({ points }: { points: Pt[] }) {
   );
 }
 
+type MAPt = { id: string; x: number; y: number; detection: "both" | "a_only" | "b_only"; top: boolean };
+
+// A volcano plots significance against fold change, so it cannot be drawn at all without p-values —
+// and a one-sample-a-side comparison has none to give it. This is the chart that stands in: fold
+// change against abundance (an MA plot), which needs only the two group means such a comparison
+// already carries. Proteins seen in just one sample have an infinite fold change and so no place on
+// the y-axis; they get strips at the edges rather than being dropped, because in a two-sample
+// comparison they are usually the finding.
+function MAPlot({ rows, log2 }: { rows: Row[]; log2: boolean }) {
+  const [hover, setHover] = useState<MAPt | null>(null);
+  const W = 760, H = 460, m = { l: 56, r: 16, t: 20, b: 48 }, strip = 26;
+  const v = useMemo(() => {
+    const pts: MAPt[] = [];
+    for (const r of rows) {
+      const det = r.detection;
+      if (!det) continue;
+      const x = det === "both"
+        ? (r.mean_a !== null && r.mean_b !== null ? (r.mean_a + r.mean_b) / 2 : null)
+        : det === "a_only" ? r.mean_a : r.mean_b;
+      if (x === null || !Number.isFinite(x)) continue;
+      if (det === "both" && (r.log2fc === null || !Number.isFinite(r.log2fc))) continue;
+      pts.push({ id: r.id, x, y: det === "both" ? (r.log2fc as number) : 0, detection: det, top: false });
+    }
+    const both = pts.filter((p) => p.detection === "both");
+    const aOnly = pts.filter((p) => p.detection === "a_only");
+    const bOnly = pts.filter((p) => p.detection === "b_only");
+    const movers = [...both].sort((a, b) => Math.abs(b.y) - Math.abs(a.y));
+    for (const p of movers.slice(0, 10)) p.top = true;
+    const xs = pts.map((p) => p.x);
+    const xmin = xs.length ? Math.min(...xs) : 0;
+    const xmax = xs.length ? Math.max(...xs) : 1;
+    const ymax = Math.max(1, ...both.map((p) => Math.abs(p.y))) * 1.05;
+    const yTop = m.t + (bOnly.length ? strip : 0);
+    const yBot = H - m.b - (aOnly.length ? strip : 0);
+    const sx = (x: number) => m.l + ((x - xmin) / (xmax - xmin || 1)) * (W - m.l - m.r);
+    const sy = (y: number) => yBot - ((y + ymax) / (2 * ymax)) * (yBot - yTop);
+    // Labels are placed in screen space so collisions can be seen and undone: two movers at a
+    // similar fold change overlap into one unreadable string, so a later label is lifted until it
+    // clears the ones already placed.
+    const placed: { x: number; y: number }[] = [];
+    const labels = movers.slice(0, 5).map((p) => {
+      const x = sx(p.x) + 6;
+      let y = sy(p.y) - 4;
+      while (placed.some((q) => Math.abs(q.y - y) < 11 && Math.abs(q.x - x) < 70)) y -= 11;
+      placed.push({ x, y });
+      return { id: p.id, x, y, up: p.y > 0 };
+    });
+    return { pts, both, aOnly, bOnly, xmin, xmax, ymax, yTop, yBot, sx, sy, labels };
+  }, [rows, m.l, m.r, m.t, m.b]);
+  const { both, aOnly, bOnly, sx, sy, yTop, yBot } = v;
+  const xt = niceTicks(v.xmin, v.xmax), yt = niceTicks(-v.ymax, v.ymax);
+  const r = v.pts.length > 5000 ? 1.8 : 2.6;
+  // Deterministic spread inside a strip: one-sided proteins all share a y, and without it they
+  // stack into a single unreadable line.
+  const jit = (i: number) => (((i * 7919) % 11) - 5) * 1.6;
+  if (v.pts.length === 0) return null;  // after the hooks above, which must run on every render
+  return (
+    <div className="rounded-xl border bg-card p-3 grid gap-1">
+      <div className="flex flex-wrap items-center gap-3 text-xs px-1">
+        <span className="font-semibold">Fold change vs abundance</span>
+        <span className="text-muted-foreground">an MA plot — a volcano needs p-values, which this comparison has none of</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> higher in B</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> higher in A</span>
+        <span className="ml-auto font-mono text-muted-foreground min-h-4">{hover
+          ? hover.detection === "both"
+            ? `${hover.id} · log2FC ${fmt(hover.y, 2)} · abundance ${fmt(hover.x, 2)}`
+            : `${hover.id} · only in ${hover.detection === "a_only" ? "A" : "B"} · abundance ${fmt(hover.x, 2)}`
+          : "hover a point"}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-[760px] mx-auto block" role="img" aria-label="MA plot: log2 fold change against mean abundance, with strips for proteins seen in only one sample">
+          {yt.map((t) => <line key={`gy${t}`} x1={m.l} x2={W - m.r} y1={sy(t)} y2={sy(t)} className="text-border" stroke="currentColor" strokeWidth={0.5} />)}
+          <line x1={m.l} x2={W - m.r} y1={sy(0)} y2={sy(0)} className="text-muted-foreground" stroke="currentColor" strokeWidth={0.8} strokeDasharray="3 3" />
+          <line x1={m.l} x2={W - m.r} y1={H - m.b} y2={H - m.b} className="text-foreground" stroke="currentColor" />
+          <line x1={m.l} x2={m.l} y1={m.t} y2={H - m.b} className="text-foreground" stroke="currentColor" />
+          {xt.map((t) => (
+            <g key={`x${t}`} className="text-muted-foreground" fill="currentColor" stroke="currentColor">
+              <line x1={sx(t)} x2={sx(t)} y1={H - m.b} y2={H - m.b + 5} />
+              <text x={sx(t)} y={H - m.b + 18} textAnchor="middle" fontSize={11} stroke="none">{t}</text>
+            </g>
+          ))}
+          {yt.map((t) => (
+            <g key={`y${t}`} className="text-muted-foreground" fill="currentColor" stroke="currentColor">
+              <line x1={m.l - 5} x2={m.l} y1={sy(t)} y2={sy(t)} />
+              <text x={m.l - 8} y={sy(t) + 4} textAnchor="end" fontSize={11} stroke="none">{t}</text>
+            </g>
+          ))}
+          <text x={(m.l + W - m.r) / 2} y={H - 10} textAnchor="middle" fontSize={12} className="text-foreground" fill="currentColor">mean abundance{log2 ? " (log2)" : ""}</text>
+          <text x={14} y={(m.t + H - m.b) / 2} textAnchor="middle" fontSize={12} transform={`rotate(-90 14 ${(m.t + H - m.b) / 2})`} className="text-foreground" fill="currentColor">log2 fold change (B − A)</text>
+          {[{ pts: bOnly, y: m.t + strip / 2, sep: yTop, cls: "text-peak", label: "only in B" },
+            { pts: aOnly, y: H - m.b - strip / 2, sep: yBot, cls: "text-teal", label: "only in A" }]
+            .filter((b) => b.pts.length > 0).map((b) => (
+              <g key={b.label}>
+                <line x1={m.l} x2={W - m.r} y1={b.sep} y2={b.sep} className="text-muted-foreground" stroke="currentColor" strokeWidth={0.6} strokeDasharray="2 3" />
+                <text x={W - m.r - 2} y={b.y - strip / 2 + 10} textAnchor="end" fontSize={9} className={b.cls} fill="currentColor" fontWeight="600">{b.label} · {b.pts.length}</text>
+                {b.pts.map((p, i) => (
+                  <circle key={`${p.id}-${i}`} cx={sx(p.x)} cy={b.y + jit(i)} r={r} className={b.cls} fill="currentColor" opacity={0.85}
+                    onMouseEnter={() => setHover(p)} onMouseLeave={() => setHover(null)} />
+                ))}
+              </g>
+            ))}
+          {[...both.filter((p) => !p.top), ...both.filter((p) => p.top)].map((p, i) => (
+            <circle
+              key={`${p.id}-${i}`} cx={sx(p.x)} cy={sy(p.y)} r={r}
+              className={!p.top ? "text-muted-foreground" : p.y > 0 ? "text-peak" : "text-teal"}
+              fill="currentColor" opacity={p.top ? 0.9 : 0.35}
+              onMouseEnter={() => setHover(p)} onMouseLeave={() => setHover(null)}
+            />
+          ))}
+          {v.labels.map((p, i) => (
+            <text key={`lbl-${i}`} x={p.x} y={p.y} textAnchor="start" fontSize={9}
+              className={p.up ? "text-peak" : "text-teal"} fill="currentColor" fontWeight="600" pointerEvents="none">
+              {p.id.length > 18 ? p.id.slice(0, 17) + "…" : p.id}
+            </text>
+          ))}
+          {/* Only the scatter gets a ring: a strip point's drawn y carries the jitter above, and a
+              ring placed at the strip centre would sit beside the point it claims to mark. */}
+          {hover && hover.detection === "both" && (
+            <circle cx={sx(hover.x)} cy={sy(hover.y)} r={r + 3} fill="none" className="text-foreground" stroke="currentColor" strokeWidth={1.2} pointerEvents="none" />
+          )}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 function TopHits({ rows }: { rows: Row[] }) {
-  const hits = useMemo(() => {
-    return rows
-      .filter((r): r is Row & { q: number; log2fc: number } => r.q !== null && r.q < 0.05 && r.log2fc !== null)
-      .sort((a, b) => a.q - b.q)
-      .slice(0, 10);
+  // Significance ranks the chart when there is any. A descriptive comparison has no q at all, and
+  // returning nothing there would leave a two-sample result with no chart whatsoever — so rank by
+  // the size of the fold change instead, which is what that comparison actually measured.
+  const { hits, ranked } = useMemo(() => {
+    const withFc = rows.filter((r): r is Row & { log2fc: number } => r.log2fc !== null);
+    const sig = withFc.filter((r): r is Row & { q: number; log2fc: number } => r.q !== null && r.q < 0.05);
+    if (sig.length) return { hits: [...sig].sort((a, b) => a.q - b.q).slice(0, 10), ranked: "significance" as const };
+    return { hits: [...withFc].sort((a, b) => Math.abs(b.log2fc) - Math.abs(a.log2fc)).slice(0, 10), ranked: "fold change" as const };
   }, [rows]);
   if (hits.length === 0) return null;
   const W = 600, rH = 28, padL = 200, padR = 80, padT = 8, padB = 8;
@@ -1006,7 +1175,9 @@ function TopHits({ rows }: { rows: Row[] }) {
     <div className="rounded-xl border bg-card p-3 grid gap-1">
       <div className="flex flex-wrap items-center gap-3 text-xs px-1">
         <span className="font-semibold">Top hits</span>
-        <span className="text-muted-foreground">q &lt; 0.05, ranked by significance · bar = log2FC · positive = higher in B</span>
+        <span className="text-muted-foreground">{ranked === "significance"
+          ? "q < 0.05, ranked by significance"
+          : "biggest movers, ranked by fold change (no significance test)"} · bar = log2FC · positive = higher in B</span>
         <span className="flex items-center gap-1 ml-auto"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> up</span>
         <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> down</span>
       </div>
@@ -1024,7 +1195,10 @@ function TopHits({ rows }: { rows: Row[] }) {
                 <text x={padL - 6} y={y + rH * 0.66} textAnchor="end" fontSize={10} className="text-muted-foreground" fill="currentColor">{label}</text>
                 <g className={up ? "text-peak" : "text-teal"}>
                   <rect x={bx} y={y + rH * 0.18} width={bw} height={rH * 0.64} fill="currentColor" opacity={0.85} rx={2} />
-                  <text x={up ? sx(h.log2fc) + 4 : sx(h.log2fc) - 4} y={y + rH * 0.66} textAnchor={up ? "start" : "end"} fontSize={9} fill="currentColor" fontWeight="600">
+                  {/* Values share a right-hand column rather than tracking each bar's end: a long
+                      negative bar reaches back into the name gutter, and its label landed on top
+                      of the protein name. Aligned here they also read as a column of numbers. */}
+                  <text x={W - padR + 6} y={y + rH * 0.66} textAnchor="start" fontSize={9} fill="currentColor" fontWeight="600">
                     {(h.log2fc > 0 ? "+" : "") + h.log2fc.toFixed(2)}
                   </text>
                 </g>
@@ -1037,7 +1211,8 @@ function TopHits({ rows }: { rows: Row[] }) {
   );
 }
 
-const COL_LABEL: Record<string, string> = { id: "protein", log2fc: "log2FC", p: "p", q: "q", t: "t", mean_a: "mean A", mean_b: "mean B", n_a: "n A", n_b: "n B" };
+const COL_LABEL: Record<string, string> = { id: "protein", log2fc: "log2FC", p: "p", q: "q", t: "t", mean_a: "mean A", mean_b: "mean B", n_a: "n A", n_b: "n B", detection: "seen in" };
+const DETECTION_LABEL: Record<string, string> = { both: "both", a_only: "A only", b_only: "B only" };
 
 function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: string[]; uploadId: string }) {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "p", dir: 1 });
@@ -1048,7 +1223,10 @@ function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: strin
     const base = f ? rows.filter((r) => r.id.toLowerCase().includes(f)) : rows;
     return [...base].sort((a, b) => {
       const va = a[sort.key], vb = b[sort.key];
-      if (va === null || va === undefined) return 1;
+      // Both missing ranks them equal, so a stable sort keeps the order the server chose. Returning
+      // 1 here made the comparator inconsistent when a whole column is null — which is every row in
+      // a descriptive comparison, whose rows arrive deliberately ranked by biggest mover.
+      if (va === null || va === undefined) return vb === null || vb === undefined ? 0 : 1;
       if (vb === null || vb === undefined) return -1;
       return (va < vb ? -1 : va > vb ? 1 : 0) * sort.dir;
     });
@@ -1090,7 +1268,9 @@ function ResultsTable({ rows, columns, uploadId }: { rows: Row[]; columns: strin
                     const v = r[c as SortKey];
                     return (
                       <td key={c} className={`p-2 tabular whitespace-nowrap ${c === "id" ? "text-left font-mono" : "text-right"} ${c === "log2fc" || c === "q" ? `font-semibold ${cls}` : ""}`}>
-                        {c === "id" ? String(v) : typeof v === "number" && (c === "n_a" || c === "n_b") ? v : fmt(v as number | null)}
+                        {c === "id" ? String(v)
+                          : c === "detection" ? DETECTION_LABEL[String(v)] ?? String(v)
+                            : typeof v === "number" && (c === "n_a" || c === "n_b") ? v : fmt(v)}
                       </td>
                     );
                   })}

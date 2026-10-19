@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { markSetupSeen } from "@/lib/progress-store";
 import { SamplePicker } from "@/components/sample-picker";
 import { API } from "@/lib/api";
@@ -27,6 +28,7 @@ const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : String(v));
 
 
 export function Reanalyse({ accession }: { accession: string }) {
+  const router = useRouter();
   const [out, setOut] = useState<Out | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [remoteAvailable, setRemoteAvailable] = useState(false);
@@ -175,6 +177,10 @@ export function Reanalyse({ accession }: { accession: string }) {
             <RunRemote
               accession={accession}
               engineLabel={out.plan.tracks.map((t) => t.engine_label).join(" + ") || "search engine"}
+              // Closes the last manual gap: the search already produced the table and the transfer
+              // already loaded it, so open the comparison rather than printing instructions to
+              // upload a file the app is holding.
+              onDone={(uploadId) => router.push(`/analyse?upload=${encodeURIComponent(uploadId)}`)}
             />
           )}
         </div>

@@ -1136,6 +1136,30 @@ def _clean(v):
     return v
 
 
+# Search engines write one quantification column per experiment, named "<metric> <experiment>".
+# Ordered by preference: LFQ is normalised across runs, so it is what a comparison should use; iBAQ
+# and raw Intensity are the fallbacks when the search was not run label-free.
+QUANT_METRIC_RE = [re.compile(rf"^({m})[ .](.+)$", re.I) for m in ("LFQ intensity", "iBAQ", "Intensity")]
+
+
+def _per_run_groups(numeric: list[str], fill: dict) -> list[dict]:
+    """One group per run, for a table that carries a single column per experiment.
+
+    The replicate-stem grouping only fires when a column ends in a numeric suffix. That is true of a
+    replicated design and false of a two-sample comparison, where MaxQuant names the columns
+    "LFQ intensity <experiment>" after the experiment names the kit derived from the sample
+    annotations. Without this, such a table suggests no groups at all, so the Analyse step has
+    nothing to pre-select and cannot be driven automatically — which is the whole point of handing
+    the table back. One column a side carries no within-group variance, so /analyse/run answers
+    descriptively (see _describe_two); that is a real answer, and better than an empty picker.
+    """
+    for rx in QUANT_METRIC_RE:
+        cols = [(c, m.group(2)) for c in numeric if (m := rx.match(c))]
+        if len(cols) >= 2:
+            return [{"stem": exp, "columns": [c], "fill": round(float(fill[c]), 3)} for c, exp in cols]
+    return []
+
+
 def inspect_df(upload_id: str):
     np, pd = _sci()
     df = load_df(upload_id)
@@ -1167,6 +1191,10 @@ def inspect_df(upload_id: str):
             groups.setdefault(m.group(1), []).append(c)
     suggested = [{"stem": k, "columns": v, "fill": round(float(np.mean([fill[c] for c in v])), 3)} for k, v in groups.items() if len(v) >= 2]
     suggested.sort(key=lambda g: (-len(g["columns"]), -g["fill"], g["stem"]))
+    # A replicated design yields two or more groups above and takes the inferential path. Anything
+    # less means the stem grouping found nothing to compare, so fall back to one group per run.
+    if len(suggested) < 2:
+        suggested = _per_run_groups(numeric, fill) or suggested
     ki = {m.group(1) for c in df.columns if (m := re.match(r"^(.+)_IP_LTKI\.\d+$", c)) and not c.startswith("Imputation_")}
     wt = {m.group(1) for c in df.columns if (m := re.match(r"^(.+)_IP_LTWT\.\d+$", c)) and not c.startswith("Imputation_")}
     prefixes = sorted(ki & wt)
