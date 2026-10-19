@@ -692,6 +692,18 @@ export function AnalyseView() {
 
   const canRun = !!inspect && !busy && !!idCol && colsA.length >= 2 && colsB.length >= 2;
 
+  // When the pipeline hands a table back with group hints, run the analysis automatically so the
+  // user lands on the volcano plot without an extra click.
+  const autoRan = useRef(false);
+  useEffect(() => { autoRan.current = false; }, [uploadParam]);
+  useEffect(() => {
+    if (autoRan.current || !canRun || (!hintA && !hintB) || result !== null || busy !== null) return;
+    autoRan.current = true;
+    run();
+    // run() closes over current state; canRun changing is the only stable signal to watch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canRun]);
+
   return (
     <div className="grid gap-5">
       <div>

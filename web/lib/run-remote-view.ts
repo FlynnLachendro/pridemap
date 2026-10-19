@@ -7,7 +7,7 @@
 // No React, no DOM, no imports from the component — so the tests need no frontend test setup.
 
 /** The states a job can be in, as the card models it. */
-export type JobStatus = "idle" | "submitting" | "running" | "done" | "stopped" | "error";
+export type JobStatus = "idle" | "submitting" | "running" | "done" | "transferring" | "stopped" | "error";
 
 /** The state of a single pipeline stage. */
 export type StageState = "pending" | "running" | "done" | "failed";
@@ -48,7 +48,7 @@ export function stageRows(input: StageRowsInput): StageRow[] {
   const live = stageProgress ? stages : [];
   const usable =
     live.length > 0 &&
-    (status === "running" || status === "done" || status === "error" || status === "stopped") &&
+    (status === "running" || status === "done" || status === "transferring" || status === "error" || status === "stopped") &&
     !contactLost;
 
   if (usable) {
@@ -64,7 +64,7 @@ export function stageRows(input: StageRowsInput): StageRow[] {
   const coarse: StageState =
     status === "submitting" ? "pending"
     : status === "running" ? "running"
-    : status === "done" ? "done"
+    : (status === "done" || status === "transferring") ? "done"
     : status === "stopped" ? "pending"
     : contactLost ? "pending"
     : status === "error" && hasJobId ? "failed"
@@ -102,9 +102,9 @@ export function consoleBlocks(input: ConsoleInput): ConsoleBlock[] {
   // Submitting: there is no log yet, so the card narrates instead.
   if (status === "submitting") return [{ kind: "live", text: submittingText }];
 
-  // Running: the stage rows already say what is happening, step by step. Showing the raw log as
+  // Running or transferring: the stage rows already say what is happening. Showing the raw log as
   // well is duplication — the local card has always suppressed it; the cloud card did not.
-  if (status === "running") {
+  if (status === "running" || status === "transferring") {
     return hasLiveSteps || !log ? [] : [{ kind: "live", text: tail(log, 10) }];
   }
 

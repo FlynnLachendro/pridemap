@@ -113,11 +113,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
           stages: s.stages ?? [], stage_progress: s.stage_progress ?? false, cpu: s.cpu ?? null,
         };
         if (s.status === "done" || s.status === "error") {
-          setJob((j) => {
-            const next = { ...j, status: s.status as "done" | "error", log: s.log, ...progress };
-            if (s.status === "done" && j.job_id && onDone) onDone(j.job_id);
-            return next;
-          });
+          setJob((j) => ({ ...j, status: s.status as "done" | "error", log: s.log, ...progress }));
         } else {
           setJob((j) => ({ ...j, log: s.log, ...progress }));
         }
@@ -133,10 +129,36 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     return () => { live = false; window.clearInterval(id); };
   }, [job.job_id, job.status, poll]);
 
+  // When the remote job finishes, download its results and upload to PRIDE Map's Analyse endpoint.
+  // This replaces the manual download-then-upload step the user would otherwise have to perform.
+  const uploadSeen = useRef<string | null>(null);
+  useEffect(() => {
+    if (job.status !== "done" || !job.job_id || uploadSeen.current === job.job_id || !onDone) return;
+    uploadSeen.current = job.job_id;
+    const id = job.job_id;
+    setJob((j) => ({ ...j, status: "transferring" }));
+    (async () => {
+      try {
+        const r = await fetch(`${API}/dataset/${accession}/pipeline/remote/${id}/results`);
+        if (!r.ok) throw new Error(await describeHttpError(r));
+        const blob = await r.blob();
+        const fd = new FormData();
+        fd.append("file", blob, `${accession}_proteinGroups.txt`);
+        const u = await fetch(`${API}/analyse/inspect`, { method: "POST", body: fd });
+        if (!u.ok) throw new Error(await describeHttpError(u));
+        const { upload_id } = await u.json();
+        setJob((j) => ({ ...j, status: "done" }));
+        onDone(upload_id);
+      } catch (e) {
+        setJob((j) => ({ ...j, status: "error", err: `Could not load results into Analyse: ${String(e)}`, failure: "server" }));
+      }
+    })();
+  }, [job.status, job.job_id, accession, onDone]);
+
   // Clean up on unmount only after job finishes
   useEffect(() => {
     return () => {
-      if (job.job_id && job.status === "done" && seen.current !== job.job_id) {
+      if (job.job_id && (job.status === "done" || job.status === "transferring") && seen.current !== job.job_id) {
         seen.current = job.job_id;
         fetch(`${API}/dataset/${accession}/pipeline/remote/${job.job_id}`, { method: "DELETE" }).catch(() => {});
       }
@@ -190,7 +212,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     finally { setStopping(false); }
   };
 
-  const busy = job.status === "submitting" || job.status === "running";
+  const busy = job.status === "submitting" || job.status === "running" || job.status === "transferring";
   const active = busy || job.status === "done" || job.status === "error" || job.status === "stopped";
 
   const STAGE_MARK: Record<StageState, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
@@ -287,6 +309,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
               })()
         )}
         {job.status === "done" && <span className="pill bg-ok-soft text-ok">finished</span>}
+        {job.status === "transferring" && <span className="pill"><span className="spinner mr-1.5" />Loading results into Analyse…</span>}
         {/* "failed" and "stopped" are different events and now read differently. They shared the
             error state before, so a run the user stopped on purpose was reported as a failure. */}
         {job.status === "error" && (
@@ -368,11 +391,6 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
             </pre>
           </details>
         ),
-      )}
-      {job.status === "done" && job.job_id && (
-        <a className="btn btn-sm self-start" href={`${API}/dataset/${accession}/pipeline/remote/${job.job_id}/results`} download={`${accession}_${outputTable}`}>
-          Download {outputTable}
-        </a>
       )}
     </div>
   );
