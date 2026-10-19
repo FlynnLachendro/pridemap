@@ -64,7 +64,9 @@ async function describeHttpError(r: Response): Promise<string> {
   }
 }
 
-export function RunRemote({ accession, runs, engineLabel = "search engine", outputTable = "results.txt", onDone }: { accession: string; runs?: string[]; engineLabel?: string; outputTable?: string; onDone?: (jobId: string) => void }) {
+// outputTable is gone: it named the file the user used to be told to upload by hand, and the
+// handoff now collects that file itself, so nothing read the prop any more.
+export function RunRemote({ accession, runs, engineLabel = "search engine", onDone }: { accession: string; runs?: string[]; engineLabel?: string; onDone?: (jobId: string) => void }) {
   const [job, setJob] = useState<RemoteJob>({ status: "idle", job_id: null, log: "", err: null });
   const [stopping, setStopping] = useState(false);
   const [elapsed, setElapsed] = useState(0);

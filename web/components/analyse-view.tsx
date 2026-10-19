@@ -95,18 +95,18 @@ function SamplePicker({ accession, rawNames, onSelect }: { accession: string; ra
   const [err, setErr] = useState<string | null>(null);
   const [checked, setChecked] = useState<string[]>([]);
 
-  // Auto-fetch annotations whenever the picker is opened
-  useEffect(() => {
-    if (!open || data || loading) return;
-    let live = true;
+  // Opening the picker is a user action, not something to synchronize with an effect. Watching
+  // `open` meant the effect had to guard on the very state it was about to set, which both tripped
+  // the no-setState-in-effect rule and left `data`/`loading` out of its dependency list.
+  const togglePicker = async () => {
+    const opening = !open;
+    setOpen(opening);
+    if (!opening || data || loading) return;
     setLoading(true); setErr(null);
-    fetch(`${API}/dataset/${encodeURIComponent(accession)}/samples`)
-      .then((r) => r.ok ? r.json() : r.text().then((t) => { throw new Error(t); }))
-      .then((d: SampleData) => { if (live) setData(d); })
-      .catch((e) => { if (live) setErr(String(e)); })
-      .finally(() => { if (live) setLoading(false); });
-    return () => { live = false; };
-  }, [open, accession]);
+    try {
+      setData(await jfetch<SampleData>(fetch(`${API}/dataset/${encodeURIComponent(accession)}/samples`)));
+    } catch (e) { setErr(String(e)); } finally { setLoading(false); }
+  };
 
   // Merge rawNames with loaded annotation rows so the table is always complete
   const rows = useMemo<SampleRow[]>(() => {
@@ -155,7 +155,7 @@ function SamplePicker({ accession, rawNames, onSelect }: { accession: string; ra
             {checked.length === 2 ? `A: ${labelFor(checked[0])} · B: ${labelFor(checked[1])}` : `A: ${labelFor(checked[0])}`}
           </span>
         )}
-        <button type="button" className="btn btn-sm ml-auto" onClick={() => setOpen((v) => !v)}>
+        <button type="button" className="btn btn-sm ml-auto" onClick={togglePicker}>
           {open ? "Collapse" : "Open sample list"}
         </button>
       </div>
@@ -457,7 +457,7 @@ function SearchKit({ plan, accession, remoteAvailable, localMq }: { plan: Search
         <RunHere accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} hintA={labelA} hintB={labelB} />
       )}
       {selectedRuns.length > 0 && showRemote && runMethod === "remote" && (
-        <RunRemote accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} engineLabel={plan.engine_label ?? "search engine"} outputTable={plan.output_table ?? "results.txt"} onDone={handleRemoteDone} />
+        <RunRemote accession={accession} runs={selectedRuns.length ? selectedRuns : undefined} engineLabel={plan.engine_label ?? "search engine"} onDone={handleRemoteDone} />
       )}
 
       <p className="text-xs text-muted-foreground">
@@ -641,6 +641,17 @@ export function AnalyseView() {
     setResult(null); setErr(null);
   };
 
+  // Declared above the effect that calls it: as a const it is in the temporal dead zone until this
+  // line, so an earlier reference would not see a later redefinition.
+  const applyHints = (groups: Group[], a: string, b: string) => {
+    if (!a && !b) return;
+    const find = (hint: string) => groups.find((g) => g.stem.toLowerCase().includes(hint.toLowerCase()) || hint.toLowerCase().includes(g.stem.toLowerCase()));
+    const ga = a ? find(a) : undefined;
+    const gb = b ? find(b) : undefined;
+    if (ga) { setStemA(ga.stem); setColsA(ga.columns); }
+    if (gb) { setStemB(gb.stem); setColsB(gb.columns); }
+  };
+
   // ?upload=<id> re-opens an existing upload; ?hint_a / ?hint_b pre-select groups from the search step
   useEffect(() => {
     if (!uploadParam || uploadParam === loadedId) return;
@@ -678,15 +689,6 @@ export function AnalyseView() {
   const pickGroup = (which: "a" | "b", stem: string) => {
     const g = inspect?.suggested_groups.find((x) => x.stem === stem);
     if (which === "a") { setStemA(stem); if (g) setColsA(g.columns); } else { setStemB(stem); if (g) setColsB(g.columns); }
-  };
-
-  const applyHints = (groups: Group[], a: string, b: string) => {
-    if (!a && !b) return;
-    const find = (hint: string) => groups.find((g) => g.stem.toLowerCase().includes(hint.toLowerCase()) || hint.toLowerCase().includes(g.stem.toLowerCase()));
-    const ga = a ? find(a) : undefined;
-    const gb = b ? find(b) : undefined;
-    if (ga) { setStemA(ga.stem); setColsA(ga.columns); }
-    if (gb) { setStemB(gb.stem); setColsB(gb.columns); }
   };
 
   const run = async () => {
@@ -943,6 +945,24 @@ function niceTicks(min: number, max: number, n = 6): number[] {
   return out;
 }
 
+// Roughly the width of a label, used to decide when one is close enough to a margin that writing
+// it outward would run off the chart.
+const LABEL_W = 70;
+
+// Both scatter charts label their most interesting points, and those points are exactly the ones
+// that cluster — so the labels land on top of each other and read as one run-together string. Place
+// them in screen space and lift each one until it clears those already placed.
+function placeLabels<T>(items: T[], at: (t: T) => { x: number; y: number }) {
+  const placed: { x: number; y: number }[] = [];
+  return items.map((item) => {
+    const { x, y: y0 } = at(item);
+    let y = y0;
+    while (placed.some((q) => Math.abs(q.y - y) < 11 && Math.abs(q.x - x) < 70)) y -= 11;
+    placed.push({ x, y });
+    return { item, x, y };
+  });
+}
+
 function Volcano({ points }: { points: Pt[] }) {
   const [hover, setHover] = useState<Pt | null>(null);
   // A volcano plots significance against fold change, so a comparison with no p-values has nothing
@@ -958,7 +978,14 @@ function Volcano({ points }: { points: Pt[] }) {
     const sy = (y: number) => H - m.b - (y / ymax) * (H - m.t - m.b);
     const sigPts = pts.filter((p) => p.sig !== "ns");
     const sigThreshold = sigPts.length > 0 ? Math.min(...sigPts.map((p) => p.neglog10p)) : null;
-    const topLabels = [...sigPts].sort((a, b) => b.neglog10p - a.neglog10p).slice(0, 5);
+    // The biggest hit sits at the extreme of the x-axis, which is exactly where a label written
+    // outward runs off the edge and is clipped mid-word. Near either margin it is written inward.
+    const seeds = [...sigPts].sort((a, b) => b.neglog10p - a.neglog10p).slice(0, 5).map((p) => {
+      const px = sx(p.log2fc);
+      const dir = px > W - m.r - LABEL_W ? -1 : px < m.l + LABEL_W ? 1 : p.log2fc >= 0 ? 1 : -1;
+      return { p, anchor: dir > 0 ? ("start" as const) : ("end" as const), lx: px + dir * 6 };
+    });
+    const topLabels = placeLabels(seeds, (s) => ({ x: s.lx, y: sy(s.p.neglog10p) - 4 }));
     return { pts, xmax, ymax, sx, sy, sigThreshold, topLabels };
   }, [points, m.l, m.r, m.t, m.b]);
   const xt = niceTicks(-xmax, xmax), yt = niceTicks(0, ymax);
@@ -972,8 +999,8 @@ function Volcano({ points }: { points: Pt[] }) {
         <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> up in B (q &lt; 0.05)</span>
         <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> down in B (q &lt; 0.05)</span>
         <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-muted-foreground/40" /> not significant</span>
-        <span className="ml-auto font-mono text-muted-foreground min-h-4">{hover ? `${hover.id} · log2FC ${fmt(hover.log2fc, 2)} · p ${hover.neglog10p === null ? "—" : Math.pow(10, -hover.neglog10p).toExponential(2)}` : "hover a point"}</span>
       </div>
+      <HoverLine>{hover ? `${hover.id} · log2FC ${fmt(hover.log2fc, 2)} · p ${hover.neglog10p === null ? "—" : Math.pow(10, -hover.neglog10p).toExponential(2)}` : "hover a point"}</HoverLine>
       <div className="overflow-x-auto">
         <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-[760px] mx-auto block" role="img" aria-label="volcano plot: log2 fold change against -log10 p">
           {yt.map((v) => <line key={`gy${v}`} x1={m.l} x2={W - m.r} y1={sy(v)} y2={sy(v)} className="text-border" stroke="currentColor" strokeWidth={0.5} />)}
@@ -1008,18 +1035,12 @@ function Volcano({ points }: { points: Pt[] }) {
               <text x={W - m.r - 2} y={sy(sigThreshold) - 3} textAnchor="end" fontSize={9} fill="currentColor">q = 0.05</text>
             </g>
           )}
-          {topLabels.map((p, i) => {
-            const cx = sx(p.log2fc), cy = sy(p.neglog10p);
-            const labelX = cx + (p.log2fc >= 0 ? 6 : -6);
-            const anchor = p.log2fc >= 0 ? "start" : "end";
-            const label = p.id.length > 18 ? p.id.slice(0, 17) + "…" : p.id;
-            return (
-              <text key={`lbl-${i}`} x={labelX} y={cy - 4} textAnchor={anchor} fontSize={9}
-                className={p.sig === "up" ? "text-peak" : "text-teal"} fill="currentColor" fontWeight="600" pointerEvents="none">
-                {label}
-              </text>
-            );
-          })}
+          {topLabels.map(({ item: { p, anchor }, x, y }, i) => (
+            <text key={`lbl-${i}`} x={x} y={y} textAnchor={anchor} fontSize={9}
+              className={p.sig === "up" ? "text-peak" : "text-teal"} fill="currentColor" fontWeight="600" pointerEvents="none">
+              {p.id.length > 18 ? p.id.slice(0, 17) + "…" : p.id}
+            </text>
+          ))}
           {hover && hover.log2fc !== null && hover.neglog10p !== null && (
             <circle cx={sx(hover.log2fc)} cy={sy(hover.neglog10p)} r={r + 3} fill="none" className="text-foreground" stroke="currentColor" strokeWidth={1.2} pointerEvents="none" />
           )}
@@ -1030,6 +1051,16 @@ function Volcano({ points }: { points: Pt[] }) {
 }
 
 type MAPt = { id: string; x: number; y: number; detection: "both" | "a_only" | "b_only"; top: boolean };
+
+// The conventional "worth a look" line on a fold-change chart: log2 1 is a doubling.
+const FOLD = 1;
+
+// A hover readout changes length as the pointer moves, so it cannot share a wrapping flex row with
+// the legend: a longer protein name re-flowed that row and visibly shifted the chart under the
+// cursor. Its own fixed-height, non-wrapping line keeps the layout still.
+function HoverLine({ children }: { children: React.ReactNode }) {
+  return <div className="px-1 h-4 leading-4 font-mono text-xs text-muted-foreground overflow-hidden whitespace-nowrap text-ellipsis">{children}</div>;
+}
 
 // A volcano plots significance against fold change, so it cannot be drawn at all without p-values —
 // and a one-sample-a-side comparison has none to give it. This is the chart that stands in: fold
@@ -1065,17 +1096,15 @@ function MAPlot({ rows, log2 }: { rows: Row[]; log2: boolean }) {
     const yBot = H - m.b - (aOnly.length ? strip : 0);
     const sx = (x: number) => m.l + ((x - xmin) / (xmax - xmin || 1)) * (W - m.l - m.r);
     const sy = (y: number) => yBot - ((y + ymax) / (2 * ymax)) * (yBot - yTop);
-    // Labels are placed in screen space so collisions can be seen and undone: two movers at a
-    // similar fold change overlap into one unreadable string, so a later label is lifted until it
-    // clears the ones already placed.
-    const placed: { x: number; y: number }[] = [];
-    const labels = movers.slice(0, 5).map((p) => {
-      const x = sx(p.x) + 6;
-      let y = sy(p.y) - 4;
-      while (placed.some((q) => Math.abs(q.y - y) < 11 && Math.abs(q.x - x) < 70)) y -= 11;
-      placed.push({ x, y });
-      return { id: p.id, x, y, up: p.y > 0 };
-    });
+    // A top mover at the highest abundance sits hard against the right margin, where a label
+    // written outward is clipped mid-name; near either edge it is written inward instead.
+    const labels = placeLabels(movers.slice(0, 5), (p) => {
+      const px = sx(p.x);
+      return { x: px + (px > W - m.r - LABEL_W ? -6 : 6), y: sy(p.y) - 4 };
+    }).map(({ item, x, y }) => ({
+      id: item.id, x, y, up: item.y > 0,
+      anchor: sx(item.x) > W - m.r - LABEL_W ? ("end" as const) : ("start" as const),
+    }));
     return { pts, both, aOnly, bOnly, xmin, xmax, ymax, yTop, yBot, sx, sy, labels };
   }, [rows, m.l, m.r, m.t, m.b]);
   const { both, aOnly, bOnly, sx, sy, yTop, yBot } = v;
@@ -1090,18 +1119,22 @@ function MAPlot({ rows, log2 }: { rows: Row[]; log2: boolean }) {
       <div className="flex flex-wrap items-center gap-3 text-xs px-1">
         <span className="font-semibold">Fold change vs abundance</span>
         <span className="text-muted-foreground">an MA plot — a volcano needs p-values, which this comparison has none of</span>
-        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> higher in B</span>
-        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> higher in A</span>
-        <span className="ml-auto font-mono text-muted-foreground min-h-4">{hover
-          ? hover.detection === "both"
-            ? `${hover.id} · log2FC ${fmt(hover.y, 2)} · abundance ${fmt(hover.x, 2)}`
-            : `${hover.id} · only in ${hover.detection === "a_only" ? "A" : "B"} · abundance ${fmt(hover.x, 2)}`
-          : "hover a point"}</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-peak" /> ≥2× higher in B</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-teal" /> ≥2× higher in A</span>
+        <span className="flex items-center gap-1"><i className="inline-block w-2.5 h-2.5 rounded-full bg-muted-foreground/40" /> within 2×</span>
       </div>
+      <HoverLine>{hover
+        ? hover.detection === "both"
+          ? `${hover.id} · log2FC ${fmt(hover.y, 2)} · abundance ${fmt(hover.x, 2)}`
+          : `${hover.id} · only in ${hover.detection === "a_only" ? "A" : "B"} · abundance ${fmt(hover.x, 2)}`
+        : "hover a point"}</HoverLine>
       <div className="overflow-x-auto">
         <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-[760px] mx-auto block" role="img" aria-label="MA plot: log2 fold change against mean abundance, with strips for proteins seen in only one sample">
           {yt.map((t) => <line key={`gy${t}`} x1={m.l} x2={W - m.r} y1={sy(t)} y2={sy(t)} className="text-border" stroke="currentColor" strokeWidth={0.5} />)}
           <line x1={m.l} x2={W - m.r} y1={sy(0)} y2={sy(0)} className="text-muted-foreground" stroke="currentColor" strokeWidth={0.8} strokeDasharray="3 3" />
+          {[FOLD, -FOLD].filter((f) => Math.abs(f) < v.ymax).map((f) => (
+            <line key={`fold${f}`} x1={m.l} x2={W - m.r} y1={sy(f)} y2={sy(f)} className="text-muted-foreground" stroke="currentColor" strokeWidth={0.6} strokeDasharray="1 4" opacity={0.7} />
+          ))}
           <line x1={m.l} x2={W - m.r} y1={H - m.b} y2={H - m.b} className="text-foreground" stroke="currentColor" />
           <line x1={m.l} x2={m.l} y1={m.t} y2={H - m.b} className="text-foreground" stroke="currentColor" />
           {xt.map((t) => (
@@ -1130,16 +1163,21 @@ function MAPlot({ rows, log2 }: { rows: Row[]; log2: boolean }) {
                 ))}
               </g>
             ))}
-          {[...both.filter((p) => !p.top), ...both.filter((p) => p.top)].map((p, i) => (
+          {/* Colour says direction, not rank. Keying it to the top ten movers instead meant a
+              protein three times higher in B drew grey whenever ten others moved further, and a
+              run whose ten biggest movers all went one way showed only one colour — so the legend
+              could not describe the grey. FOLD is the usual 2x line, drawn below so the reader can
+              see where the colour changes. Size and label still mark the biggest movers. */}
+          {[...both].sort((a, b) => Number(a.top) - Number(b.top) || Math.abs(a.y) - Math.abs(b.y)).map((p, i) => (
             <circle
-              key={`${p.id}-${i}`} cx={sx(p.x)} cy={sy(p.y)} r={r}
-              className={!p.top ? "text-muted-foreground" : p.y > 0 ? "text-peak" : "text-teal"}
-              fill="currentColor" opacity={p.top ? 0.9 : 0.35}
+              key={`${p.id}-${i}`} cx={sx(p.x)} cy={sy(p.y)} r={p.top ? r + 1 : r}
+              className={p.y >= FOLD ? "text-peak" : p.y <= -FOLD ? "text-teal" : "text-muted-foreground"}
+              fill="currentColor" opacity={p.top ? 0.95 : Math.abs(p.y) >= FOLD ? 0.65 : 0.3}
               onMouseEnter={() => setHover(p)} onMouseLeave={() => setHover(null)}
             />
           ))}
           {v.labels.map((p, i) => (
-            <text key={`lbl-${i}`} x={p.x} y={p.y} textAnchor="start" fontSize={9}
+            <text key={`lbl-${i}`} x={p.x} y={p.y} textAnchor={p.anchor} fontSize={9}
               className={p.up ? "text-peak" : "text-teal"} fill="currentColor" fontWeight="600" pointerEvents="none">
               {p.id.length > 18 ? p.id.slice(0, 17) + "…" : p.id}
             </text>
