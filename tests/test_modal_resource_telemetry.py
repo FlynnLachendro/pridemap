@@ -223,6 +223,57 @@ def test_percentage_is_measured_against_the_reservation_not_the_host():
     assert report["busy_pct"] == 50
 
 
+def test_the_report_names_the_phase_that_produced_it():
+    """Scenario: two containers with different allocations both report figures for one job.
+
+    Slice: resource sizing — attribution.
+    Given a report from the download worker's 2-core/4 GB container,
+    When the report is built,
+    Then it carries phase="download" alongside that container's own allocation.
+
+    Every pillar — cpu, memory, ephemeral_disk, timeout — is declared per function, so a figure
+    with no owner cannot size anything. 8.7 GB peak means "cut the search worker's 64 GB" or "the
+    4 GB download worker is about to OOM" depending entirely on which container reported it.
+    """
+    ### Given / When
+    report = cpu_report(
+        cores=18, allocated=2, busy=0.4, rss_bytes=None, memory_mb=4096, phase="download",
+    )
+
+    ### Then
+    assert report["phase"] == "download"
+    assert report["cores"] == 2, "sized against the download worker's reservation, not the host"
+    assert report["memory_gb"] == 4.0
+
+
+def test_disk_is_reported_as_peak_against_the_declared_ceiling():
+    """Scenario: the ephemeral disk that raw staging and MaxQuant intermediates land on.
+
+    Slice: resource sizing — the disk pillar.
+    Given 12 GiB used at peak on a 512 GiB filesystem,
+    When the report is built,
+    Then both the peak and the total are present so the ceiling can be judged against the need.
+
+    ephemeral_disk was set to 512 GiB because that is Modal's default, with nothing measured behind
+    it. Staging raw files locally made it load-bearing rather than incidental. The PEAK matters, not
+    the current figure: MaxQuant deletes intermediates as it goes, so sampling current use
+    under-reports the ceiling the allocation actually has to cover.
+    """
+    ### Given
+    gib = 1024 ** 3
+
+    ### When
+    report = cpu_report(
+        cores=8, allocated=8, busy=None, rss_bytes=None, memory_mb=65536,
+        disk_used_bytes=8 * gib, peak_disk_used_bytes=12 * gib, disk_total_bytes=512 * gib,
+    )
+
+    ### Then
+    assert report["disk_used_gb"] == 8.0
+    assert report["peak_disk_used_gb"] == 12.0
+    assert report["disk_total_gb"] == 512.0
+
+
 def test_absent_figures_are_omitted_rather_than_defaulted():
     """Scenario: a host where neither CPU nor memory accounting can be read.
 
@@ -238,6 +289,7 @@ def test_absent_figures_are_omitted_rather_than_defaulted():
     assert report["memory_gb"] == 64.0
     assert "busy_cores" not in report and "busy_pct" not in report
     assert "rss_gb" not in report
+    assert "disk_used_gb" not in report and "disk_total_gb" not in report
 
 
 # --------------------------------------------------------------------------- raw staging selection

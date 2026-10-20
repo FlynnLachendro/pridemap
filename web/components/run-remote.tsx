@@ -33,6 +33,8 @@ type RemoteJob = {
   // The search container's own CPU/memory measurement. Null until the search phase starts writing
   // it, and from a server deployed before the readout existed — both mean "nothing to draw".
   cpu?: CpuReport | null;
+  // Set when results come from the transfer cache — upload already done, skip the auto-transfer.
+  upload_id?: string;
 };
 
 /** What a poll of the remote job returns, once the API has reduced the relayed stage events. */
@@ -62,7 +64,9 @@ async function describeHttpError(r: Response): Promise<string> {
   }
 }
 
-export function RunRemote({ accession, runs, engineLabel = "search engine", outputTable = "results.txt", onDone }: { accession: string; runs?: string[]; engineLabel?: string; outputTable?: string; onDone?: (jobId: string) => void }) {
+// outputTable is gone: it named the file the user used to be told to upload by hand, and the
+// handoff now collects that file itself, so nothing read the prop any more.
+export function RunRemote({ accession, runs, engineLabel = "search engine", onDone }: { accession: string; runs?: string[]; engineLabel?: string; onDone?: (jobId: string) => void }) {
   const [job, setJob] = useState<RemoteJob>({ status: "idle", job_id: null, log: "", err: null });
   const [stopping, setStopping] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -73,13 +77,21 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
   // without it the relayed events are matched against the wrong stage list.
   const runsQS = runs?.length ? `?runs=${encodeURIComponent(runs.join(","))}` : "";
 
-  // Resume an in-progress job after UI close/reopen
+  // Resume an in-progress job after UI close/reopen, or restore from transfer cache on reload.
   useEffect(() => {
     let live = true;
     fetch(`${API}/dataset/${accession}/pipeline/remote/active${runsQS}`)
       .then((r) => r.ok ? r.json() : null)
       .then((d) => {
-        if (!live || !d?.job_id) return;
+        if (!live) return;
+        if (d?.upload_id && d?.status === "done") {
+          // Transfer cache hit: results already in Analyse — jump straight to the comparison page.
+          setJob({ status: "done", job_id: null, log: "", err: null,
+                   stages: [], stage_progress: false, upload_id: d.upload_id });
+          onDone?.(d.upload_id);
+          return;
+        }
+        if (!d?.job_id) return;
         const s = (d.status === "done" || d.status === "error") ? d.status : "running";
         setJob({ status: s as RemoteJob["status"], job_id: d.job_id, log: d.log ?? "", err: null,
                  stages: d.stages ?? [], stage_progress: d.stage_progress ?? false,
@@ -113,11 +125,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
           stages: s.stages ?? [], stage_progress: s.stage_progress ?? false, cpu: s.cpu ?? null,
         };
         if (s.status === "done" || s.status === "error") {
-          setJob((j) => {
-            const next = { ...j, status: s.status as "done" | "error", log: s.log, ...progress };
-            if (s.status === "done" && j.job_id && onDone) onDone(j.job_id);
-            return next;
-          });
+          setJob((j) => ({ ...j, status: s.status as "done" | "error", log: s.log, ...progress }));
         } else {
           setJob((j) => ({ ...j, log: s.log, ...progress }));
         }
@@ -133,10 +141,46 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     return () => { live = false; window.clearInterval(id); };
   }, [job.job_id, job.status, poll]);
 
+  // When the remote job finishes, download its results and upload to PRIDE Map's Analyse endpoint.
+  // This replaces the manual download-then-upload step the user would otherwise have to perform.
+  const uploadSeen = useRef<string | null>(null);
+  useEffect(() => {
+    // job.upload_id means results came from the transfer cache — already handled in mount/start.
+    // Deliberately NOT conditional on onDone: the transfer is what writes the cache entry, so
+    // skipping it when no callback is mounted would make every later run re-pay the whole search.
+    if (job.status !== "done" || !job.job_id || job.upload_id || uploadSeen.current === job.job_id) return;
+    uploadSeen.current = job.job_id;
+    const id = job.job_id;
+    setJob((j) => ({ ...j, status: "transferring" }));
+    (async () => {
+      try {
+        const r = await fetch(`${API}/dataset/${accession}/pipeline/remote/${id}/results`);
+        if (!r.ok) throw new Error(await describeHttpError(r));
+        const blob = await r.blob();
+        const fd = new FormData();
+        fd.append("file", blob, `${accession}_proteinGroups.txt`);
+        const u = await fetch(`${API}/analyse/inspect`, { method: "POST", body: fd });
+        if (!u.ok) throw new Error(await describeHttpError(u));
+        const { upload_id } = await u.json();
+        setJob((j) => ({ ...j, status: "done", upload_id }));
+        onDone?.(upload_id);
+        // Record in the server-side transfer cache so a repeat of this same selection skips the
+        // search entirely. Built with URLSearchParams because hand-joining produced "...complete&
+        // upload_id=" whenever runs was empty — no "?", so the id never arrived, the endpoint
+        // rejected the call, and nothing was ever cached.
+        const q = new URLSearchParams({ upload_id });
+        if (runs?.length) q.set("runs", runs.join(","));
+        fetch(`${API}/dataset/${accession}/pipeline/remote/complete?${q}`, { method: "POST" }).catch(() => {});
+      } catch (e) {
+        setJob((j) => ({ ...j, status: "error", err: `Could not load results into Analyse: ${String(e)}`, failure: "server" }));
+      }
+    })();
+  }, [job.status, job.job_id, job.upload_id, accession, runs, onDone]);
+
   // Clean up on unmount only after job finishes
   useEffect(() => {
     return () => {
-      if (job.job_id && job.status === "done" && seen.current !== job.job_id) {
+      if (job.job_id && (job.status === "done" || job.status === "transferring") && seen.current !== job.job_id) {
         seen.current = job.job_id;
         fetch(`${API}/dataset/${accession}/pipeline/remote/${job.job_id}`, { method: "DELETE" }).catch(() => {});
       }
@@ -169,8 +213,14 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
         setJob({ status: "error", job_id: null, log: "", err: await describeHttpError(r), failure: "server" });
         return;
       }
-      const { job_id } = await r.json();
-      setJob({ status: "running", job_id, log: "", err: null });
+      const data = await r.json();
+      if (data.upload_id && data.status === "done") {
+        // Transfer cache hit: skip MaxQuant entirely and go straight to the Analyse page.
+        setJob({ status: "done", job_id: null, log: "", err: null, upload_id: data.upload_id });
+        onDone?.(data.upload_id);
+        return;
+      }
+      setJob({ status: "running", job_id: data.job_id, log: "", err: null });
     } catch (e) {
       // fetch() rejects only on transport failure — server down, DNS, CORS, abort.
       setJob({ status: "error", job_id: null, log: "", err: String(e), failure: "network" });
@@ -190,7 +240,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
     finally { setStopping(false); }
   };
 
-  const busy = job.status === "submitting" || job.status === "running";
+  const busy = job.status === "submitting" || job.status === "running" || job.status === "transferring";
   const active = busy || job.status === "done" || job.status === "error" || job.status === "stopped";
 
   const STAGE_MARK: Record<StageState, string> = { pending: "○", running: "◐", done: "✓", failed: "✗" };
@@ -287,6 +337,7 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
               })()
         )}
         {job.status === "done" && <span className="pill bg-ok-soft text-ok">finished</span>}
+        {job.status === "transferring" && <span className="pill"><span className="spinner mr-1.5" />Loading results into Analyse…</span>}
         {/* "failed" and "stopped" are different events and now read differently. They shared the
             error state before, so a run the user stopped on purpose was reported as a failure. */}
         {job.status === "error" && (
@@ -368,11 +419,6 @@ export function RunRemote({ accession, runs, engineLabel = "search engine", outp
             </pre>
           </details>
         ),
-      )}
-      {job.status === "done" && job.job_id && (
-        <a className="btn btn-sm self-start" href={`${API}/dataset/${accession}/pipeline/remote/${job.job_id}/results`} download={`${accession}_${outputTable}`}>
-          Download {outputTable}
-        </a>
       )}
     </div>
   );
