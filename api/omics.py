@@ -1306,6 +1306,17 @@ def _download_sh(ctx: dict) -> str:
 
 PWIZ_IMAGE = "chambm/pwiz-skyline-i-agree-to-the-vendor-licenses"
 
+# Setting this to exactly "1" is how whoever runs the kit accepts MaxQuant's terms (README › Licence).
+# api/modal_runner.py checks the same name before a cloud job downloads anything.
+MAXQUANT_LICENCE_ENV = "MAXQUANT_ACCEPT_LICENSE"
+# Plain text: it is embedded in a double-quoted bash string, so no quotes, $ or backticks.
+MAXQUANT_LICENCE_REFUSAL = (
+    "MaxQuant licence not accepted. MaxQuant and the Thermo/Bruker readers it bundles are third-party "
+    "software under their own terms, not MIT - read them (README › Licence; "
+    "https://maxquant.org/download_asset/maxquant/latest), then set "
+    f"{MAXQUANT_LICENCE_ENV}=1 and re-run. On Modal, add it to the pridemap-mq-token secret."
+)
+
 
 def _mq_docker_lib(plan: dict) -> list[str]:
     """Which MaxQuant image this host should use, how to prove it runs, and how to build it if it must.
@@ -1498,6 +1509,15 @@ def preflight_sh(ctx: dict, plan: dict) -> str:
     if "maxquant" in engines:
         out += _mq_docker_lib(plan)
         out += [
+            # Checked before anything MaxQuant is pulled or built: a failed check stops preflight ahead of
+            # mq_provision. An env var, not a prompt, because the Modal container has no console.
+            "# ---- MaxQuant licence. MaxQuant and the Thermo/Bruker readers it bundles are third-party software.",
+            f'if [ "${{{MAXQUANT_LICENCE_ENV}:-}}" = "1" ]; then',
+            f'  ok "MaxQuant licence accepted (\\${MAXQUANT_LICENCE_ENV}=1)"',
+            "else",
+            f'  bad "{MAXQUANT_LICENCE_REFUSAL}"',
+            "fi",
+            "",
             # On non-amd64 hosts (arm64 macOS Apple Silicon, Linux Graviton/RPi, etc.) Docker must be able to
             # run linux/amd64 containers for the MaxQuant build step. Docker Desktop on macOS provides this via
             # Rosetta automatically; other runtimes (Colima, Rancher, OrbStack, bare Linux Docker) need QEMU

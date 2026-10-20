@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import modal
 import modal.exception
@@ -1119,6 +1119,23 @@ def _run_maxquant_search(
 
 # ----------------------------------------------------------------------------- orchestrator (lightweight)
 
+# The deployer accepts MaxQuant's terms (README › Licence) by adding this, set to exactly "1", to the
+# pridemap-mq-token secret. Same name the generated preflight.sh checks (api/omics.py).
+MAXQUANT_LICENCE_ENV = "MAXQUANT_ACCEPT_LICENSE"
+
+
+def _maxquant_licence_problem(env: Mapping[str, str]) -> str | None:
+    """Why this workspace may not run MaxQuant yet, or None once the licence has been accepted."""
+    if env.get(MAXQUANT_LICENCE_ENV) == "1":
+        return None
+    return (
+        f"MaxQuant licence not accepted: {MAXQUANT_LICENCE_ENV} is not 1 in this Modal workspace. "
+        "MaxQuant and the Thermo/Bruker readers it bundles are third-party software under their own "
+        "terms (README › Licence). Once you have read them: modal secret create pridemap-mq-token "
+        f"MQ_TOKEN=<token> {MAXQUANT_LICENCE_ENV}=1 --force"
+    )
+
+
 @app.function(
     image=image,
     volumes={VOLUME_MOUNT: vol},
@@ -1162,6 +1179,18 @@ def run_maxquant(kit_bytes: bytes, accession: str, force: bool = False) -> str:
     phases_path = job_dir / "phases.jsonl"
 
     _log(f"job_id={job_id}  accession={accession}")
+
+    # preflight.sh refuses this too, but on Modal it only runs after the full download and a search
+    # container cold start. The orchestrator carries the same secret, so it can answer up front.
+    licence_problem = _maxquant_licence_problem(os.environ)
+    if licence_problem:
+        _log(f"PREFLIGHT FAILED: {licence_problem}")
+        _write_progress(progress_path, "error", licence_problem)
+        _write_stage_event(phases_path, "stage_failed", "preflight", licence_problem)
+        _vol_commit()
+        # Raising, for the same reason as the download failure below: a return reads as "done".
+        raise RuntimeError(licence_problem)
+
     _log(f"phase 1/2: download (cheap container — {MAXQUANT_DOWNLOAD_CPU} CPU / {MAXQUANT_DOWNLOAD_MEMORY // 1024} GB)")
     _write_progress(progress_path, "running", "download phase starting")
     _write_stage_event(phases_path, "run_started", "", "pipeline start")
