@@ -53,6 +53,10 @@ RUNS = ["a.raw", "b.raw"]
 MODAL_VOLUME_FREE_KB = 2**53
 TWO_GB_FREE_KB = 2 * 1024 * 1024
 
+# The MaxQuant licence gate is its own concern (tests/test_maxquant_licence_gate.py). Accepted here so
+# the licence cannot decide a verdict that is meant to be about disk space.
+LICENCE_ACCEPTED = {"MAXQUANT_ACCEPT_LICENSE": "1"}
+
 
 def _generated() -> str:
     """The real generator output. No fixture script: a fixture would drift from the generator."""
@@ -90,6 +94,7 @@ def _run_with_df(tmp_path: pathlib.Path, free_kb: int, need_gb: int) -> tuple[in
         "PRIDEMAP_MIN_DISK_GB": str(need_gb),
         "MAXQUANT_CMD": "maxquant",
         "HOME": str(d),
+        **LICENCE_ACCEPTED,
     }
     proc = subprocess.run(
         ["bash", "preflight.sh"], cwd=d, env=env, capture_output=True, text=True, timeout=120
@@ -215,6 +220,7 @@ def test_an_unreadable_df_warns_rather_than_blocking_the_run(tmp_path):
             "PRIDEMAP_MIN_DISK_GB": "10",
             "MAXQUANT_CMD": "maxquant",
             "HOME": str(d),
+            **LICENCE_ACCEPTED,
         },
         capture_output=True,
         text=True,
