@@ -11,7 +11,7 @@ itself. The pipeline generates every script when you click **Download kit (zip)*
 | Docker Desktop (macOS) or Docker Engine (Linux) | 20+ |
 | ~10 GB free disk | ~1.4 GB for the image; the rest for raw files and results |
 | x86-64 or arm64 host | arm64 covered — see [Architecture notes](#architecture-notes) |
-| MaxQuant's licence | MaxQuant and the vendor readers it bundles are not part of PRIDE Map; the kit pulls them on first run. Read their terms first — see [Licence](../README.md#licence) |
+| MaxQuant's licence | MaxQuant and the vendor readers it bundles are not part of PRIDE Map; the kit pulls them on first run. Read their terms, then `export MAXQUANT_ACCEPT_LICENSE=1`; preflight refuses without it — see [Licence](../README.md#licence) |
 
 ## Quick start
 

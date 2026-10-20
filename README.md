@@ -287,6 +287,16 @@ MIT, for PRIDE Map's own code. PRIDE data is © EMBL‑EBI under its [terms of u
 
 PRIDE Map does not include any of the following. The generated search kit fetches them at run time, or uses a copy you installed, and each stays under its owner's terms. **If you run the kit, you are bound by those terms — read them first.**
 
+**Accepting MaxQuant's terms.** The kit will not fetch or run MaxQuant until you accept the MaxQuant licence and the Thermo and Bruker reader terms bundled with it, by setting `MAXQUANT_ACCEPT_LICENSE=1`. Without it, preflight fails before anything is pulled or downloaded. It is an environment variable, not a prompt, because a cloud container has no console. Where to set it:
+
+| Route | Set it in |
+|---|---|
+| Kit run by hand (`preflight.sh`, `run_all.sh`, the `pipeline.sh` one-liner) | the shell you run it from: `export MAXQUANT_ACCEPT_LICENSE=1` |
+| **Run locally** from the UI | the environment `./api.sh start` is launched from, because local runs inherit the API's environment |
+| **Run on cloud** (Modal) | the `pridemap-mq-token` Modal secret, once per workspace — see [maxquant-modal.md](docs/maxquant-modal.md#3-create-the-shared-secret). The job refuses before downloading anything if it is missing |
+
+Only the exact value `1` counts.
+
 | Component | Rights holder | How the kit gets it | Terms |
 |---|---|---|---|
 | MaxQuant | Max-Planck Institute of Biochemistry, Computational Systems Biochemistry | BioContainers image `quay.io/biocontainers/maxquant`, or your own install | [MaxQuant Freeware Software License Agreement](https://maxquant.org/download_asset/maxquant/latest) |

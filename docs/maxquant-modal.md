@@ -77,7 +77,7 @@ powered off between steps 2 and 5.**
 running jobs are managed. Worth opening now if you have not seen it before.
 - `uv`, and this repo cloned.
 - No Docker, no MaxQuant install, no particular CPU architecture.
-- Having read the third-party terms for MaxQuant and the vendor readers it bundles, including the limits on publishing the worker image and on charging — see [Licence](../README.md#licence).
+- Having read the third-party terms for MaxQuant and the vendor readers it bundles, including the limits on publishing the worker image and on charging — see [Licence](../README.md#licence). You accept them in step 3.
 
 
 
@@ -252,12 +252,17 @@ uvx modal profile list
 ### 3. Create the shared secret
 
 This token is what stops strangers from spending your compute — see
-[Security](#security--the-endpoint-is-public-by-default).
+[Security](#security--the-endpoint-is-public-by-default). The same secret carries your acceptance of
+MaxQuant's licence: without `MAXQUANT_ACCEPT_LICENSE=1` every job fails before it downloads anything —
+see [Licence](../README.md#licence).
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"   # generate one
-uvx modal secret create pridemap-mq-token MQ_TOKEN=<that-token>
+uvx modal secret create pridemap-mq-token MQ_TOKEN=<that-token> MAXQUANT_ACCEPT_LICENSE=1
 ```
+
+Already created the secret without it? Re-create it with both values and `--force`, then redeploy
+(step 4) so no warm container keeps the old environment.
 
 
 
