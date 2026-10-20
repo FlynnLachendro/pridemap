@@ -1404,9 +1404,10 @@ def _mq_docker_lib(plan: dict) -> list[str]:
 def preflight_sh(ctx: dict, plan: dict) -> str:
     """Check every tool and enough disk BEFORE the download, not four hours into it.
 
-    msconvert is provisioned automatically from the ProteoWizard image. MaxQuant and DIA-NN cannot be:
-    both require you to accept a licence and fetch the build yourself, so the most honest automation is to
-    detect them in seconds and say exactly what is missing and where to get it.
+    msconvert is provisioned automatically from the ProteoWizard image, and MaxQuant from the BioContainers
+    image (or the copy _mq_docker_lib rebuilds from it on the .NET Core 3.1 SDK base). Both are third-party
+    software under their own licences, not MIT — see README › Licence. DIA-NN cannot be provisioned: it
+    needs your own install, so preflight detects it and says where to get it.
     """
     need_convert = bool(plan.get("convert"))
     engines = {tr["engine"] for tr in (plan.get("tracks") or [])}

@@ -1,3 +1,7 @@
+# LICENSING: this image contains MaxQuant (MPI Biochemistry freeware licence) and the Thermo/Bruker
+# readers bundled with it. Build it where it runs — locally or in your Modal workspace — and NEVER
+# push it to a public registry: redistribution carries obligations under those licences. See README › Licence.
+#
 # Multi-stage build: copies MaxQuant assemblies from the biocontainers image onto the
 # .NET SDK base.  This is the same transformation that preflight.sh performs locally
 # (docker cp + docker build), expressed as a single reproducible Dockerfile so Modal

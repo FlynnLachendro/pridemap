@@ -13,6 +13,9 @@
 # exit 2  cannot validate here (no Docker, or the MaxQuant image is not provisioned yet)
 #
 # Structural invariants are checked without Docker by tests/test_mqpar_contract.py; run that first.
+#
+# Interoperability check only: contains no MaxQuant code and runs against a separately licensed copy
+# (MaxQuant freeware licence, see README › Licence). It reads parsed config values; it does not alter MaxQuant.
 set -euo pipefail
 
 MQPAR="${1:-}"
