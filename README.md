@@ -281,4 +281,20 @@ HANDOVER.html         the full handover (run, architecture, pitch, gotchas); man
 
 ## Licence
 
-MIT. PRIDE data is © EMBL‑EBI under its [terms of use](https://www.ebi.ac.uk/about/terms-of-use/).
+MIT, for PRIDE Map's own code. PRIDE data is © EMBL‑EBI under its [terms of use](https://www.ebi.ac.uk/about/terms-of-use/).
+
+### Third-party software (not covered by the MIT licence)
+
+PRIDE Map does not include any of the following. The generated search kit fetches them at run time, or uses a copy you installed, and each stays under its owner's terms. **If you run the kit, you are bound by those terms — read them first.**
+
+| Component | Rights holder | How the kit gets it | Terms |
+|---|---|---|---|
+| MaxQuant | Max-Planck Institute of Biochemistry, Computational Systems Biochemistry | BioContainers image `quay.io/biocontainers/maxquant`, or your own install | [MaxQuant Freeware Software License Agreement](https://maxquant.org/download_asset/maxquant/latest) |
+| Thermo RawFileReader | Thermo Fisher Scientific | bundled inside MaxQuant | [RawFileReader licence](https://github.com/thermofisherlsms/RawFileReader/blob/main/License.doc) |
+| Bruker TDF/BAF readers | Bruker Daltonics | bundled inside MaxQuant | Bruker SDK terms (no public link; distributed with MaxQuant) |
+| ProteoWizard msconvert, with vendor readers | ProteoWizard and the instrument vendors | Docker image `chambm/pwiz-skyline-i-agree-to-the-vendor-licenses` | [ProteoWizard licences](https://proteowizard.sourceforge.io/licenses.html) |
+| DIA-NN | its authors | your own install | the licence shipped with your DIA-NN download |
+
+- Do **not** push images the kit builds (`pridemap/maxquant:*`, the Modal worker image) to a public registry: they contain MaxQuant and vendor libraries, and redistributing those carries obligations under the licences above.
+- Searches must stay free of charge. Charging for anything that runs MaxQuant needs consent from the rights holders.
+- MaxQuant, Thermo Fisher, Orbitrap, Bruker and timsTOF are names or trademarks of their owners. They are used here only to describe compatibility, and do not imply endorsement.

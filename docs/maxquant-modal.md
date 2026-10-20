@@ -77,6 +77,7 @@ powered off between steps 2 and 5.**
 running jobs are managed. Worth opening now if you have not seen it before.
 - `uv`, and this repo cloned.
 - No Docker, no MaxQuant install, no particular CPU architecture.
+- Having read the third-party terms for MaxQuant and the vendor readers it bundles, including the limits on publishing the worker image and on charging — see [Licence](../README.md#licence).
 
 
 

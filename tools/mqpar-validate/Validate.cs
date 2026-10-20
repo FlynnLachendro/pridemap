@@ -4,6 +4,9 @@
 //
 // Each check corresponds to a failure observed on PXD046787, with the job number it aborted at.
 // Exit code 0 = all checks passed, 1 = at least one failed.
+//
+// Interoperability check only: contains no MaxQuant code and runs against a separately licensed copy
+// (MaxQuant freeware licence, see README › Licence). It reads parsed config values; it does not alter MaxQuant.
 using System;
 using System.Collections;
 using System.Linq;
